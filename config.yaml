@@ -1,0 +1,20 @@
+api:
+  # ⚠️ 실제 한국투자증권 API 문서에서 정확한 URL을 확인하여 수정하세요
+  base_url: "https://openapi.koreainvestment.com:9443"
+  websocket_url: "wss://openapi.koreainvestment.com:9443/ws"
+
+system:
+  max_reconnect_attempts: 5
+  order_retry_attempts: 3
+  token_refresh_margin_minutes: 5
+  cleanup_interval_hours: 6
+
+trading:
+  profit_margin: 0.03  # 3% 수익률
+  default_order_type: "00"  # 지정가
+  exchange_code: "NASD"  # 나스닥
+
+logging:
+  file_max_bytes: 10485760  # 10MB
+  backup_count: 5
+  debug_mode: false
