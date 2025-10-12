@@ -13,8 +13,15 @@ class WebSocketClient:
         self.processed_executions = set()
         self.last_cleanup = datetime.now()
         self.logger = logging.getLogger(__name__)
+        self.is_running = False
+        self.reconnect_attempts = 0
+        
+    def is_connected(self):
+        """WebSocket 연결 상태 확인"""
+        return self.ws is not None and self.is_running
 
     def cleanup_processed_executions(self):
+        """처리된 체결 키 정리"""
         if datetime.now() - self.last_cleanup > timedelta(hours=self.config['system']['cleanup_interval_hours']):
             count = len(self.processed_executions)
             self.processed_executions.clear()
@@ -22,78 +29,141 @@ class WebSocketClient:
             self.logger.info(f"🧹 처리된 체결 키 정리: {count}개 → 0개")
 
     def on_message(self, ws, message):
-        # 메시지 포맷 검증
+        """WebSocket 메시지 수신 처리"""
         try:
-            if '|' not in message: return
+            # 메시지 포맷 검증
+            if '|' not in message: 
+                return
+            
             parts = message.split('|')
-            if len(parts) < 4 or parts[1] != "H0STCNI0": return
+            if len(parts) < 4 or parts[1] != "H0STCNI0": 
+                return
+            
             body = parts[3].split('^')
-            if len(body) < 9: return
-
+            if len(body) < 9: 
+                return
+            
             ord_no, exec_no, ord_dvsn = body[4], body[5], body[6]
-            ticker = body[2]
-            quantity = int(float(body[7])) if body[7].isdigit() or body[7].replace('.','',1).isdigit() else 0
-            price = float(body[8]) if body[8].replace('.','',1).isdigit() else 0.0
-
-            key = f"{ord_no}-{exec_no}"
-            if key in self.processed_executions: return
-
-            if ord_dvsn == '02' and ticker and quantity > 0 and price > 0:
-                self.logger.info(f"🔔 신규 매수 체결: {ticker} {quantity}주 @ ${price:.2f}")
-                sell_price = price * (1 + self.config['trading']['profit_margin'])
-                success = self.order_callback(ticker, quantity, sell_price)
-                if success:
-                    self.processed_executions.add(key)
-                    self.cleanup_processed_executions()
-
+            ticker, exec_qty, exec_price = body[7], body[8], body[10]
+            
+            # 매수 주문만 처리 (00: 지정가 매수, 01: 시장가 매수)
+            if ord_dvsn not in ['00', '01']:
+                return
+            
+            # 중복 처리 방지
+            execution_key = f"{ord_no}_{exec_no}"
+            if execution_key in self.processed_executions:
+                return
+            
+            self.processed_executions.add(execution_key)
+            
+            execution_data = {
+                'ticker': ticker,
+                'quantity': int(exec_qty),
+                'price': float(exec_price),
+                'order_number': ord_no,
+                'execution_number': exec_no,
+                'timestamp': datetime.now().isoformat()
+            }
+            
+            self.logger.info(f"📈 매수 체결: {ticker} {exec_qty}주 @${exec_price}")
+            
+            # 주문 콜백 호출
+            if self.order_callback:
+                self.order_callback(execution_data)
+                
+            # 메모리 정리
+            self.cleanup_processed_executions()
+            
         except Exception as e:
             self.logger.error(f"메시지 처리 오류: {e}")
 
     def on_error(self, ws, error):
-        self.logger.error(f"WebSocket 오류: {error}")
+        """WebSocket 오류 처리"""
+        self.logger.error(f"🔌 WebSocket 오류: {error}")
+        self.is_running = False
 
     def on_close(self, ws, close_status_code, close_msg):
-        self.logger.warning(f"WebSocket 연결 종료: {close_status_code} {close_msg}")
+        """WebSocket 연결 종료 처리"""
+        self.logger.warning(f"🔌 WebSocket 연결 종료: {close_status_code} - {close_msg}")
+        self.is_running = False
 
     def on_open(self, ws):
-        self.logger.info("WebSocket 연결 성공, 체결 통보 구독 요청 중...")
-        token = self.token_manager.get_access_token()
-        if not token:
-            self.logger.error("토큰이 유효하지 않아 구독 중단")
-            ws.close()
-            return
-
-        req = {
-            "header": {
-                "authorization": f"Bearer {token}",
-                "appkey": self.config['api_key'],
-                "appsecret": self.config['api_secret'],
-                "tr_type": "1",
-                "custtype": "P"
-            },
-            "body": {
-                "input": {
-                    "tr_id": "H0STCNI0",
-                    "tr_key": f"{self.config['cano']}-{self.config['acnt_prdt_cd']}"
+        """WebSocket 연결 성공 처리"""
+        try:
+            self.logger.info("✅ WebSocket 연결 성공")
+            self.is_running = True
+            self.reconnect_attempts = 0  # 연결 성공 시 재시도 카운터 리셋
+            
+            # 실시간 체결 데이터 구독 요청
+            subscribe_message = json.dumps({
+                "header": {
+                    "approval_key": self.token_manager.get_websocket_approval_key(),
+                    "custtype": "P",
+                    "tr_type": "1",
+                    "content-type": "utf-8"
+                },
+                "body": {
+                    "input": {
+                        "tr_id": "H0STCNI0",
+                        "tr_key": self.config['account_no']
+                    }
                 }
-            }
-        }
-        ws.send(json.dumps(req))
-        self.logger.info("✅ 구독 요청 전송 완료")
+            })
+            
+            ws.send(subscribe_message)
+            self.logger.info("📡 체결 데이터 구독 요청 완료")
+            
+        except Exception as e:
+            self.logger.error(f"WebSocket 초기화 오류: {e}")
+            self.is_running = False
 
     def connect(self):
-        url = self.config['api']['websocket_url']
-        self.ws = websocket.WebSocketApp(
-            url,
-            on_open=self.on_open,
-            on_message=self.on_message,
-            on_error=self.on_error,
-            on_close=self.on_close
-        )
-        # Ping/Pong 유지
-        self.ws.run_forever(ping_interval=30, ping_timeout=10)
+        """WebSocket 연결 시작"""
+        try:
+            self.logger.info("🔌 WebSocket 연결을 시작합니다...")
+            
+            # 기존 연결이 있으면 정리
+            if self.ws:
+                try:
+                    self.ws.close()
+                except:
+                    pass
+                self.ws = None
+            
+            # WebSocket 연결 설정
+            websocket_url = self.config['api']['websocket_url']
+            
+            # WebSocket 클라이언트 생성 및 연결
+            self.ws = websocket.WebSocketApp(
+                websocket_url,
+                on_message=self.on_message,
+                on_error=self.on_error,
+                on_close=self.on_close,
+                on_open=self.on_open
+            )
+            
+            # 연결 실행 (blocking call)
+            self.ws.run_forever(
+                ping_interval=30,  # 30초마다 ping
+                ping_timeout=10,   # ping 타임아웃 10초
+                reconnect=5        # 5초 간격으로 재연결 시도
+            )
+            
+        except Exception as e:
+            self.logger.error(f"WebSocket 연결 실패: {e}")
+            self.is_running = False
+            raise
 
-    def close(self):
-        if self.ws:
-            self.ws.close()
-            self.logger.info("WebSocket 연결 종료 요청 완료")
+    def disconnect(self):
+        """WebSocket 연결 종료"""
+        try:
+            self.logger.info("🔌 WebSocket 연결을 종료합니다...")
+            self.is_running = False
+            
+            if self.ws:
+                self.ws.close()
+                self.ws = None
+                
+        except Exception as e:
+            self.logger.error(f"WebSocket 종료 오류: {e}")

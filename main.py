@@ -3,145 +3,195 @@ import time
 import signal
 import sys
 import argparse
+import threading
 from logging.handlers import RotatingFileHandler
 from config import load_config
 from auth import TokenManager
 from order import place_sell_order
 from websocket_client import WebSocketClient
 from telegram_bot import TelegramBot
-import threading
+
+# 전역 변수로 정상 종료 플래그 추가
+shutdown_requested = False
+ws_client = None
+telegram_bot = None
 
 def setup_logging(debug=False):
     """로깅 설정"""
     log_level = logging.DEBUG if debug else logging.INFO
-    
     formatter = logging.Formatter(
         '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
     )
-    
+
     file_handler = RotatingFileHandler(
         'trading.log', maxBytes=10*1024*1024, backupCount=5, encoding='utf-8'
     )
     file_handler.setLevel(log_level)
     file_handler.setFormatter(formatter)
-    
+
     console_handler = logging.StreamHandler()
     console_handler.setLevel(log_level)
     console_handler.setFormatter(formatter)
-    
+
     root_logger = logging.getLogger()
     root_logger.setLevel(log_level)
     root_logger.addHandler(file_handler)
     root_logger.addHandler(console_handler)
 
 def signal_handler(signum, frame):
-    """프로그램 종료 신호 처리"""
-    logging.info("프로그램 종료 신호를 받았습니다. 정리 중...")
+    """시그널 핸들러 - 안전한 종료를 위해 개선"""
+    global shutdown_requested, ws_client, telegram_bot
+    
+    logger = logging.getLogger(__name__)
+    logger.info(f"종료 신호 수신 (Signal: {signum}). 안전한 종료를 시작합니다...")
+    
+    shutdown_requested = True
+    
+    # 텔레그램 종료 알림
+    if telegram_bot:
+        try:
+            telegram_bot.send_shutdown_notification()
+        except Exception as e:
+            logger.error(f"종료 알림 전송 실패: {e}")
+    
+    # WebSocket 연결 정리
+    if ws_client and ws_client.ws:
+        try:
+            ws_client.ws.close()
+        except Exception as e:
+            logger.error(f"WebSocket 종료 오류: {e}")
+    
+    logger.info("시스템이 안전하게 종료되었습니다.")
     sys.exit(0)
 
 def main():
-    parser = argparse.ArgumentParser(description='한국투자증권 자동 매도 시스템')
+    global ws_client, telegram_bot, shutdown_requested
+    
+    parser = argparse.ArgumentParser(description='자동 매도 시스템')
+    parser.add_argument('--mode', default='development', choices=['development', 'production'],
+                        help='실행 모드 (development/production)')
     parser.add_argument('--debug', action='store_true', help='디버그 모드 활성화')
-    parser.add_argument('--mode', choices=['development', 'production'], 
-                       default='development', help='실행 모드')
+    
     args = parser.parse_args()
     
     setup_logging(args.debug)
+    logger = logging.getLogger(__name__)
     
+    # 신호 처리 등록
     signal.signal(signal.SIGINT, signal_handler)
     signal.signal(signal.SIGTERM, signal_handler)
     
-    logging.info("=== 한국투자증권 자동 매도 시스템 시작 ===")
-    logging.info(f"실행 모드: {args.mode}")
-    
     try:
+        # 설정 로드
         config = load_config(args.mode)
+        logger.info(f"🚀 자동 매도 시스템 시작 - 모드: {args.mode}")
         
-        # Telegram 봇 초기화
-        telegram_bot = None
-        if config.get('telegram', {}).get('bot_token') and config.get('telegram', {}).get('chat_id'):
+        # TokenManager 초기화
+        token_manager = TokenManager(config)
+        
+        # TelegramBot 초기화
+        if config.get('telegram_bot_token') and config.get('telegram_chat_id'):
             telegram_bot = TelegramBot(
-                config['telegram']['bot_token'],
-                config['telegram']['chat_id']
+                config['telegram_bot_token'], 
+                config['telegram_chat_id']
             )
+            
             # 시작 알림 전송
             telegram_bot.send_startup_notification()
             
-            # 별도 스레드에서 봇 폴링 시작
-            bot_thread = threading.Thread(target=telegram_bot.start_polling, daemon=True)
-            bot_thread.start()
-            logging.info("Telegram 봇이 시작되었습니다.")
+            # 텔레그램 봇 폴링을 별도 스레드에서 실행
+            def start_telegram_polling():
+                try:
+                    telegram_bot.start_polling()
+                except Exception as e:
+                    logger.error(f"텔레그램 봇 폴링 오류: {e}")
+            
+            telegram_thread = threading.Thread(target=start_telegram_polling, daemon=True)
+            telegram_thread.start()
+            logger.info("📱 텔레그램 봇이 시작되었습니다.")
         else:
-            logging.warning("Telegram 설정이 없어 봇 기능이 비활성화됩니다.")
+            logger.warning("⚠️ 텔레그램 설정이 없어 알림 기능이 비활성화됩니다.")
         
-        token_manager = TokenManager(config)
-        initial_token = token_manager.get_access_token()
-        if not initial_token:
-            error_msg = "초기 토큰 발급에 실패했습니다."
-            logging.error(error_msg)
-            if telegram_bot:
-                telegram_bot.send_error_notification(error_msg)
-            return
+        # 주문 콜백 함수
+        def order_callback(execution_data):
+            try:
+                logger.info(f"📈 매수 체결 감지: {execution_data}")
+                result = place_sell_order(config, token_manager, execution_data, telegram_bot)
+                if result:
+                    logger.info("✅ 매도 주문 성공")
+                else:
+                    logger.error("❌ 매도 주문 실패")
+            except Exception as e:
+                logger.error(f"주문 처리 중 오류: {e}")
         
-        def order_callback(ticker, quantity, sell_price):
-            # 매수 감지 알림
-            if telegram_bot:
-                telegram_bot.send_buy_notification(ticker, quantity, sell_price / 1.03)
-            
-            # 매도 주문 실행
-            success = place_sell_order(config, token_manager, ticker, quantity, sell_price)
-            
-            # 매도 결과 알림
-            if telegram_bot:
-                telegram_bot.send_sell_notification(ticker, quantity, sell_price, success)
-            
-            return success
-        
+        # WebSocket 클라이언트 초기화 및 실행
         ws_client = WebSocketClient(config, token_manager, order_callback)
         
+        # 개선된 재연결 로직
         max_reconnect_attempts = config['system']['max_reconnect_attempts']
+        reconnect_delay = config['system']['reconnect_delay']
         reconnect_attempts = 0
         
-        while reconnect_attempts < max_reconnect_attempts:
+        while not shutdown_requested and reconnect_attempts < max_reconnect_attempts:
             try:
-                logging.info("WebSocket 연결을 시작합니다...")
+                logger.info(f"🔌 WebSocket 연결 시도 ({reconnect_attempts + 1}/{max_reconnect_attempts})")
                 ws_client.connect()
                 
-            except KeyboardInterrupt:
-                logging.info("사용자에 의해 프로그램이 중단되었습니다.")
-                break
-            except Exception as e:
-                error_msg = f"WebSocket 연결 중 예외 발생: {e}"
-                logging.error(error_msg)
-                if telegram_bot:
-                    telegram_bot.send_error_notification(error_msg)
-            
-            reconnect_attempts += 1
-            if reconnect_attempts < max_reconnect_attempts:
-                delay = min(10 * (2 ** reconnect_attempts), 60)
-                logging.info(f"재연결 시도 {reconnect_attempts}/{max_reconnect_attempts} - {delay}초 후 재시도")
-                time.sleep(delay)
+                # 연결 성공 시 재시도 카운터 리셋
+                reconnect_attempts = 0
                 
-                token_manager.get_access_token()
+                # WebSocket 연결이 끊어질 때까지 대기
+                while not shutdown_requested and ws_client.is_connected():
+                    time.sleep(1)
+                
+                if shutdown_requested:
+                    break
+                    
+                logger.warning("🔌 WebSocket 연결이 끊어졌습니다.")
+                
+            except Exception as e:
+                logger.error(f"❌ WebSocket 연결 오류: {e}")
+            
+            if shutdown_requested:
+                break
+                
+            reconnect_attempts += 1
+            
+            if reconnect_attempts < max_reconnect_attempts:
+                logger.info(f"⏳ {reconnect_delay}초 후 재연결 시도...")
+                time.sleep(reconnect_delay)
             else:
-                critical_msg = "최대 재연결 횟수를 초과하여 프로그램을 종료합니다."
-                logging.critical(critical_msg)
+                # 최대 재연결 횟수 초과 시 안전한 종료
+                error_msg = f"❌ 최대 재연결 횟수({max_reconnect_attempts})를 초과했습니다."
+                logger.critical(error_msg)
+                
                 if telegram_bot:
-                    telegram_bot.send_error_notification(critical_msg)
+                    try:
+                        telegram_bot.send_error_notification(
+                            f"시스템 재연결 실패\n\n{error_msg}\n\n시스템이 안전하게 종료됩니다."
+                        )
+                    except Exception as e:
+                        logger.error(f"오류 알림 전송 실패: {e}")
+                
+                # 안전한 종료를 위해 일정 시간 대기
+                graceful_timeout = config['system'].get('graceful_shutdown_timeout', 30)
+                logger.info(f"⏳ {graceful_timeout}초 후 시스템을 종료합니다...")
+                time.sleep(graceful_timeout)
                 break
         
-        ws_client.close()
+        logger.info("🛑 자동 매도 시스템이 종료되었습니다.")
         
+    except KeyboardInterrupt:
+        logger.info("👤 사용자에 의한 종료")
     except Exception as e:
-        critical_msg = f"프로그램 실행 중 치명적 오류 발생: {e}"
-        logging.critical(critical_msg)
+        error_msg = f"시스템 오류: {e}"
+        logger.critical(error_msg)
         if telegram_bot:
-            telegram_bot.send_error_notification(critical_msg)
-        return 1
-    
-    logging.info("프로그램이 정상적으로 종료되었습니다.")
-    return 0
+            try:
+                telegram_bot.send_error_notification(error_msg)
+            except:
+                pass
+        sys.exit(1)
 
 if __name__ == "__main__":
-    exit_code = main()
-    sys.exit(exit_code)
+    main()

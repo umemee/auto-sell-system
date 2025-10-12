@@ -4,17 +4,19 @@ api:
   websocket_url: "wss://openapi.koreainvestment.com:9443/ws"
 
 system:
-  max_reconnect_attempts: 5
+  max_reconnect_attempts: 15        # 5에서 15로 증가
+  reconnect_delay: 60               # 재연결 대기시간 60초
   order_retry_attempts: 3
   token_refresh_margin_minutes: 5
   cleanup_interval_hours: 6
+  graceful_shutdown_timeout: 30     # 안전한 종료 대기시간
 
 trading:
-  profit_margin: 0.03  # 3% 수익률
-  default_order_type: "00"  # 지정가
-  exchange_code: "NASD"  # 나스닥
+  profit_margin: 0.03 # 3% 수익률
+  default_order_type: "00" # 지정가
+  exchange_code: "NASD" # 나스닥
 
 logging:
-  file_max_bytes: 10485760  # 10MB
+  file_max_bytes: 10485760 # 10MB
   backup_count: 5
   debug_mode: false
