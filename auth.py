@@ -1,7 +1,6 @@
 import requests
 import json
 import logging
-import time
 from datetime import datetime, timedelta
 
 class TokenManager:
@@ -9,48 +8,39 @@ class TokenManager:
         self.config = config
         self.access_token = None
         self.token_expires_at = None
-        self.url_base = config['api']['base_url']
-        
+
     def get_access_token(self, force_refresh=False):
-        """접근 토큰 발급 및 갱신"""
-        if not force_refresh and self.access_token and self.token_expires_at:
-            if datetime.now() < self.token_expires_at - timedelta(minutes=5):
-                return self.access_token
-        
-        max_retries = 3
-        for attempt in range(max_retries):
-            try:
-                headers = {"content-type": "application/json"}
-                body = {
-                    "grant_type": "client_credentials",
-                    "appkey": self.config['api_key'],
-                    "appsecret": self.config['api_secret']
-                }
-                
-                url = f"{self.url_base}/oauth2/tokenP"
-                response = requests.post(url, headers=headers, data=json.dumps(body), timeout=10)
-                response.raise_for_status()
-                
-                token_data = response.json()
-                self.access_token = token_data["access_token"]
-                
-                # 토큰 만료 시간 설정 (기본 1시간)
-                expires_in = token_data.get("expires_in", 3600)
-                self.token_expires_at = datetime.now() + timedelta(seconds=expires_in)
-                
-                logging.info("✅ API 접근 토큰 발급/갱신 성공!")
-                return self.access_token
-                
-            except requests.exceptions.RequestException as e:
-                logging.warning(f"토큰 발급 시도 {attempt + 1}/{max_retries} 실패: {e}")
-                if attempt < max_retries - 1:
-                    time.sleep(2 ** attempt)  # 지수적 백오프
-                else:
-                    logging.error("토큰 발급 최대 재시도 횟수 초과")
-                    return None
-            except Exception as e:
-                logging.error(f"토큰 발급 중 예외 발생: {e}")
-                return None
-        
-        return None
-        
+        """
+        최초 발급 후 만료 10분 전까진 기존 토큰을 재사용.
+        오직 최초 실행 시와 만료 직전(10분 미만 남았을 때)만 새 토큰 발급.
+        """
+        now = datetime.now()
+        if (not force_refresh 
+            and self.access_token 
+            and self.token_expires_at 
+            and now < self.token_expires_at - timedelta(minutes=10)):
+            return self.access_token
+
+        # 토큰 발급/갱신
+        logging.info("🔑 토큰 발급/갱신 요청")
+        url = f"{self.config['api']['base_url']}/oauth2/tokenP"
+        body = {
+            "grant_type": "client_credentials",
+            "appkey": self.config['api_key'],
+            "appsecret": self.config['api_secret']
+        }
+        res = requests.post(
+            url,
+            headers={"Content-Type": "application/json"},
+            data=json.dumps(body),
+            timeout=10
+        )
+        res.raise_for_status()
+        data = res.json()
+        self.access_token = data["access_token"]
+
+        # expires_in이 없으면 기본 86400초(24시간) 사용
+        expires_in = data.get("expires_in", 86400)
+        self.token_expires_at = now + timedelta(seconds=expires_in)
+        logging.info(f"✅ 토큰 발급 완료 (만료: {self.token_expires_at})")
+        return self.access_token
