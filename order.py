@@ -10,25 +10,16 @@ from pytz import timezone
 logger = logging.getLogger(__name__)
 
 def is_extended_hours(trading_timezone='US/Eastern'):
-    """
-    미국 동부시간 기준으로
-    정규장(09:30–16:00 ET) 외 시간이면 True 반환.
-    """
     tz = timezone(trading_timezone)
     now = datetime.now(tz).time()
     regular_start = dtime(9, 30)
     regular_end = dtime(16, 0)
     return not (regular_start <= now <= regular_end)
 
-def place_sell_order_config(token_manager, ticker, quantity, price, config):
-    """
-    한국투자증권 해외주식 자동 매도 주문.
-    - 프리/애프터마켓 자동 판별 → EXT_HOURS_YN 필드 설정
-    - 거래소 코드, 주문유형(config) 반영
-    """
+def place_sell_order(config, token_manager, ticker, quantity, price):
     max_retries = config['system'].get('order_retry_attempts', 3)
-    exch_code = config['trading']['exchange_code']        # e.g. 'NASD'
-    default_ord_type = config['trading']['default_order_type']  # '00'(지정가) or '01'(시장가)
+    exch_code = config['trading']['exchange_code']
+    default_ord_type = config['trading']['default_order_type']
 
     extended = is_extended_hours(config.get('trading_timezone', 'US/Eastern'))
 
@@ -62,7 +53,7 @@ def place_sell_order_config(token_manager, ticker, quantity, price, config):
                 'ORD_DVSN': default_ord_type,
                 'ORD_QTY': str(quantity),
                 'OVRS_ORD_UNPR': str(rounded_price),
-                'SLL_BUY_DVSN_CD': '01',        # 매도
+                'SLL_BUY_DVSN_CD': '01',
                 'EXT_HOURS_YN': 'Y' if extended else 'N'
             }
 
