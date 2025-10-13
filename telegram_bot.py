@@ -107,9 +107,29 @@ class TelegramBot:
             self.logger.error(f"업데이트 가져오기 오류: {e}")
             return []
 
-    def handle_command(self, command, chat_id):
-        """명령어 처리"""
+    def clear_message_queue(self):
+        """메시지 큐 정리 - 시작 시 이전 메시지들을 모두 무시"""
         try:
+            updates = self.get_updates()
+            if updates:
+                latest_update_id = updates[-1]['update_id']
+                # 모든 이전 메시지를 읽음 처리
+                self.get_updates(offset=latest_update_id + 1)
+                self.logger.info(f"텔레그램 메시지 큐 정리: {len(updates)}개 메시지 무시됨")
+            return True
+        except Exception as e:
+            self.logger.error(f"메시지 큐 정리 오류: {e}")
+            return False
+
+    def handle_command(self, command, chat_id, message_date):
+        """명령어 처리 - 메시지 시간 검증 추가"""
+        try:
+            # 메시지가 5분 이상 된 것은 무시 (시스템 시작 전 메시지)
+            current_time = datetime.now().timestamp()
+            if current_time - message_date > 300:  # 5분 = 300초
+                self.logger.info(f"오래된 명령어 무시: {command} (나이: {current_time - message_date:.0f}초)")
+                return
+            
             if command == '/start':
                 message = """
 🤖 <b>자동 매도 시스템 봇</b>
@@ -185,10 +205,15 @@ class TelegramBot:
             self.logger.error(f"명령어 처리 오류: {e}")
 
     def start_polling(self):
-        """텔레그램 봇 폴링 시작"""
+        """텔레그램 봇 폴링 시작 - 개선된 버전"""
         self.logger.info("텔레그램 봇 폴링을 시작합니다...")
+        
+        # 시작 시 메시지 큐 정리
+        self.clear_message_queue()
+        
         self.is_running = True
         offset = None
+        start_time = datetime.now().timestamp()
         
         while self.is_running:
             try:
@@ -199,10 +224,16 @@ class TelegramBot:
                         if 'message' in update:
                             message = update['message']
                             chat_id = message['chat']['id']
+                            message_date = message['date']
                             
                             # 권한 확인 (설정된 chat_id와 일치하는 경우만 처리)
                             if str(chat_id) != str(self.chat_id):
                                 self.logger.warning(f"권한이 없는 사용자의 메시지 무시: {chat_id}")
+                                continue
+                            
+                            # 시스템 시작 이전 메시지는 무시
+                            if message_date < start_time:
+                                self.logger.debug(f"시스템 시작 이전 메시지 무시: {message.get('text', '')}")
                                 continue
                             
                             if 'text' in message:
@@ -210,7 +241,7 @@ class TelegramBot:
                                 self.logger.info(f"텔레그램 명령어 수신: {text}")
                                 
                                 if text.startswith('/'):
-                                    self.handle_command(text, chat_id)
+                                    self.handle_command(text, chat_id, message_date)
                         
                         offset = update['update_id'] + 1
                         
@@ -221,7 +252,7 @@ class TelegramBot:
                 # 폴링 간격
                 if self.is_running:
                     import time
-                    time.sleep(1)
+                    time.sleep(2)  # 1초에서 2초로 증가
                     
             except Exception as e:
                 self.logger.error(f"폴링 오류: {e}")
