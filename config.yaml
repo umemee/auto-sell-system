@@ -1,22 +1,45 @@
+# config.yaml - AWS 최적화된 설정
+
 api:
   # ⚠️ 실제 한국투자증권 API 문서에서 정확한 URL을 확인하여 수정하세요
   base_url: "https://openapi.koreainvestment.com:9443"
   websocket_url: "wss://openapi.koreainvestment.com:9443/ws"
 
 system:
-  max_reconnect_attempts: 15        # 5에서 15로 증가
-  reconnect_delay: 60               # 재연결 대기시간 60초
+  # AWS 최적화: 재연결 시도 횟수 감소 (15 → 10)
+  max_reconnect_attempts: 10
+  # AWS 최적화: 지수적 백오프 사용 (기본 2초부터 시작)
+  base_reconnect_delay: 2  # 새로 추가: 지수적 백오프 시작점
+  reconnect_delay: 60  # 최대 재연결 대기시간 (사용되지 않음)
   order_retry_attempts: 3
   token_refresh_margin_minutes: 5
   cleanup_interval_hours: 6
-  graceful_shutdown_timeout: 30     # 안전한 종료 대기시간
+  graceful_shutdown_timeout: 30
 
 trading:
-  profit_margin: 0.03 # 3% 수익률
-  default_order_type: "00" # 지정가
-  exchange_code: "NASD" # 나스닥
+  profit_margin: 0.03  # 3% 수익률
+  default_order_type: "00"  # 지정가
+  exchange_code: "NASD"  # 나스닥
+  timezone: "US/Eastern"  # 거래 시간대
+
+# AWS 최적화: 텔레그램 설정
+telegram:
+  # AWS 최적화: 폴링 간격 증가 (2초 → 10초)
+  polling_interval: 10  # 초 단위
+  error_polling_interval: 30  # 오류 시 대기 시간
+  timeout: 10  # HTTP 요청 타임아웃
 
 logging:
-  file_max_bytes: 10485760 # 10MB
+  file_max_bytes: 10485760  # 10MB
   backup_count: 5
+  # AWS 최적화: 운영 환경에서는 debug 비활성화
   debug_mode: false
+  # AWS 최적화: 로그 레벨 제한
+  production_log_level: "INFO"  # 운영 환경 로그 레벨
+
+# AWS 최적화: 웹 인터페이스 설정
+web:
+  # 운영 환경에서는 웹 인터페이스 비활성화
+  enable_in_production: false
+  port: 5000
+  host: "0.0.0.0"

@@ -3,3 +3,4 @@ websocket-client>=1.6.0
 PyYAML>=6.0
 python-dotenv>=1.0.0
 flask>=2.3.0
+pytz>=2023.3
