@@ -8,7 +8,6 @@ def load_config(mode='development'):
     try:
         # 환경변수 로드
         load_dotenv()
-        
         if mode == 'production':
             if os.path.exists('.env.production'):
                 load_dotenv('.env.production', override=True)
@@ -23,7 +22,6 @@ def load_config(mode='development'):
         # 필수 환경변수 확인
         required_env_vars = ['KIS_APP_KEY', 'KIS_APP_SECRET', 'KIS_ACCOUNT_NO']
         missing_vars = []
-        
         for var in required_env_vars:
             value = os.getenv(var)
             if not value or value.strip() == '':
@@ -37,18 +35,18 @@ def load_config(mode='development'):
         config['api_secret'] = os.getenv('KIS_APP_SECRET').strip()
         config['account_no'] = os.getenv('KIS_ACCOUNT_NO').strip()
         
-        # Telegram 설정 추가
+        # Telegram 설정 추가 (수정된 부분)
         telegram_bot_token = os.getenv('TELEGRAM_BOT_TOKEN')
         telegram_chat_id = os.getenv('TELEGRAM_CHAT_ID')
         
         if telegram_bot_token and telegram_chat_id:
-            config['telegram'] = {
-                'bot_token': telegram_bot_token.strip(),
-                'chat_id': telegram_chat_id.strip()
-            }
+            # 기존 config['telegram'] 방식이 아닌 직접 config에 추가
+            config['telegram_bot_token'] = telegram_bot_token.strip()
+            config['telegram_chat_id'] = telegram_chat_id.strip()
             logging.info("Telegram 설정이 로드되었습니다.")
         else:
-            config['telegram'] = {}
+            config['telegram_bot_token'] = None
+            config['telegram_chat_id'] = None
             logging.info("Telegram 설정이 없습니다. 봇 기능이 비활성화됩니다.")
         
         # 계좌번호 분리
