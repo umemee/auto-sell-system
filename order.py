@@ -1,35 +1,221 @@
-# order.py - 수정된 전체 코드 (config 구조 호환성 수정)
+# order_monitor.py - 프리마켓용 REST API 폴링 모니터링 시스템
 
 import requests
 import json
 import logging
 import time
+import threading
 from datetime import datetime, time as dtime
 from pytz import timezone
 
-# 한국투자증권 API 에러 코드 매핑 (더 완성된 버전)
-ORDER_ERROR_CODES = {
-    # 일반적인 주문 오류
-    '40310000': '주문수량이 부족합니다',
-    '40320000': '주문가격이 올바르지 않습니다',
-    '40330000': '주문 가능 수량을 초과했습니다',
-    '40340000': '매수 주문이 불가능한 종목입니다',
-    '40350000': '계좌 잔고가 부족합니다',
-    '40360000': '주문 가능 시간이 아닙니다',
-    '40370000': '종목 정보를 찾을 수 없습니다',
-    '40380000': '거래 정지 종목입니다',
-    '40390000': '단가 오류입니다',
-    # 인증 관련 오류
-    '40013': '접근토큰이 만료되었습니다',
-    '40014': '접근토큰이 유효하지 않습니다',
-    '40015': 'API 키가 유효하지 않습니다',
-    # 계좌 관련 오류
-    '40020': '계좌번호가 유효하지 않습니다',
-    '40021': '계좌 접근 권한이 없습니다',
-    # 시스템 오류
-    '50000': '시스템 내부 오류입니다',
-    '50001': '일시적인 시스템 오류입니다'
-}
+logger = logging.getLogger(__name__)
+
+class OrderMonitor:
+    """프리마켓/애프터마켓용 주문 체결 모니터링 시스템"""
+    
+    def __init__(self, config, token_manager, telegram_bot=None):
+        self.config = config
+        self.token_manager = token_manager
+        self.telegram_bot = telegram_bot
+        self.monitoring_orders = {}  # {order_no: order_info}
+        self.is_running = False
+        self.monitor_thread = None
+        
+    def add_order_to_monitor(self, order_no, ticker, quantity, buy_price):
+        """모니터링할 주문 추가"""
+        order_info = {
+            'ticker': ticker,
+            'quantity': quantity,
+            'buy_price': buy_price,
+            'created_at': datetime.now(),
+            'attempts': 0,
+            'max_attempts': 360  # 30분 (5초 간격 × 360회)
+        }
+        self.monitoring_orders[order_no] = order_info
+        logger.info(f"📝 주문 모니터링 등록: {order_no} ({ticker} {quantity}주 @ ${buy_price})")
+    
+    def check_order_status(self, order_no):
+        """개별 주문 상태 확인"""
+        try:
+            url = f"{self.config['api']['base_url']}/uapi/overseas-stock/v1/trading/inquire-nccs"
+            
+            # 토큰 확인 및 갱신
+            token = self.token_manager.get_access_token()
+            if not token:
+                logger.error("유효한 토큰을 가져올 수 없습니다.")
+                return None
+            
+            headers = {
+                "Content-Type": "application/json",
+                "authorization": f"Bearer {token}",
+                "appkey": self.config['api_key'],
+                "appsecret": self.config['api_secret'],
+                "tr_id": "JTTT3010R"
+            }
+            
+            # 오늘 날짜 기준 조회
+            today = datetime.now().strftime("%Y%m%d")
+            params = {
+                "CANO": self.config['cano'],
+                "ACNT_PRDT_CD": self.config['acnt_prdt_cd'],
+                "ORD_STRT_DT": today,
+                "ORD_END_DT": today,
+                "CTX_AREA_FK100": "",
+                "CTX_AREA_NK100": ""
+            }
+            
+            response = requests.get(url, headers=headers, params=params, timeout=10)
+            response.raise_for_status()
+            
+            data = response.json()
+            if data.get("rt_cd") != "0":
+                logger.error(f"주문 조회 실패: {data.get('msg1', 'Unknown error')}")
+                return None
+            
+            # 해당 주문번호 찾기
+            for item in data.get("output", []):
+                if item.get("odno") == order_no:  # 주문번호 매칭
+                    ord_status = item.get("ord_stcd", "")
+                    ccld_qty = item.get("ccld_qty", "0")
+                    ccld_unpr = item.get("ccld_unpr", "0")
+                    
+                    return {
+                        'status': ord_status,
+                        'filled_qty': int(ccld_qty) if ccld_qty.isdigit() else 0,
+                        'filled_price': float(ccld_unpr) if ccld_unpr.replace('.', '').isdigit() else 0.0
+                    }
+            
+            return None
+            
+        except requests.exceptions.Timeout:
+            logger.warning(f"주문 상태 조회 타임아웃: {order_no}")
+            return None
+        except requests.exceptions.RequestException as e:
+            logger.error(f"주문 상태 조회 네트워크 오류: {e}")
+            return None
+        except Exception as e:
+            logger.error(f"주문 상태 조회 중 오류: {e}")
+            return None
+    
+    def execute_auto_sell(self, order_info, filled_price):
+        """자동 매도 주문 실행"""
+        try:
+            
+            # 매도가 계산 (3% 수익률)
+            profit_margin = self.config['trading']['profit_margin']
+            sell_price = round(filled_price * (1 + profit_margin), 2)
+            
+            execution_data = {
+                'ticker': order_info['ticker'],
+                'quantity': order_info['quantity'],
+                'price': filled_price
+            }
+            
+            logger.info(f"🎯 [REST 폴링] 체결 감지: {execution_data['ticker']} ${filled_price} → 자동 매도 ${sell_price}")
+            
+            # 자동 매도 주문 실행
+            success = place_sell_order(self.config, self.token_manager, execution_data, self.telegram_bot)
+            
+            if success:
+                logger.info(f"✅ [REST 폴링] 자동 매도 주문 성공: {execution_data['ticker']}")
+            else:
+                logger.error(f"❌ [REST 폴링] 자동 매도 주문 실패: {execution_data['ticker']}")
+                
+            return success
+            
+        except Exception as e:
+            logger.error(f"자동 매도 실행 중 오류: {e}")
+            return False
+    
+    def monitor_orders(self):
+        """주문 모니터링 메인 루프"""
+        logger.info("🔍 [REST 폴링] 주문 모니터링 시작")
+        
+        while self.is_running:
+            try:
+                # 모니터링 중인 주문들 복사 (thread-safe)
+                orders_to_check = dict(self.monitoring_orders)
+                completed_orders = []
+                
+                for order_no, order_info in orders_to_check.items():
+                    if not self.is_running:
+                        break
+                    
+                    # 최대 시도 횟수 확인
+                    order_info['attempts'] += 1
+                    if order_info['attempts'] > order_info['max_attempts']:
+                        logger.warning(f"⏰ 주문 모니터링 시간 초과: {order_no} (30분 경과)")
+                        completed_orders.append(order_no)
+                        continue
+                    
+                    # 주문 상태 확인
+                    status_info = self.check_order_status(order_no)
+                    if status_info is None:
+                        continue
+                    
+                    # 체결 완료 확인
+                    if status_info['status'] in ['체결완료', '완전체결'] and status_info['filled_qty'] > 0:
+                        logger.info(f"🎉 [REST 폴링] 체결 완료 감지: {order_no}")
+                        
+                        # 자동 매도 실행
+                        self.execute_auto_sell(order_info, status_info['filled_price'])
+                        completed_orders.append(order_no)
+                        
+                    elif order_info['attempts'] % 12 == 0:  # 1분마다 상태 로그
+                        elapsed_min = order_info['attempts'] * 5 // 60
+                        logger.debug(f"⏳ 체결 대기 중: {order_no} ({elapsed_min}분 경과)")
+                
+                # 완료된 주문 제거
+                for order_no in completed_orders:
+                    self.monitoring_orders.pop(order_no, None)
+                
+                # 5초 대기
+                if self.is_running:
+                    time.sleep(5)
+                    
+            except Exception as e:
+                logger.error(f"주문 모니터링 루프 오류: {e}")
+                time.sleep(10)  # 오류 시 10초 대기
+        
+        logger.info("🔍 [REST 폴링] 주문 모니터링 종료")
+    
+    def start(self):
+        """모니터링 시작"""
+        if self.is_running:
+            logger.warning("이미 주문 모니터링이 실행 중입니다.")
+            return
+        
+        self.is_running = True
+        self.monitor_thread = threading.Thread(target=self.monitor_orders, daemon=True)
+        self.monitor_thread.start()
+        logger.info("🚀 [REST 폴링] 주문 모니터링 시작됨")
+    
+    def stop(self):
+        """모니터링 중지"""
+        if not self.is_running:
+            return
+        
+        self.is_running = False
+        if self.monitor_thread and self.monitor_thread.is_alive():
+            self.monitor_thread.join(timeout=5)
+        
+        logger.info("🛑 [REST 폴링] 주문 모니터링 중지됨")
+    
+    def get_monitoring_count(self):
+        """현재 모니터링 중인 주문 수"""
+        return len(self.monitoring_orders)
+    
+    def clear_old_orders(self):
+        """24시간 이상된 주문 정리"""
+        cutoff_time = datetime.now() - timedelta(hours=24)
+        old_orders = [
+            order_no for order_no, order_info in self.monitoring_orders.items()
+            if order_info['created_at'] < cutoff_time
+        ]
+        
+        for order_no in old_orders:
+            self.monitoring_orders.pop(order_no, None)
+            logger.info(f"🗑️ 오래된 주문 제거: {order_no}")
 
 
 def is_extended_hours(trading_timezone='US/Eastern'):
@@ -45,191 +231,126 @@ def is_extended_hours(trading_timezone='US/Eastern'):
         regular_end = dtime(16, 0)
         return not (regular_start <= now <= regular_end)
     except Exception as e:
-        logging.getLogger(__name__).warning(f"시간 판별 오류: {e}, 기본값(정규장) 사용")
+        logger.warning(f"시간 판별 오류: {e}, 기본값(정규장) 사용")
         return False
 
+
+def is_market_hours(trading_timezone='US/Eastern'):
+    """
+    시장 시간 상태 반환
+    Returns: 'premarket', 'regular', 'aftermarket', 'closed'
+    """
+    try:
+        tz = timezone(trading_timezone)
+        now = datetime.now(tz).time()
+        
+        premarket_start = dtime(4, 0)   # 04:00 ET
+        regular_start = dtime(9, 30)    # 09:30 ET  
+        regular_end = dtime(16, 0)      # 16:00 ET
+        aftermarket_end = dtime(20, 0)  # 20:00 ET
+        
+        if premarket_start <= now < regular_start:
+            return 'premarket'
+        elif regular_start <= now < regular_end:
+            return 'regular'
+        elif regular_end <= now < aftermarket_end:
+            return 'aftermarket'
+        else:
+            return 'closed'
+            
+    except Exception as e:
+        logger.warning(f"시간 판별 오류: {e}")
+        return 'unknown'
 
 def place_sell_order(config, token_manager, execution_data, telegram_bot=None):
     """
-    미국 주식 매도 주문 - main.py 호출 방식에 맞게 수정된 함수
-    
+    자동 매도 주문 실행 함수
+
     Args:
-        config: 설정 dict
+        config: 설정 딕셔너리
         token_manager: TokenManager 인스턴스
-        execution_data: 체결 데이터 dict {'ticker': str, 'quantity': int, 'price': float}
-        telegram_bot: TelegramBot 인스턴스 (선택사항)
-    
+        execution_data: 체결 데이터 {'ticker', 'quantity', 'price'}
+        telegram_bot: TelegramBot 인스턴스 (선택)
+
     Returns:
-        bool: 주문 성공 여부
+        bool: 매도 주문 성공 여부
     """
+    import requests
+    import json
+    import logging
+    from datetime import datetime
+
     logger = logging.getLogger(__name__)
+
     try:
-        # execution_data에서 필요한 정보 추출
-        ticker = execution_data.get('ticker')
-        quantity = execution_data.get('quantity', 0)
-        buy_price = execution_data.get('price', 0)
-        
-        # 데이터 검증
-        if not ticker or quantity <= 0 or buy_price <= 0:
-            logger.error(f"잘못된 체결 데이터: {execution_data}")
-            return False
-        
-        # 매도가 계산 (3% 수익률)
+        # 매도가 계산
+        buy_price = execution_data['price']
         profit_margin = config['trading']['profit_margin']
         sell_price = round(buy_price * (1 + profit_margin), 2)
-        
-        logger.info(f"📊 [{ticker}] 매도 주문 준비: 매수가 ${buy_price:.2f} → 매도가 ${sell_price:.2f} (+{profit_margin*100:.1f}%)")
-        
-        # 실제 매도 주문 실행
-        order_success = _execute_sell_order(config, token_manager, ticker, quantity, sell_price)
-        
-        # 텔레그램 알림 전송 (성공 시)
-        if order_success and telegram_bot:
-            try:
-                profit_rate = profit_margin * 100
-                telegram_bot.send_sell_order_notification(
-                    ticker, quantity, buy_price, sell_price, profit_rate
-                )
-                logger.debug("텔레그램 매도 주문 알림 전송 완료")
-            except Exception as e:
-                logger.warning(f"텔레그램 알림 전송 실패: {e}")
-        
-        return order_success
-        
-    except Exception as e:
-        logger.error(f"매도 주문 처리 중 오류: {e}")
-        return False
 
+        # 한국투자증권 해외주식 매도 API 호출
+        url = f"{config['api']['base_url']}/uapi/overseas-stock/v1/trading/order"
 
-def _execute_sell_order(config, token_manager, ticker, quantity, price):
-    """
-    실제 매도 주문을 실행하는 내부 함수
-    """
-    logger = logging.getLogger(__name__)
-    max_retries = config['system']['order_retry_attempts']
-    
-    # 프리마켓/애프터마켓 판별 (수정된 부분)
-    extended = is_extended_hours(config['trading']['timezone'])
-    
-    for attempt in range(max_retries):
-        try:
-            # 토큰 획득
-            token = token_manager.get_access_token()
-            if not token:
-                logger.error("유효한 토큰을 가져올 수 없습니다.")
-                return False
-            
-            # 주문 데이터 검증
-            if not ticker or quantity <= 0 or price <= 0:
-                logger.error(f"잘못된 주문 데이터: ticker={ticker}, quantity={quantity}, price={price}")
-                return False
-            
-            # 가격 반올림 (소수점 2자리)
-            rounded_price = round(price, 2)
-            
-            headers = {
-                "Content-Type": "application/json",
-                "authorization": f"Bearer {token}",
-                "appKey": config['api_key'],
-                "appSecret": config['api_secret'],
-                "tr_id": "JTTT1002U",  # 해외주식 주문
-                "custtype": "P"
-            }
-            
-            body = {
-                "CANO": config['cano'],
-                "ACNT_PRDT_CD": config['acnt_prdt_cd'],
-                "OVRS_EXCG_CD": config['trading']['exchange_code'],  # NASD
-                "PDNO": ticker.upper(),  # 티커는 대문자로
-                "ORD_DVSN": config['trading']['default_order_type'],  # 00: 지정가
-                "ORD_QTY": str(quantity),
-                "OVRS_ORD_UNPR": str(rounded_price),
-                "SLL_BUY_DVSN_CD": "01",  # 01: 매도
-                "EXT_HOURS_YN": "Y" if extended else "N"  # 시간외 거래 플래그
-            }
-            
-            url = f"{config['api']['base_url']}/uapi/overseas-stock/v1/trading/order"
-            
-            # 프리마켓/애프터마켓 로그 추가
-            market_type = "(프리/애프터마켓)" if extended else "(정규장)"
-            logger.debug(f"주문 요청 시작 {market_type}: {ticker} {quantity}주 @ ${rounded_price}")
-            
-            response = requests.post(
-                url,
-                headers=headers,
-                data=json.dumps(body),
-                timeout=30  # 타임아웃 30초
-            )
-            
-            # HTTP 상태 코드 확인
-            if response.status_code != 200:
-                logger.error(f"HTTP 오류 ({response.status_code}): {response.text}")
-                # 5xx 에러는 재시도
-                if 500 <= response.status_code < 600 and attempt < max_retries - 1:
-                    wait_time = 2 ** attempt
-                    logger.info(f"서버 오류로 {wait_time}초 후 재시도합니다.")
-                    time.sleep(wait_time)
-                    continue
-                return False
-            
-            # API 응답 파싱
-            try:
-                result = response.json()
-            except json.JSONDecodeError as e:
-                logger.error(f"JSON 파싱 오류: {e}")
-                return False
-            
-            # API 성공 여부 확인
-            rt_cd = result.get("rt_cd", "Unknown")
-            if rt_cd == '0':
-                # 성공
-                order_no = result.get("output", {}).get("ODNO", "N/A")
-                logger.info(
-                    f"✅ [{ticker}] +{config['trading']['profit_margin']*100:.1f}% 자동 매도 주문 성공! "
-                    f"(수량: {quantity}, 가격: ${rounded_price}, 주문번호: {order_no}) {market_type}"
-                )
+        token = token_manager.get_access_token()
+        if not token:
+            logger.error("❌ 유효한 토큰을 가져올 수 없습니다.")
+            return False
+
+        headers = {
+            "Content-Type": "application/json",
+            "authorization": f"Bearer {token}",
+            "appkey": config['api_key'],
+            "appsecret": config['api_secret'],
+            "tr_id": "JTTT1006U"  # 해외주식 매도주문
+        }
+
+        # 주문 데이터
+        order_data = {
+            "CANO": config['cano'],
+            "ACNT_PRDT_CD": config['acnt_prdt_cd'],
+            "OVRS_EXCG_CD": config['trading']['exchange_code'],  # "NASD"
+            "PDNO": execution_data['ticker'],
+            "ORD_QTY": str(execution_data['quantity']),
+            "OVRS_ORD_UNPR": str(sell_price),
+            "ORD_SVR_DVSN_CD": "0",  # 해외주식 주문서버구분코드
+            "ORD_DVSN": config['trading']['default_order_type']  # "00" 지정가
+        }
+
+        # API 요청
+        response = requests.post(url, headers=headers, json=order_data, timeout=15)
+
+        if response.status_code == 200:
+            data = response.json()
+            if data.get("rt_cd") == "0":
+                order_no = data.get("output", {}).get("ODNO", "Unknown")
+                logger.info(f"✅ 자동 매도 주문 성공: {execution_data['ticker']} {execution_data['quantity']}주 @ ${sell_price} (주문번호: {order_no})")
+
+                # 텔레그램 알림
+                if telegram_bot:
+                    profit_rate = (sell_price - buy_price) / buy_price * 100
+                    telegram_bot.send_sell_order_notification(
+                        execution_data['ticker'], 
+                        execution_data['quantity'],
+                        buy_price,
+                        sell_price,
+                        profit_rate
+                    )
+
                 return True
             else:
-                # 실패
-                error_msg = ORDER_ERROR_CODES.get(rt_cd, result.get("msg1", "알 수 없는 오류"))
-                logger.error(f"❌ [{ticker}] 매도 주문 실패 ({rt_cd}): {error_msg}")
-                
-                # 토큰 관련 오류인 경우 토큰 갱신 후 재시도
-                if rt_cd in ['40013', '40014', '40015'] and attempt < max_retries - 1:
-                    logger.info("토큰 만료/무효 오류. 토큰을 갱신하고 재시도합니다.")
-                    success = token_manager.get_access_token(force_refresh=True)
-                    if success:
-                        time.sleep(1)  # 1초 대기 후 재시도
-                        continue
-                
-                # 일시적 시스템 오류인 경우 재시도
-                if rt_cd in ['50001'] and attempt < max_retries - 1:
-                    wait_time = 2 ** attempt
-                    logger.info(f"일시적 오류로 {wait_time}초 후 재시도합니다.")
-                    time.sleep(wait_time)
-                    continue
-                
+                error_msg = data.get("msg1", "Unknown error")
+                logger.error(f"❌ 매도 주문 API 오류: {error_msg}")
+
+                if telegram_bot:
+                    telegram_bot.send_error_notification(f"매도 주문 실패: {error_msg}")
+
                 return False
-                
-        except requests.exceptions.Timeout:
-            logger.warning(f"[{ticker}] 주문 요청 시간 초과 (시도 {attempt + 1}/{max_retries})")
-            if attempt < max_retries - 1:
-                time.sleep(2 ** attempt)  # 지수적 백오프
-                continue
-                
-        except requests.exceptions.ConnectionError as e:
-            logger.error(f"[{ticker}] 네트워크 연결 오류: {e}")
-            if attempt < max_retries - 1:
-                time.sleep(2 ** attempt)
-                continue
-                
-        except requests.exceptions.RequestException as e:
-            logger.error(f"[{ticker}] HTTP 요청 오류: {e}")
+        else:
+            logger.error(f"❌ HTTP 오류 {response.status_code}: {response.text}")
             return False
-            
-        except Exception as e:
-            logger.error(f"[{ticker}] 주문 실행 중 예상치 못한 오류: {e}")
-            return False
-    
-    logger.error(f"❌ [{ticker}] 최대 재시도 횟수({max_retries})를 초과하여 주문 실패")
-    return False
+
+    except Exception as e:
+        logger.error(f"❌ 매도 주문 실행 중 오류: {e}")
+        if telegram_bot:
+            telegram_bot.send_error_notification(f"매도 주문 오류: {str(e)}")
+        return False
