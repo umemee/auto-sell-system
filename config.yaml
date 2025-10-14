@@ -114,5 +114,4 @@ websocket:
   max_reconnect_attempts: 10
   reconnect_delay: 5
   message_queue_size: 1000
-
   process_timeout: 5
