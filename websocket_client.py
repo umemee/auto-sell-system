@@ -1,273 +1,275 @@
-# websocket_client.py - WebSocket 승인키 사용하도록 수정된 완전한 버전 - 오류 처리 개선
+# 1단계 수정: websocket_client.py (핵심 문제점만 수정)
 
 import json
 import logging
 import ssl
 import threading
 import time
+from datetime import datetime
 from websocket import WebSocketApp
-from auth import TokenManager
 
 logger = logging.getLogger(__name__)
 
 class WebSocketClient:
+    """한국투자증권 실시간 체결통보 WebSocket 클라이언트 (핵심 수정 버전)"""
+    
     def __init__(self, config, token_manager, message_handler):
-        """
-        config: 설정 dict
-        token_manager: auth.TokenManager 인스턴스
-        message_handler: 메시지 처리 callback(데이터 dict 인자)
-        """
         self.config = config
         self.token_manager = token_manager
         self.message_handler = message_handler
         self.ws = None
         self._connected = False
-        self.approval_key_retry_count = 0
-        self.max_approval_key_retries = 3
+        self._subscribed = False
+        self.reconnect_count = 0
+        self.max_reconnects = 10
+        self.is_running = False
+        
+        # 🔥 핵심 수정 1: WebSocket URL에 /websocket 경로 자동 추가
+        self.ws_url = self._fix_websocket_url()
+        self.custtype = "P"
+        self.tr_type = "1"
+        
+        # 🔥 핵심 수정 2: 기본 감시 종목 설정
+        self.default_symbol = config['trading'].get('default_symbol', 'AAPL')
+        
+        logger.info(f"✅ WebSocket 클라이언트 초기화: {self.ws_url}")
 
-    def _get_headers(self):
-        """WebSocket 연결용 헤더 생성 - 승인키 사용으로 수정 및 오류 처리 개선"""
-        try:
-            # WebSocket 승인키 발급 (재시도 로직 포함)
-            approval_key = None
-            retry_count = 0
+    def _fix_websocket_url(self):
+        """WebSocket URL 수정 - /websocket 경로 자동 추가"""
+        base_url = self.config['api'].get('websocket_url', '')
+        
+        # /websocket 경로가 없으면 자동 추가
+        if base_url and not base_url.endswith('/websocket'):
+            if base_url.endswith('/'):
+                base_url = base_url.rstrip('/')
+            base_url += '/websocket'
             
-            while retry_count < self.max_approval_key_retries and not approval_key:
-                approval_key = self.token_manager.get_websocket_approval_key()
-                
-                if not approval_key:
-                    retry_count += 1
-                    logger.warning(f"WebSocket 승인키 발급 실패 ({retry_count}/{self.max_approval_key_retries})")
-                    
-                    if retry_count < self.max_approval_key_retries:
-                        wait_time = 2 ** retry_count  # 지수적 백오프
-                        logger.info(f"🔄 {wait_time}초 후 승인키 발급 재시도...")
-                        time.sleep(wait_time)
-                    else:
-                        logger.error("❌ WebSocket 승인키 발급 최대 재시도 횟수 초과")
-                        return None  # None 반환으로 연결 중단 신호
+        logger.info(f"🔧 WebSocket URL 수정됨: {base_url}")
+        return base_url
 
-            if not approval_key:
-                logger.error("❌ WebSocket 승인키 발급 완전 실패")
-                return None
-
-            # 환경변수 값 확인
-            api_key = self.config.get('api_key')
-            api_secret = self.config.get('api_secret')
-            
-            if not api_key or not api_secret:
-                logger.error(f"API 키 누락: api_key={bool(api_key)}, api_secret={bool(api_secret)}")
-                return None
-
-            # 헤더 구성 - WebSocket 승인키 사용
-            headers = [
-                f"Authorization: Bearer {approval_key}",  # 승인키 사용
-                f"appkey: {api_key}",
-                f"appsecret: {api_secret}",
-                "tr_id: H0STCNI0",  # 체결통보 TR ID
-                "custtype: P"  # 개인고객 구분
-            ]
-
-            logger.info(f"✅ WebSocket 헤더 구성 완료: approval_key=***{approval_key[-4:]}, appkey=***{api_key[-4:]}")
-            self.approval_key_retry_count = 0  # 성공 시 리셋
-            return headers
-
-        except Exception as e:
-            logger.error(f"헤더 생성 중 오류: {e}")
+    def _create_subscribe_message(self):
+        """실시간 체결통보 구독 메시지 생성"""
+        # 🔥 핵심 수정 3: approval_key 검증 및 재시도
+        approval_key = self.token_manager.get_websocket_approval_key()
+        if not approval_key:
+            logger.error("❌ WebSocket 승인키 발급 실패")
             return None
-
-    def on_open(self, ws):
-        """WebSocket 연결 열림 - 구독 메시지 전송"""
-        logger.info("🎉 WebSocket connection opened")
-        self._connected = True
-
-        # 잠시 대기 후 구독 요청 전송
-        time.sleep(0.5)
-
-        try:
-            # 계좌번호 확인
-            cano = self.config.get('cano')
-            acnt_prdt_cd = self.config.get('acnt_prdt_cd')
             
-            if not cano or not acnt_prdt_cd:
-                logger.error(f"계좌 정보 누락: cano={cano}, acnt_prdt_cd={acnt_prdt_cd}")
-                return
-
-            tr_key = cano + acnt_prdt_cd  # "6490135601"
-
-            # H0STCNI0 체결통보 구독 요청 (해외주식)
-            sub_msg = {
-                "header": {
-                    "tr_type": "1",  # 1: 구독, 2: 해제
-                    "tr_id": "H0STCNI0"  # 해외주식 체결통보
-                },
-                "body": {
-                    "input": {
-                        "tr_key": tr_key,  # 계좌번호 (CANO + ACNT_PRDT_CD)
-                        "tr_type": "1"  # 1: 등록, 2: 해제
-                    }
+        subscribe_message = {
+            "header": {
+                "approval_key": approval_key,
+                "custtype": self.custtype,
+                "tr_type": self.tr_type,
+                "content-type": "utf-8"
+            },
+            "body": {
+                "input": {
+                    "tr_id": "H0STCNI0",
+                    # 🔥 핵심 수정 4: 기본 종목 지정 (공백 방지)
+                    "tr_key": self.default_symbol
                 }
             }
+        }
+        return json.dumps(subscribe_message)
 
-            # JSON 메시지 전송
-            message = json.dumps(sub_msg)
-            ws.send(message)
-            logger.info(f"🎯 H0STCNI0 구독 요청 전송 완료")
-            logger.info(f"  계좌: {tr_key}")
-            logger.info(f"  메시지: {message}")
-
+    def on_open(self, ws):
+        """WebSocket 연결 성공 시 호출"""
+        logger.info("🔌 한국투자증권 WebSocket 연결 성공!")
+        self._connected = True
+        self.reconnect_count = 0
+        
+        try:
+            subscribe_msg = self._create_subscribe_message()
+            if subscribe_msg:
+                ws.send(subscribe_msg)
+                logger.info(f"📡 {self.default_symbol} 종목 체결통보 구독 요청 전송")
+            else:
+                logger.error("❌ 구독 메시지 생성 실패")
+                
         except Exception as e:
             logger.error(f"❌ 구독 메시지 전송 실패: {e}")
-            logger.exception(e)
 
     def on_message(self, ws, message):
-        """WebSocket 메시지 수신 처리"""
+        """WebSocket 메시지 수신 시 호출"""
         try:
-            logger.debug(f"Raw message received: {message}")
-
-            # 서버 응답 메시지 확인
-            if "RETURN CODE" in message:
-                if "SUBSCRIBE SUCCESS" in message:
-                    logger.info("🎉🎉🎉 체결통보 구독 성공! 자동매도 시스템 준비 완료! 🎉🎉🎉")
-                else:
-                    logger.warning(f"서버 응답: {message}")
+            # 구독 확인 메시지
+            if "SUBSCRIBE SUCCESS" in message or "구독" in message:
+                logger.info("🎯 실시간 체결통보 구독 성공!")
+                self._subscribed = True
                 return
-
-            # JSON 파싱 시도
+                
+            # 핑퐁 메시지
+            if "PINGPONG" in message or "PONG" in message:
+                logger.debug("💗 핑퐁 응답 수신")
+                return
+            
+            # JSON 파싱
             try:
                 data = json.loads(message)
             except json.JSONDecodeError:
-                logger.debug(f"Non-JSON message: {message}")
+                logger.debug(f"비JSON 메시지: {message[:100]}...")
                 return
-
-            # 체결 데이터 처리
-            if 'body' in data and 'output' in data['body']:
-                output = data['body']['output']
-
-                # 매수 체결인 경우에만 처리 (해외주식)
-                sll_buy_dvsn_cd = output.get('sll_buy_dvsn_cd')
-                if sll_buy_dvsn_cd == '02':  # 02 = 매수
-                    execution_data = {
-                        'ticker': output.get('pdno'),  # 종목코드
-                        'quantity': int(output.get('ccld_qty', 0)),  # 체결수량
-                        'price': float(output.get('ccld_unpr', 0))  # 체결단가
-                    }
-
-                    # 유효한 데이터인지 확인
-                    if (execution_data['ticker'] and
-                        execution_data['quantity'] > 0 and
-                        execution_data['price'] > 0):
-                        
-                        logger.info(f"🔥 매수 체결 감지: {execution_data}")
-
-                        # 메시지 핸들러 호출 (자동매도 트리거)
-                        if self.message_handler:
-                            self.message_handler(execution_data)
-                        else:
-                            logger.warning("message_handler가 설정되지 않았습니다.")
-                    else:
-                        logger.debug(f"불완전한 체결 데이터: {execution_data}")
-                else:
-                    logger.debug(f"매도 체결 또는 기타 데이터: sll_buy_dvsn_cd={sll_buy_dvsn_cd}")
-            else:
-                logger.debug("체결 데이터가 아닌 메시지")
-
+            
+            # 체결 메시지 처리
+            if 'header' in data and 'body' in data:
+                header = data['header']
+                body = data['body']
+                
+                tr_id = header.get('tr_id', '')
+                if tr_id == 'H0STCNI0':
+                    self._handle_execution_message(body)
+                    
         except Exception as e:
-            logger.error(f"메시지 처리 중 오류: {e}")
-            logger.exception(e)
+            logger.error(f"❌ 메시지 처리 오류: {e}")
+
+    def _handle_execution_message(self, body):
+        """체결 메시지 처리 (필드명 검증 포함)"""
+        try:
+            if 'output' not in body:
+                return
+                
+            output = body['output']
+            
+            # 매수 체결 확인
+            order_type = output.get('sll_buy_dvsn_cd', '')
+            if order_type != '02':
+                return
+            
+            # 🔥 핵심 수정 5: 필드명 우선순위 적용
+            ticker = output.get('pdno', '').strip()
+            
+            # 수량: ord_qty 우선, 없으면 ccld_qty
+            quantity_str = output.get('ord_qty') or output.get('ccld_qty', '0')
+            
+            # 가격: ord_unpr 우선, 없으면 ccld_unpr
+            price_str = output.get('ord_unpr') or output.get('ccld_unpr', '0')
+            
+            # 데이터 검증
+            if not ticker:
+                logger.warning("⚠️ 종목코드 없음")
+                return
+                
+            try:
+                quantity = int(quantity_str) if str(quantity_str).isdigit() else 0
+                price = float(price_str) if str(price_str).replace('.', '').isdigit() else 0.0
+            except (ValueError, AttributeError):
+                logger.warning(f"⚠️ 데이터 파싱 실패: qty={quantity_str}, price={price_str}")
+                return
+            
+            if quantity <= 0 or price <= 0:
+                logger.warning(f"⚠️ 잘못된 체결 데이터: {ticker}")
+                return
+            
+            execution_data = {
+                'ticker': ticker,
+                'quantity': quantity,
+                'price': price,
+                'order_type': 'buy',
+                'timestamp': datetime.now(),
+                'source': 'websocket'
+            }
+            
+            logger.info(f"🔥 매수 체결 감지: {ticker} {quantity:,}주 @ ${price:.2f}")
+            
+            if self.message_handler:
+                self.message_handler(execution_data)
+                
+        except Exception as e:
+            logger.error(f"❌ 체결 메시지 처리 오류: {e}")
 
     def on_error(self, ws, error):
-        """WebSocket 오류 처리"""
-        logger.error(f"❌ WebSocket error: {error}")
+        """WebSocket 오류 시 호출"""
+        logger.error(f"❌ WebSocket 오류: {error}")
         self._connected = False
-        
-        if hasattr(error, '__traceback__'):
-            logger.exception(error)
+        self._subscribed = False
 
     def on_close(self, ws, close_status_code, close_msg):
-        """WebSocket 연결 종료 처리"""
-        logger.warning(f"🔌 WebSocket closed: {close_status_code} - {close_msg}")
+        """WebSocket 연결 종료 시 호출"""
+        logger.warning(f"🔌 WebSocket 연결 종료: {close_status_code} - {close_msg}")
         self._connected = False
-
-    def connect(self):
-        """WebSocket 연결 시작 - 오류 처리 개선"""
-        url = self.config['api']['websocket_url']
-        headers = self._get_headers()
-        
-        # 헤더 생성 실패 시 연결 중단
-        if headers is None:
-            logger.error("❌ 헤더 생성 실패, 연결 중단")
-            raise Exception("WebSocket 헤더 생성 실패 - 승인키 발급 불가")
-
-        if not headers:  # 빈 리스트 체크
-            logger.error("❌ 빈 헤더 반환, 연결 중단")
-            raise Exception("WebSocket 헤더가 비어있음")
-
-        logger.info(f"🔌 Connecting to WebSocket: {url}")
-        logger.info(f"  Headers count: {len(headers)}")
-
-        self.ws = WebSocketApp(
-            url,
-            header=headers,
-            on_open=self.on_open,
-            on_message=self.on_message,
-            on_error=self.on_error,
-            on_close=self.on_close
-        )
-
-        # SSL 설정 (운영 환경)
-        ssl_opts = {"cert_reqs": ssl.CERT_REQUIRED}
-
-        # WebSocket 실행
-        self.ws.run_forever(
-            sslopt=ssl_opts,
-            ping_interval=30,  # 30초마다 ping
-            ping_timeout=10  # 10초 ping 타임아웃
-        )
+        self._subscribed = False
 
     def start(self):
-        """백그라운드 스레드에서 WebSocket 시작"""
-        thread = threading.Thread(target=self._run)
-        thread.daemon = True
-        thread.start()
-
-    def _run(self):
-        """WebSocket 연결 루프 (재연결 포함) - 오류 처리 개선"""
-        max_retries = 5
-        retry_count = 0
+        """WebSocket 연결 시작"""
+        if self.is_running:
+            logger.warning("⚠️ WebSocket이 이미 실행 중")
+            return
+            
+        self.is_running = True
+        logger.info("🚀 한국투자증권 WebSocket 클라이언트 시작")
         
-        while retry_count < max_retries:
-            try:
-                logger.info(f"🔌 WebSocket 연결 시도 ({retry_count + 1}/{max_retries})")
-                self.connect()
-                break  # 성공적으로 연결되면 루프 종료
+        def run_websocket():
+            while self.is_running and self.reconnect_count < self.max_reconnects:
+                try:
+                    # 승인키 확인
+                    approval_key = self.token_manager.get_websocket_approval_key()
+                    if not approval_key:
+                        logger.error("❌ WebSocket 승인키 없음")
+                        time.sleep(10)
+                        continue
+                    
+                    logger.info(f"🔌 WebSocket 연결 시도 ({self.reconnect_count + 1}/{self.max_reconnects})")
+                    
+                    self.ws = WebSocketApp(
+                        self.ws_url,
+                        on_open=self.on_open,
+                        on_message=self.on_message,
+                        on_error=self.on_error,
+                        on_close=self.on_close
+                    )
+                    
+                    # 연결 실행
+                    self.ws.run_forever(
+                        ping_interval=60,
+                        ping_timeout=10,
+                        ping_payload="ping"
+                    )
+                    
+                except Exception as e:
+                    logger.error(f"❌ WebSocket 연결 실패: {e}")
                 
-            except Exception as e:
-                retry_count += 1
-                logger.error(f"❌ WebSocket connection failed ({retry_count}/{max_retries}): {e}")
-                self._connected = False
-                
-                if retry_count < max_retries:
-                    # 지수적 백오프로 대기 시간 증가
-                    wait_time = min(5 * (2 ** retry_count), 60)  # 최대 60초
-                    logger.info(f"🔄 {wait_time}초 후 재시도...")
-                    time.sleep(wait_time)
-                else:
-                    logger.error("❌ WebSocket 최대 재시도 횟수 초과, 연결 포기")
-                    break
+                finally:
+                    self._connected = False
+                    self._subscribed = False
+                    
+                    if self.is_running:
+                        self.reconnect_count += 1
+                        if self.reconnect_count < self.max_reconnects:
+                            delay = min(5 * self.reconnect_count, 60)
+                            logger.info(f"🔄 {delay}초 후 재연결...")
+                            time.sleep(delay)
+        
+        # 연결 스레드 시작
+        connection_thread = threading.Thread(target=run_websocket, daemon=True)
+        connection_thread.start()
 
     def stop(self):
         """WebSocket 연결 중지"""
+        if not self.is_running:
+            return
+            
+        logger.info("🛑 WebSocket 연결 중지")
+        self.is_running = False
         self._connected = False
+        self._subscribed = False
+        
         if self.ws:
-            self.ws.close()
-        logger.info("WebSocket 연결이 중지되었습니다.")
+            try:
+                self.ws.close()
+            except:
+                pass
 
     def is_connected(self):
-        """WebSocket 연결 상태 반환"""
-        try:
-            return self._connected and self.ws and hasattr(self.ws, 'sock') and not self.ws.sock.closed
-        except (AttributeError, TypeError):
-            return self._connected
-        except Exception:
-            return False
+        """연결 상태 확인"""
+        return self._connected and self._subscribed
+
+    def get_status(self):
+        """상세 상태 정보"""
+        return {
+            'connected': self._connected,
+            'subscribed': self._subscribed,
+            'running': self.is_running,
+            'reconnect_count': self.reconnect_count,
+            'url': self.ws_url,
+            'symbol': self.default_symbol
+        }

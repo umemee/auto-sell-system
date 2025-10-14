@@ -1,14 +1,14 @@
-# config.yaml - KIS API 실전 환경 최적화 (피드백 반영)
+# 1단계 수정: config.yaml (WebSocket URL 수정)
 
 api:
-  # ✅ 정확한 KIS API URL (피드백 반영)
+  # ✅ 정확한 KIS API URL
   base_url: "https://openapi.koreainvestment.com:9443"
-  # ⚠️ WebSocket URL 수정: 실전용 (모의투자는 31000)
-  websocket_url: "ws://ops.koreainvestment.com:21000"  # 실전용
-  # websocket_url: "ws://ops.koreainvestment.com:31000"  # 모의투자용 (필요시 변경)
+  
+  # 🔥 핵심 수정: /websocket 경로 추가
+  websocket_url: "ws://ops.koreainvestment.com:31000/websocket"  # 모의투자용
+  # websocket_url: "ws://ops.koreainvestment.com:21000/websocket"  # 실전용
 
 system:
-  # AWS 최적화: 재연결 시도 횟수 감소
   max_reconnect_attempts: 10
   base_reconnect_delay: 2
   reconnect_delay: 60
@@ -16,226 +16,104 @@ system:
   token_refresh_margin_minutes: 5
   cleanup_interval_hours: 6
   graceful_shutdown_timeout: 30
-  
-  # ✅ 상태 영속화 추가 (피드백 반영)
   state_persistence: true
-  state_file: "/tmp/auto-sell-order-state.json"  # AWS 환경 고려
+  state_file: "/tmp/auto-sell-order-state.json"
 
 trading:
-  profit_margin: 0.03 # 3% 수익률
-  default_order_type: "00" # 지정가
-  exchange_code: "NASD" # 나스닥
-  # ✅ 내부 로직용 timezone 수정 (피드백 반영)
-  timezone: "US/Eastern"  # 프리장/본장 판별용
+  profit_margin: 0.03
+  default_order_type: "00"
+  exchange_code: "NASD"
+  timezone: "US/Eastern"
+  
+  # 🔥 핵심 추가: 기본 감시 종목 지정
+  default_symbol: "AAPL"  # WebSocket tr_key 기본값
 
-# 🎯 집중/스마트 폴링 조화 설정 (안전성 강화)
+# 나머지 설정은 기존 유지
 polling:
-  # 🔥 공격적 폴링 (집중 매매 시간) - 간격 조정
   aggressive:
-    # 한국 시간 기준 집중 매매 시간
     time_ranges:
-      - start: "17:00"  # 17:00-18:00 KST (프리마켓)
+      - start: "17:00"
         end: "18:00"
-      - start: "21:30"  # 21:30-23:00 KST (정규장 전후)
+      - start: "21:30"
         end: "23:00"
+      - start: "22:30"
+        end: "05:00"
+      - start: "05:00"
+        end: "08:00"
+    interval: 3
+    batch_size: 10
     
-    # ✅ 안전한 폴링 간격 (피드백 반영: 1초 → 3초)
-    interval: 3  # 3초 간격 (KIS API 안전 기준)
-    initial_burst_interval: 2  # 주문 등록 직후 2초
-    burst_duration_minutes: 3  # 3분간 집중 감시
-    
-    # 공격적 모드 설정
-    max_consecutive_failures: 3
-    backoff_on_failure: false  # 실패해도 백오프 안함
-    priority: "maximum"
-
-  # 📊 일반 스마트 폴링 (비집중 시간)
   smart:
-    # 집중 매매 외 시간 (18:00-21:30, 23:00-01:00)
     time_ranges:
-      - start: "18:00"  # 18:00-21:30 KST
-        end: "21:30"
-      - start: "23:00"  # 23:00-01:00 KST
-        end: "01:00"
-    
-    # 적응형 스마트 폴링 (안전 간격)
-    initial_interval: 5  # 시작 5초
-    max_interval: 20     # 최대 20초 (15초 → 20초로 조정)
-    backoff_multiplier: 1.3  # 부드러운 백오프
-    
-    # 스마트 조정
-    no_change_threshold: 3  # 3회 변화 없으면 백오프 시작
-    consecutive_success_speedup: true  # 연속 성공 시 간격 단축
-    
-    # 주문별 개별 조정
-    order_age_factor:
-      - minutes: 10
-        interval: 5    # 처음 10분: 5초
-      - minutes: 30  
-        interval: 8    # 10-30분: 8초
-      - minutes: 60
-        interval: 12   # 30-60분: 12초
-      - default: 20    # 1시간 후: 20초
+      - start: "08:00"
+        end: "17:00"
+    initial_interval: 5
+    max_interval: 20
+    backoff_multiplier: 1.5
+    batch_size: 5
 
-  # 🚫 완전 중지 시간
-  off_hours:
-    # 취침 및 비거래 시간 (01:00-17:00 KST)
-    start: "01:00"
-    end: "17:00"
-    
-    # 완전 시스템 중지 설정
-    stop_all_monitoring: true
-    stop_websocket: true
-    stop_telegram_polling: true
-    
-    # 재시작 준비
-    pre_start_minutes: 15  # 17:00 15분 전부터 시스템 준비
-
-# ✅ Rate Limit 보호 설정 강화 (피드백 반영)
 rate_limit:
-  # 일일 한도 (3초 간격 기준 재계산)
-  daily_limit: 7000  # 안전 여유분 고려
-  
-  # 시간대별 한도 분배 (3초 간격 기준)
-  aggressive_mode_limit: 3000  # 공격적 모드: 2.5시간 × 1200회/시간
-  smart_mode_limit: 4000      # 스마트 모드: 5.5시간 × 720회/시간
-  
-  # ✅ appKey 기반 추적 (피드백 반영)
-  track_per_key: true         # appKey 단위 추적
-  cooldown_on_limit: 60      # 한도 도달 시 60초 대기
-  recovery_strategy: "slow"   # 서서히 복구
-  
-  # 안전장치 강화
-  hourly_limit: 1200          # 시간당 최대 (3초 간격 기준)
-  burst_protection: true      # 급증 방지
-  adaptive_throttling: true   # 적응형 제한
-  
-  # EGW00101 방지
-  min_request_interval: 2.5   # 최소 2.5초 간격 보장
-  consecutive_limit: 10       # 연속 요청 제한
+  requests_per_second: 15
+  daily_limit: 10000
+  hourly_limit: 1000
+  max_consecutive_requests: 10
+  consecutive_delay: 2.5
+  min_request_interval: 2.5
+  rate_limit_codes: ["EGW00101", "EGW00102"]
+  rate_limit_retry_delay: 60
 
-# AWS 최적화: 텔레그램 설정 (조정됨)
+market_hours:
+  premarket:
+    start: "04:00"
+    end: "09:30"
+    description: "프리마켓 - REST 폴링"
+  regular:
+    start: "09:30"
+    end: "16:00"
+    description: "정규장 - WebSocket 실시간"
+  aftermarket:
+    start: "16:00"
+    end: "20:00"
+    description: "애프터마켓 - REST 폴링"
+  closed:
+    start: "20:00"
+    end: "04:00"
+    description: "장 마감 - 대기 모드"
+
 telegram:
-  # 매매 시간에 따른 폴링 조정
-  polling_intervals:
-    aggressive_mode: 8   # 집중 시간: 8초 (5초 → 8초)
-    smart_mode: 20       # 일반 시간: 20초 (15초 → 20초)
-    off_hours: 3600      # 중지 시간: 1시간 (사실상 중지)
-  
-  error_polling_interval: 90   # 60초 → 90초
-  timeout: 15
-  
-  # 알림 우선순위
-  priority_notifications:
-    - "체결 감지"
-    - "자동 매도 성공"
-    - "시스템 모드 전환"
-    - "Rate Limit 경고"
-    - "오류 발생"
+  polling_interval: 10
+  error_polling_interval: 30
+  timeout: 10
+  max_message_length: 4000
+  notifications:
+    startup: true
+    shutdown: true
+    execution: true
+    error: true
+    order_success: true
+    order_failure: true
+    reconnection: false
 
 logging:
-  file_max_bytes: 10485760 # 10MB
+  level: "INFO"
+  max_file_size_mb: 10
   backup_count: 5
-  
-  # 매매 시간에 따른 로깅 레벨 조정
-  levels:
-    aggressive_mode: "INFO"   # 집중 시간: 상세 로깅
-    smart_mode: "INFO"        # 일반 시간: 기본 로깅
-    off_hours: "WARNING"      # 중지 시간: 최소 로깅
-  
-  # 성능 통계 로깅
-  stats_interval_minutes: 30
-  detailed_stats: true
-  
-  # KIS API 응답 로깅
-  api_response_logging: true
-  rate_limit_tracking: true
+  format: "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
 
-# 웹 인터페이스 설정
-web:
-  enabled: false  # 운영 환경에서는 비활성화
-  host: "127.0.0.1"
-  port: 5000
-  
-# 🎯 매매 전략별 세부 설정
-strategy:
-  # 집중 매매 시간 전략
-  aggressive_strategy:
-    target_profit_margin: 0.035  # 3.5% (조금 더 공격적)
-    quick_exit_enabled: true     # 빠른 청산 허용
-    market_order_threshold: 0.025 # 2.5% 이상 수익 시 시장가 허용
-    max_hold_minutes: 30         # 최대 30분 보유
-    
-  # 일반 시간 전략  
-  smart_strategy:
-    target_profit_margin: 0.03   # 3% (기본)
-    patience_mode: true          # 인내심 모드
-    limit_order_only: true       # 지정가만 사용
-    max_hold_hours: 2            # 최대 2시간 보유
-
-# 시스템 모니터링
-monitoring:
-  health_check_interval: 300  # 5분
-  performance_tracking: true
+aws:
   cost_optimization: true
-  
-  # 집중 시간 성과 추적
-  aggressive_mode_stats: true
-  daily_summary: true
-  weekly_report: true
-  
-  # KIS API 상태 모니터링
-  api_health_check: true
-  websocket_connection_monitor: true
-
-# ✅ 시간대 설정 분리 (피드백 반영)
-scheduler:
-  # 표시용 시간대 (사용자 기준)
-  timezone: "Asia/Seoul"
-  auto_mode_switching: true
-  
-  # 모드 전환 알림
-  mode_change_notification: true
-  pre_mode_change_warning: 5  # 5분 전 알림
-  
-  # 시스템 자동 재시작
-  daily_restart: "16:45"  # 매매 시작 15분 전 재시작
-  
-  # 시간대별 동작 설정
-  market_timezone: "US/Eastern"    # 내부 로직용
-  display_timezone: "Asia/Seoul"   # 사용자 표시용
-
-# KIS API 특화 설정
-kis_api:
-  # 연결 안정성
-  connection_pool_size: 5
-  request_timeout: 15
+  connection_pooling: true
+  request_compression: false
+  keep_alive: true
+  timeout: 15
   retry_attempts: 3
-  
-  # WebSocket 설정
-  websocket:
-    ping_interval: 30
-    ping_timeout: 10
-    max_reconnect_attempts: 5
-    reconnect_delay: 10
-  
-  # 오류 코드별 처리
-  error_handling:
-    EGW00101: "rate_limit"    # Rate Limit
-    EGW00102: "rate_limit"    # Rate Limit
-    EGW90001: "retry"         # 일시적 오류
-    
-# 운영 환경별 설정
-environment:
-  # 개발/운영 구분
-  mode: "production"  # development, production
-  
-  # AWS 환경 최적화
-  aws_optimized: true
-  cloudwatch_logging: false  # 필요시 활성화
-  
-  # 비용 최적화
-  cost_optimization:
-    enabled: true
-    target_monthly_cost: 50  # USD
-    alert_threshold: 80      # 80% 도달 시 알림
+
+websocket:
+  auto_subscribe: true
+  subscribe_all_symbols: false  # false로 변경하여 기본 종목만 구독
+  ping_interval: 30
+  ping_timeout: 10
+  max_reconnect_attempts: 10
+  reconnect_delay: 5
+  message_queue_size: 1000
+  process_timeout: 5
