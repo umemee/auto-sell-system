@@ -1,4 +1,4 @@
-# telegram_bot.py - AWS 최적화 및 수정된 전체 코드
+# telegram_bot.py - AWS 최적화 및 수정된 전체 코드 (start/stop 메서드 추가)
 
 import requests
 import logging
@@ -6,6 +6,7 @@ import json
 import time
 import os
 import signal
+import threading
 from datetime import datetime
 
 class TelegramBot:
@@ -15,6 +16,7 @@ class TelegramBot:
         self.logger = logging.getLogger(__name__)
         self.base_url = f"https://api.telegram.org/bot{bot_token}"
         self.is_running = False
+        self.polling_thread = None
         
         # AWS 최적화: config에서 폴링 설정 가져오기
         if config and 'telegram' in config:
@@ -44,7 +46,6 @@ class TelegramBot:
             else:
                 self.logger.error(f"Telegram 메시지 전송 실패: {response.text}")
                 return False
-
         except Exception as e:
             self.logger.error(f"Telegram 메시지 전송 중 오류: {e}")
             return False
@@ -129,7 +130,6 @@ class TelegramBot:
                 if data['ok']:
                     return data['result']
             return []
-
         except Exception as e:
             self.logger.error(f"업데이트 가져오기 오류: {e}")
             return []
@@ -144,7 +144,6 @@ class TelegramBot:
                 self.get_updates(offset=latest_update_id + 1)
                 self.logger.info(f"텔레그램 메시지 큐 정리: {len(updates)}개 메시지 무시됨")
             return True
-
         except Exception as e:
             self.logger.error(f"메시지 큐 정리 오류: {e}")
             return False
@@ -190,7 +189,6 @@ class TelegramBot:
 """
                 # 메시지 전송 후 시스템 종료
                 self.send_message(message.strip())
-
                 # 안전한 시스템 종료
                 self.logger.info("텔레그램에서 시스템 종료 요청을 받았습니다.")
                 os.kill(os.getpid(), signal.SIGTERM)
@@ -241,6 +239,7 @@ AWS 최적화:
         # 시작 시 메시지 큐 정리
         self.clear_message_queue()
         self.is_running = True
+        
         offset = None
         start_time = datetime.now().timestamp()
         consecutive_errors = 0
@@ -302,8 +301,36 @@ AWS 최적화:
 
         self.logger.info("텔레그램 봇 폴링이 종료되었습니다.")
 
+    def start(self):
+        """봇 시작 (메인에서 호출할 메서드)"""
+        if self.is_running:
+            self.logger.warning("텔레그램 봇이 이미 실행 중입니다.")
+            return
+            
+        self.logger.info("텔레그램 봇을 시작합니다...")
+        self.polling_thread = threading.Thread(target=self.start_polling, daemon=True)
+        self.polling_thread.start()
+        
+        # 시작 알림 전송
+        self.send_startup_notification()
+
+    def stop(self):
+        """봇 중지 (메인에서 호출할 메서드)"""
+        if not self.is_running:
+            return
+            
+        self.logger.info("텔레그램 봇을 중지합니다...")
+        self.is_running = False
+        
+        # 종료 알림 전송
+        self.send_shutdown_notification()
+        
+        # 폴링 스레드 종료 대기
+        if self.polling_thread and self.polling_thread.is_alive():
+            self.polling_thread.join(timeout=5)
+
     def stop_polling(self):
-        """폴링 중지"""
+        """폴링 중지 (호환성을 위해 유지)"""
         self.logger.info("텔레그램 봇 폴링을 중지합니다...")
         self.is_running = False
 
