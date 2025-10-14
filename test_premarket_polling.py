@@ -1,41 +1,71 @@
 #!/usr/bin/env python3
-# test_premarket_polling.py
-
+import os
 import time
 import logging
-import yaml
+import dotenv
 from auth import TokenManager
 from order import OrderMonitor
+from websocket_client import WebSocketClient
 
-# 로깅 설정
-logging.basicConfig(
-    level=logging.DEBUG,
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
-)
-logger = logging.getLogger("PREMARKET_TEST")
+logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
+logger = logging.getLogger("FULL_TEST")
 
-def main():
-    # 설정 로드
-    with open("config.yaml", "r", encoding="utf-8") as f:
-        config = yaml.safe_load(f)
+def load_config_from_env():
+    dotenv.load_dotenv(".env.production")
+    return {
+        "api_key": os.getenv("KIS_APP_KEY"),
+        "api_secret": os.getenv("KIS_APP_SECRET"),
+        "cano": os.getenv("KIS_ACCOUNT_NO"),
+        "acnt_prdt_cd": os.getenv("KIS_PRODUCT_CODE"),
+        "base_url": "https://openapi.koreainvestment.com:9443",
+        "websocket_url": "ws://ops.koreainvestment.com:31000",
+        "default_symbol": "AAPL",
+        "mode": "development"  # 모의투자용
+    }
 
-    tm = TokenManager(config)
-    om = OrderMonitor(config, tm)
-
-    # 테스트용 주문번호를 실제 미체결 주문번호로 교체하세요
-    test_order_no = "30722955"
-
-    logger.info("✅ 프리마켓 모드: REST 폴링 주문상태 조회 테스트 시작")
+def test_rest_polling(order_monitor, order_no):
+    logger.info(f"🔍 REST 폴링 테스트 - 주문번호: {order_no}")
     for i in range(3):
-        logger.debug(f"🔄 조회 시도 {i+1}/3 – 주문번호: {test_order_no}")
-        status = om.check_order_status(test_order_no)
-        if status:
-            logger.info(f"✅ 조회 성공: 상태={status['status']}, 체결수량={status['filled_qty']}, 체결가={status['filled_price']}")
-        else:
-            logger.warning("⚠️ 조회 실패 또는 체결 내역 없음")
-        time.sleep(5)  # config.yaml polling.smart.initial_interval과 맞춰 조정
+        logger.info(f"⏱️ 폴링 {i+1}/3 ...")
+        status = order_monitor.check_order_status(order_no)
+        logger.info(f"➡️ 결과: {status}")
+        time.sleep(5)
 
-    logger.info("🔧 프리마켓 REST 폴링 테스트 완료")
+def test_websocket_connection(ws_client):
+    logger.info("🔍 WebSocket 연결 테스트 시작")
+    ws_client.start()
+
+    for i in range(12):  # 1분 동안 모니터링
+        time.sleep(5)
+        status = ws_client.get_status()
+        logger.info(f"▶ 상태: 연결={status['connected']} / 구독={status['subscribed']}")
+        if status["connected"] and status["subscribed"]:
+            logger.info("✅ 구독 성공 확인됨")
+            break
+    time.sleep(30)  # handshake 후 추가 대기
+    ws_client.stop()
+    logger.info("🛑 WebSocket 테스트 종료")
 
 if __name__ == "__main__":
-    main()
+    config = load_config_from_env()
+    tm = TokenManager({'api': {
+        'app_key': config['api_key'],
+        'app_secret': config['api_secret'],
+        'base_url': config['base_url'],
+        'websocket_url': config['websocket_url']
+    }})
+    order_monitor = OrderMonitor({
+        'api_key': config['api_key'],
+        'api_secret': config['api_secret'],
+        'cano': config['cano'],
+        'acnt_prdt_cd': config['acnt_prdt_cd'],
+        'api': {'base_url': config['base_url']}
+    }, tm)
+    ws_client = WebSocketClient({
+        'api': {'base_url': config['base_url'], 'websocket_url': config['websocket_url']},
+        'trading': {'default_symbol': config['default_symbol']},
+        'mode': config['mode']
+    }, tm, message_handler=lambda data: logger.info(f"📈 실시간 체결 감지: {data}"))
+    test_order_number = "30722955"
+    test_rest_polling(order_monitor, test_order_number)
+    test_websocket_connection(ws_client)
