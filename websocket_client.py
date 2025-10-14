@@ -1,4 +1,4 @@
-# websocket_client.py - 수정된 전체 코드 (인증 헤더 및 구독 메시지 개선)
+# websocket_client.py - WebSocket 승인키 사용하도록 수정된 완전한 버전
 
 import json
 import logging
@@ -24,14 +24,15 @@ class WebSocketClient:
         self._connected = False
         
     def _get_headers(self):
-        """WebSocket 연결용 헤더 생성 - 공식 답변 기준으로 수정"""
+        """WebSocket 연결용 헤더 생성 - 승인키 사용으로 수정"""
         try:
-            token = self.token_manager.get_access_token()
-            if not token:
-                logger.error("유효한 토큰을 가져올 수 없습니다.")
+            # WebSocket 승인키 발급
+            approval_key = self.token_manager.get_websocket_approval_key()
+            if not approval_key:
+                logger.error("WebSocket 승인키를 가져올 수 없습니다.")
                 return []
                 
-            # 환경변수 값 직접 확인 및 로깅
+            # 환경변수 값 확인
             api_key = self.config.get('api_key')
             api_secret = self.config.get('api_secret')
             
@@ -39,16 +40,16 @@ class WebSocketClient:
                 logger.error(f"API 키 누락: api_key={bool(api_key)}, api_secret={bool(api_secret)}")
                 return []
             
-            # 헤더 구성 - 공식 답변에 따른 정확한 형식
+            # 헤더 구성 - WebSocket 승인키 사용
             headers = [
-                f"Authorization: Bearer {token}",
+                f"Authorization: Bearer {approval_key}",  # 승인키 사용
                 f"appkey: {api_key}",
                 f"appsecret: {api_secret}",
                 "tr_id: H0STCNI0",    # 체결통보 TR ID
                 "custtype: P"         # 개인고객 구분
             ]
             
-            logger.info(f"WebSocket 헤더 구성 완료: token=***{token[-4:]}, appkey=***{api_key[-4:]}")
+            logger.info(f"✅ WebSocket 헤더 구성 완료: approval_key=***{approval_key[-4:]}, appkey=***{api_key[-4:]}")
             return headers
             
         except Exception as e:
@@ -56,11 +57,11 @@ class WebSocketClient:
             return []
 
     def on_open(self, ws):
-        """WebSocket 연결 열림 - 구독 메시지 전송 개선"""
-        logger.info("✅ WebSocket connection opened")
+        """WebSocket 연결 열림 - 구독 메시지 전송"""
+        logger.info("🎉 WebSocket connection opened")
         self._connected = True
         
-        # 잠시 대기 후 구독 요청 전송 (서버 핸드셰이크 완료 대기)
+        # 잠시 대기 후 구독 요청 전송
         time.sleep(0.5)
         
         try:
@@ -72,9 +73,9 @@ class WebSocketClient:
                 logger.error(f"계좌 정보 누락: cano={cano}, acnt_prdt_cd={acnt_prdt_cd}")
                 return
                 
-            tr_key = cano + acnt_prdt_cd
+            tr_key = cano + acnt_prdt_cd  # "6490135601"
             
-            # H0STCNI0 체결통보 구독 요청 - 공식 답변 형식 준수
+            # H0STCNI0 체결통보 구독 요청 (해외주식)
             sub_msg = {
                 "header": {
                     "tr_type": "1",      # 1: 구독, 2: 해제
@@ -106,8 +107,11 @@ class WebSocketClient:
             logger.debug(f"Raw message received: {message}")
             
             # 서버 응답 메시지 확인
-            if "RETURN CODE" in message and "SUBSCRIBE SUCCESS" in message:
-                logger.info("🎉 체결통보 구독 성공!")
+            if "RETURN CODE" in message:
+                if "SUBSCRIBE SUCCESS" in message:
+                    logger.info("🎉🎉🎉 체결통보 구독 성공! 자동매도 시스템 준비 완료! 🎉🎉🎉")
+                else:
+                    logger.warning(f"서버 응답: {message}")
                 return
                 
             # JSON 파싱 시도
