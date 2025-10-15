@@ -115,7 +115,7 @@ def test_websocket_connection(ws_client, symbol=None):
     # 60초 동안 연결 및 구독 상태 확인
     start = time.time()
     while time.time() - start < 60:
-        if ws_client._connected and ws_client._subscribed:
+        if ws_client._connected and ws_client.subscribed:
             logger.info(f"▶ WebSocket 상태 확인: 연결={ws_client._connected}, 구독={ws_client._subscribed}")
         time.sleep(1)
 

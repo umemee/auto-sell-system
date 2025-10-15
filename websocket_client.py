@@ -61,19 +61,22 @@ class WebSocketClient:
         }
         return json.dumps(subscribe_message)
 
+            
     def subscribe(self, symbol=None):
-        """
-        구독 요청 전송 메서드
-        """
+        if not self.ws or not self.connected:
+            logger.error("❌ WS 연결이 없거나 연결 상태가 아닙니다. 구독 전송 불가")
+            return
+
         msg = self.create_subscribe_message()
-        if msg and self.ws:
+        if msg:
             try:
                 self.ws.send(msg)
                 logger.info(f"▶ WebSocket 구독 메시지 전송 (raw): {msg}")
             except Exception as e:
                 logger.error(f"❌ 구독 메시지 전송 오류: {e}", exc_info=True)
         else:
-            logger.error("❌ WS 연결 없음 또는 메시지 생성 실패")
+            logger.error("❌ 구독 메시지 생성 실패")
+
 
     def on_open(self, ws):
         logger.info("🚀 WebSocket 연결 성공")
