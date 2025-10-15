@@ -34,18 +34,11 @@ class WebSocketClient:
         
         logger.info(f"✅ WebSocket 클라이언트 초기화: {self.ws_url}")
 
-    def _fix_websocket_url(self):
-        """WebSocket URL 수정 - /websocket 경로 자동 추가"""
-        base_url = self.config['api'].get('websocket_url', '')
-        
-        # /websocket 경로가 없으면 자동 추가
-        if base_url and not base_url.endswith('/websocket'):
-            if base_url.endswith('/'):
-                base_url = base_url.rstrip('/')
-            base_url += '/websocket'
-            
-        logger.info(f"🔧 WebSocket URL 수정됨: {base_url}")
-        return base_url
+    def fix_websocket_url(self):
+        baseurl = self.config['api'].get('websocket_url')
+        # 절대 경로 추가 금지: 그대로 반환
+        logger.info(f"🔧 WebSocket URL 설정: {baseurl}")
+        return baseurl
 
     def _create_subscribe_message(self):
         """실시간 체결통보 구독 메시지 생성"""
