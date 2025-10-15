@@ -25,7 +25,7 @@ class WebSocketClient:
         self.is_running = False
         
         # 🔥 핵심 수정 1: WebSocket URL에 /websocket 경로 자동 추가
-        self.ws_url = self._fix_websocket_url()
+        self.ws_url = self.fix_websocket_url()
         self.custtype = "P"
         self.tr_type = "1"
         
@@ -39,6 +39,7 @@ class WebSocketClient:
         # 절대 경로 추가 금지: 그대로 반환
         logger.info(f"🔧 WebSocket URL 설정: {baseurl}")
         return baseurl
+
 
     def _create_subscribe_message(self):
         """실시간 체결통보 구독 메시지 생성"""
