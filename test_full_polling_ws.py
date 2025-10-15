@@ -61,7 +61,7 @@ def load_config_from_env():
         'acnt_prdt_cd': acnt_prdt_cd,
         'account_no': account_no,
         'base_url': "https://openapi.koreainvestment.com:9443",
-        'websocket_url': "ws://ops.koreainvestment.com:31000",
+        'websocket_url': "ws://ops.koreainvestment.com:21000",  # ✅ 실전용
         'websocket': {
             'default_symbol': "AAPL"
         },
@@ -128,7 +128,7 @@ if __name__ == "__main__":
     })
 
     
-    # OrderMonitor 초기화 - 올바른 config 구조로 수정
+    # OrderMonitor 초기화
     order_monitor = OrderMonitor(
         config={
             'api_key': config['api_key'],
@@ -139,7 +139,9 @@ if __name__ == "__main__":
         },
         token_manager=tm
     )
-    
+
+
+
     # WebSocketClient 초기화
     ws_client = WebSocketClient(
         config={

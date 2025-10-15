@@ -55,28 +55,28 @@ class OrderMonitor:
                 "appsecret": self.config['api_secret'],
                 "tr_id": "TTTS3012R"  # ✅ 해외주식 주문체결내역 조회용 TR ID
             }
-            
-            # ✅ 해외주식용 요청 바디
-            body = {
+
+            # 🔥 GET 방식 파라미터로 변경
+            params = {
                 "CANO": self.config['cano'],
                 "ACNT_PRDT_CD": self.config['acnt_prdt_cd'],
-                "OVRS_EXCG_CD": "NASD",  # 나스닥 (또는 "NYSE", "AMEX")
-                "ORD_DT": "",  # 오늘 주문이면 빈 문자열
-                "SLL_BUY_DVSN_CD": "00",  # 전체(매수/매도)
-                "INQR_DVSN": "00",  # 전체조회
-                "STRT_ODNO": order_no,  # 조회 시작 주문번호
-                "PDNO": "",  # 종목코드 (특정 종목 조회시)
-                "CCLD_DVSN": "00",  # 전체 (체결/미체결)
-                "ORD_GNO_BRNO": "",  # 주문채번지점번호 (공란)
-                "ODNO": order_no,  # 주문번호
-                "INQR_DVSN_3": "00",  # 조회구분3 (전체)
-                "INQR_DVSN_1": "",  # 조회구분1 (공란)
+                "OVRS_EXCG_CD": "NASD",
+                "ORD_DT": "",
+                "SLL_BUY_DVSN_CD": "00",
+                "INQR_DVSN": "00", 
+                "STRT_ODNO": order_no,
+                "PDNO": "",
+                "CCLD_DVSN": "00",
+                "ORD_GNO_BRNO": "",
+                "ODNO": order_no,
+                "INQR_DVSN_3": "00",
+                "INQR_DVSN_1": "",
                 "CTX_AREA_FK200": "",
                 "CTX_AREA_NK200": ""
             }
-            
-            # ✅ POST 요청으로 변경 (해외주식 API는 POST 사용)
-            response = requests.post(url, headers=headers, json=body, timeout=10)
+
+            # 🔥 POST -> GET 방식으로 변경
+            response = requests.get(url, headers=headers, params=params, timeout=10)
             response.raise_for_status()
             
             data = response.json()

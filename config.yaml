@@ -5,7 +5,7 @@ api:
   base_url: "https://openapi.koreainvestment.com:9443"
   
   # 🔥 핵심 수정: /websocket 경로 추가
-  websocket_url: "ws://ops.koreainvestment.com:31000/websocket"  # 모의투자용
+  websocket_url: "ws://ops.koreainvestment.com:21000"  # ✅ 실전 계좌용
   # websocket_url: "ws://ops.koreainvestment.com:21000/websocket"  # 실전용
 
 system:
