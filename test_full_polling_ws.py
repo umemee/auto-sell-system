@@ -123,10 +123,11 @@ if __name__ == "__main__":
     }, tm, message_handler=lambda data: logger.info(f"📈 실시간 체결 감지: {data}"))
     
     # 테스트 주문번호 지정 (실제 주문번호로 변경)
-    test_order_number = "30722955"
+    test_order_number = "31083824"
     
     # REST 폴링 테스트 - 프리마켓 환경
     test_rest_polling(order_monitor, test_order_number)
     
     # WebSocket 테스트 - 본장 환경
     test_websocket_connection(ws_client)
+
