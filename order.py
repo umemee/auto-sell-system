@@ -56,14 +56,15 @@ class OrderMonitor:
                 "tr_id": "TTTS3012R"  # ✅ 해외주식 주문체결내역 조회용 TR ID
             }
 
-            # 🔥 GET 방식 파라미터로 변경
+            # 🔥 TR_CRCY_CD 필드 추가
             params = {
                 "CANO": self.config['cano'],
                 "ACNT_PRDT_CD": self.config['acnt_prdt_cd'],
                 "OVRS_EXCG_CD": "NASD",
+                "TR_CRCY_CD": "USD",              # 🆕 거래통화코드 추가 (미국주식 = USD)
                 "ORD_DT": "",
                 "SLL_BUY_DVSN_CD": "00",
-                "INQR_DVSN": "00", 
+                "INQR_DVSN": "00",
                 "STRT_ODNO": order_no,
                 "PDNO": "",
                 "CCLD_DVSN": "00",
@@ -74,6 +75,7 @@ class OrderMonitor:
                 "CTX_AREA_FK200": "",
                 "CTX_AREA_NK200": ""
             }
+
 
             # 🔥 POST -> GET 방식으로 변경
             response = requests.get(url, headers=headers, params=params, timeout=10)
