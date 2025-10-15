@@ -118,13 +118,15 @@ if __name__ == "__main__":
         logger.error("설정 로드 실패")
         exit(1)
     
+
     # TokenManager 초기화
-    tm = TokenManager(
-        api_key=config['api_key'],
-        api_secret=config['api_secret'],
-        api={'base_url': config['base_url']},
-        websocket_url=config['websocket_url']
-    )
+    tm = TokenManager({
+        'api_key': config['api_key'],
+        'api_secret': config['api_secret'],
+        'api': {'base_url': config['base_url']},
+        'websocket_url': config['websocket_url']
+    })
+
     
     # OrderMonitor 초기화 - 올바른 config 구조로 수정
     order_monitor = OrderMonitor(
