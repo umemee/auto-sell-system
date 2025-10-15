@@ -20,7 +20,7 @@ class OrderMonitor:
         self.monitoring_orders = {}  # {order_no: order_info}
         self.is_running = False
         self.monitor_thread = None
-        
+
     def add_order_to_monitor(self, order_no, ticker, quantity, buy_price):
         """모니터링할 주문 추가"""
         order_info = {
@@ -34,88 +34,101 @@ class OrderMonitor:
         
         self.monitoring_orders[order_no] = order_info
         logger.info(f"📝 주문 모니터링 등록: {order_no} ({ticker} {quantity}주 @ ${buy_price})")
-        
+
     def check_order_status(self, order_no):
-        """개별 주문 상태 확인 - 한국투자증권 해외주식용으로 수정"""
+        """
+        해외주식 주문체결내역 조회 (TTTS3012R)
+        주문번호를 기준으로 REST API를 통해 체결 상태를 확인합니다.
+        """
+        import requests
+        import logging
+
+        logger = logging.getLogger(__name__)
+
         try:
-            # ✅ 해외주식 주문체결내역 조회 API URL
+            # ✅ 해외주식 주문체결내역 조회 API 엔드포인트
             url = f"{self.config['api']['base_url']}/uapi/overseas-stock/v1/trading/inquire-ccnl"
-            
-            # 토큰 확인 및 갱신
+
+            # ✅ 액세스 토큰 확인
             token = self.token_manager.get_access_token()
             if not token:
-                logger.error("유효한 토큰을 가져올 수 없습니다.")
+                logger.error("❌ 액세스 토큰 없음 - check_order_status 중단")
                 return None
-                
-            # ✅ 해외주식용 헤더 설정
+
+            # ✅ 헤더 설정 (실전투자 기준: TTTS3012R / 모의투자: VTTS3012R)
             headers = {
                 "Content-Type": "application/json",
                 "authorization": f"Bearer {token}",
-                "appkey": self.config['api_key'],
-                "appsecret": self.config['api_secret'],
-                "tr_id": "TTTS3012R"  # ✅ 해외주식 주문체결내역 조회용 TR ID
+                "appkey": self.config["api_key"],
+                "appsecret": self.config["api_secret"],
+                "tr_id": "TTTS3012R",  # 모의투자는 'VTTS3012R'로 변경
             }
 
-            # 🔥 TR_CRCY_CD 필드 추가
+            # ✅ API 문서 기준 요청 파라미터
             params = {
-                "CANO": self.config['cano'],
-                "ACNT_PRDT_CD": self.config['acnt_prdt_cd'],
-                "OVRS_EXCG_CD": "NASD",
-                "TR_CRCY_CD": "USD",              # 🆕 거래통화코드 추가 (미국주식 = USD)
-                "ORD_DT": "",
-                "SLL_BUY_DVSN_CD": "00",
-                "INQR_DVSN": "00",
-                "STRT_ODNO": order_no,
-                "PDNO": "",
-                "CCLD_DVSN": "00",
-                "ORD_GNO_BRNO": "",
-                "ODNO": order_no,
+                "CANO": self.config["cano"],                  # 계좌번호(앞 8자리)
+                "ACNT_PRDT_CD": self.config["acnt_prdt_cd"],  # 계좌상품코드(뒤 2자리)
+                "OVRS_EXCG_CD": "NASD",                       # 거래소코드 (NASDAQ)
+                "ORD_DT": "",                                 # 주문일자 (당일이면 비움)
+                "SLL_BUY_DVSN_CD": "00",                      # 매수/매도 구분 (00=전체)
+                "INQR_DVSN": "00",                            # 전체 조회
+                "STRT_ODNO": order_no,                        # 시작 주문번호
+                "PDNO": "",                                   # 종목코드
+                "CCLD_DVSN": "00",                            # 체결/미체결 (00=전체)
+                "ORD_GNO_BRNO": "",                           # 주문채번지점번호
+                "ODNO": order_no,                             # 주문번호
                 "INQR_DVSN_3": "00",
                 "INQR_DVSN_1": "",
                 "CTX_AREA_FK200": "",
                 "CTX_AREA_NK200": ""
             }
 
+            # ✅ 요청 정보 출력 (디버깅용)
+            logger.debug(f"📤 주문조회 요청 URL: {url}")
+            logger.debug(f"📤 주문조회 헤더: {headers}")
+            logger.debug(f"📤 주문조회 파라미터: {params}")
 
-            # 🔥 POST -> GET 방식으로 변경
+            # ✅ 한국투자증권 해외주식 체결조회는 GET 방식
             response = requests.get(url, headers=headers, params=params, timeout=10)
-            response.raise_for_status()
-            
-            data = response.json()
-            
-            # 응답 상태 확인
-            if data.get("rt_cd") != "0":
-                logger.error(f"주문 조회 실패: {data.get('msg1', 'Unknown error')}")
+
+            # ✅ 응답 전문 출력
+            logger.debug(f"📥 주문조회 응답(raw): {response.text}")
+
+            if response.status_code != 200:
+                logger.error(f"❌ 주문조회 HTTP 오류: {response.status_code}")
                 return None
-                
-            # 해당 주문번호 찾기 - 해외주식 응답 구조에 맞게 수정
-            for item in data.get("output", []):
-                if item.get("odno") == order_no:  # 주문번호 매칭
-                    # ✅ 해외주식 응답 필드명에 맞게 수정
-                    ord_status = item.get("ord_stcd", "")  # 주문상태코드
-                    ccld_qty = item.get("ccld_qty", "0")  # 체결수량
-                    ccld_unpr = item.get("ccld_unpr", "0")  # 체결단가
-                    
-                    return {
-                        'status': ord_status,
-                        'filled_qty': int(float(ccld_qty)) if ccld_qty and ccld_qty != "0" else 0,
-                        'filled_price': float(ccld_unpr) if ccld_unpr and ccld_unpr != "0" else 0.0
-                    }
-                    
-            # 주문을 찾지 못한 경우
-            logger.debug(f"주문번호 {order_no}를 찾지 못했습니다.")
+
+            # ✅ JSON 파싱
+            data = response.json()
+            logger.debug(f"📑 주문조회 파싱 결과: {data}")
+
+            # ✅ 정상 응답 여부 확인
+            rt_cd = data.get("rt_cd", "")
+            if rt_cd != "0":
+                msg1 = data.get("msg1", "")
+                logger.warning(f"⚠️ 주문조회 실패: {msg1}")
+                return None
+
+            # ✅ 체결내역 추출
+            output = data.get("output1") or []
+            if not output:
+                logger.info("📭 체결 내역 없음 (output1 비어 있음)")
+                return None
+
+            # ✅ 특정 주문번호에 해당하는 데이터 찾기
+            for item in output:
+                logger.debug(f"🔎 체결 항목: {item}")
+                if item.get("ord_no") == order_no:
+                    logger.info(f"✅ 주문번호 {order_no} 체결 데이터 발견!")
+                    return item
+
+            logger.info(f"📭 주문번호 {order_no} 체결 데이터 없음")
             return None
-            
-        except requests.exceptions.Timeout:
-            logger.warning(f"주문 상태 조회 타임아웃: {order_no}")
-            return None
-        except requests.exceptions.RequestException as e:
-            logger.error(f"주문 상태 조회 네트워크 오류: {e}")
-            return None
+
         except Exception as e:
-            logger.error(f"주문 상태 조회 중 오류: {e}")
+            logger.exception(f"❌ check_order_status() 예외 발생: {e}")
             return None
-    
+
     def execute_auto_sell(self, order_info, filled_price):
         """자동 매도 주문 실행"""
         try:
@@ -140,7 +153,6 @@ class OrderMonitor:
                 logger.error(f"❌ [REST 폴링] 자동 매도 주문 실패: {execution_data['ticker']}")
                 
             return success
-            
         except Exception as e:
             logger.error(f"자동 매도 실행 중 오류: {e}")
             return False
@@ -178,7 +190,7 @@ class OrderMonitor:
                         # 자동 매도 실행
                         self.execute_auto_sell(order_info, status_info['filled_price'])
                         completed_orders.append(order_no)
-                        
+                    
                     elif order_info['attempts'] % 12 == 0:  # 1분마다 상태 로그
                         elapsed_min = order_info['attempts'] * 5 // 60
                         logger.debug(f"⏳ 체결 대기 중: {order_no} ({elapsed_min}분 경과, 상태: {status_info.get('status', 'Unknown')})")
@@ -195,7 +207,7 @@ class OrderMonitor:
             except Exception as e:
                 logger.error(f"주문 모니터링 루프 오류: {e}")
                 time.sleep(10)  # 오류 시 10초 대기
-                
+        
         logger.info("🔍 [REST 폴링] 주문 모니터링 종료")
     
     def start(self):
@@ -235,7 +247,6 @@ class OrderMonitor:
             self.monitoring_orders.pop(order_no, None)
             logger.info(f"🗑️ 오래된 주문 제거: {order_no}")
 
-
 def is_extended_hours(trading_timezone='US/Eastern'):
     """
     미국 동부시간 기준으로 프리마켓/애프터마켓 시간인지 판별
@@ -247,12 +258,10 @@ def is_extended_hours(trading_timezone='US/Eastern'):
         now = datetime.now(tz).time()
         regular_start = dtime(9, 30)
         regular_end = dtime(16, 0)
-        
         return not (regular_start <= now <= regular_end)
     except Exception as e:
         logger.warning(f"시간 판별 오류: {e}, 기본값(정규장) 사용")
         return False
-
 
 def is_market_hours(trading_timezone='US/Eastern'):
     """
@@ -280,15 +289,16 @@ def is_market_hours(trading_timezone='US/Eastern'):
         logger.warning(f"시간 판별 오류: {e}")
         return 'unknown'
 
-
 def place_sell_order(config, token_manager, execution_data, telegram_bot=None):
     """
     자동 매도 주문 실행 함수
+    
     Args:
         config: 설정 딕셔너리
         token_manager: TokenManager 인스턴스
         execution_data: 체결 데이터 {'ticker', 'quantity', 'price'}
         telegram_bot: TelegramBot 인스턴스 (선택)
+        
     Returns:
         bool: 매도 주문 성공 여부
     """
@@ -312,7 +322,7 @@ def place_sell_order(config, token_manager, execution_data, telegram_bot=None):
         if not token:
             logger.error("❌ 유효한 토큰을 가져올 수 없습니다.")
             return False
-            
+        
         headers = {
             "Content-Type": "application/json",
             "authorization": f"Bearer {token}",
@@ -338,7 +348,6 @@ def place_sell_order(config, token_manager, execution_data, telegram_bot=None):
         
         if response.status_code == 200:
             data = response.json()
-            
             if data.get("rt_cd") == "0":
                 order_no = data.get("output", {}).get("ODNO", "Unknown")
                 logger.info(f"✅ 자동 매도 주문 성공: {execution_data['ticker']} {execution_data['quantity']}주 @ ${sell_price} (주문번호: {order_no})")
