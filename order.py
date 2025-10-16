@@ -207,7 +207,7 @@ class OrderMonitor:
                 "TR_CRCY_CD": "USD",
                 "ORD_STRT_DT": today,
                 "ORD_END_DT": today,
-                "SLL_BUY_DVSN_CD": "00",
+                "SLL_BUY_DVSN": "00",
                 "CCLD_DVSN": "00",
                 "PDNO": "",
                 "CTX_AREA_FK100": "",

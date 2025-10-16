@@ -384,7 +384,7 @@ class SmartOrderMonitor:
                 "TR_CRCY_CD": "USD",
                 "ORD_STRT_DT": today,
                 "ORD_END_DT": today,
-                "SLL_BUY_DVSN_CD": "00",  # ✅ 추가
+                "SLL_BUY_DVSN": "00",  # ✅ 추가
                 "CCLD_DVSN": "00",        # ✅ 추가
                 "PDNO": "",               # ✅ 추가
                 "CTX_AREA_FK100": "",
@@ -523,7 +523,7 @@ class SmartOrderMonitor:
                 "TR_CRCY_CD": "USD", 
                 "ORD_STRT_DT": today,
                 "ORD_END_DT": today,
-                "SLL_BUY_DVSN_CD": "02",  # 🔥 매수만 조회 (중요!)
+                "SLL_BUY_DVSN": "02",  # 🔥 매수만 조회 (중요!)
                 "CCLD_DVSN": "01",        # 🔥 체결된 것만 조회 (중요!)
                 "PDNO": "",
                 "CTX_AREA_FK100": "",
@@ -558,7 +558,7 @@ class SmartOrderMonitor:
                     continue
                     
                 # 체결 완료된 매수 주문만 처리
-                if ord_status in ["02", "체결완료"] and order.get("sll_buy_dvsn_cd") == "02":
+                if ord_status in ["02", "체결완료"] and order.get("sll_buy_dvsn") == "02":
                     ticker = order.get("pdno", "")
                     ccld_qty = order.get("ccld_qty", "0")
                     ccld_price = order.get("ccld_unpr", "0")
