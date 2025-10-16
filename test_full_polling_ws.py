@@ -148,6 +148,7 @@ if __name__ == "__main__":
         message_handler=lambda data: logger.info(f"📨 WebSocket 메시지: {data}")
     )
 
-    test_order_number = "31083824"
+    test_order_number = "31680436"
     test_rest_polling(order_monitor, test_order_number)
     test_websocket_connection(ws_client)
+
