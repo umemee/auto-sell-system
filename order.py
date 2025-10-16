@@ -10,6 +10,139 @@ from pytz import timezone
 
 logger = logging.getLogger(__name__)
 
+def is_extended_hours(trading_timezone='US/Eastern'):
+    """
+    미국 동부시간 기준으로 프리마켓/애프터마켓 시간인지 판별
+    정규장: 09:30–16:00 ET
+    정규장 외 시간이면 True 반환 (프리/애프터마켓)
+    """
+    try:
+        tz = timezone(trading_timezone)
+        now = datetime.now(tz).time()
+        regular_start = dtime(9, 30)
+        regular_end = dtime(16, 0)
+        return not (regular_start <= now <= regular_end)
+    except Exception as e:
+        logger.warning(f"시간 판별 오류: {e}, 기본값(정규장) 사용")
+        return False
+
+def is_market_hours(trading_timezone='US/Eastern'):
+    """
+    시장 시간 상태 반환
+    Returns: 'premarket', 'regular', 'aftermarket', 'closed'
+    """
+    try:
+        tz = timezone(trading_timezone)
+        now = datetime.now(tz).time()
+        
+        premarket_start = dtime(4, 0)   # 04:00 ET
+        regular_start = dtime(9, 30)    # 09:30 ET
+        regular_end = dtime(16, 0)      # 16:00 ET
+        aftermarket_end = dtime(20, 0)  # 20:00 ET
+        
+        if premarket_start <= now < regular_start:
+            return 'premarket'
+        elif regular_start <= now < regular_end:
+            return 'regular'
+        elif regular_end <= now < aftermarket_end:
+            return 'aftermarket'
+        else:
+            return 'closed'
+    except Exception as e:
+        logger.warning(f"시간 판별 오류: {e}")
+        return 'unknown'
+
+def place_sell_order(config, token_manager, execution_data, telegram_bot=None):
+    """
+    자동 매도 주문 실행 함수
+    
+    Args:
+        config: 설정 딕셔너리
+        token_manager: TokenManager 인스턴스
+        execution_data: 체결 데이터 {'ticker', 'quantity', 'price'}
+        telegram_bot: TelegramBot 인스턴스 (선택)
+        
+    Returns:
+        bool: 매도 주문 성공 여부
+    """
+    import requests
+    import json
+    import logging
+    from datetime import datetime
+    
+    logger = logging.getLogger(__name__)
+    
+    try:
+        # 매도가 계산
+        buy_price = execution_data['price']
+        profit_margin = config['trading']['profit_margin']
+        sell_price = round(buy_price * (1 + profit_margin), 2)
+        
+        # 한국투자증권 해외주식 매도 API 호출
+        url = f"{config['api']['base_url']}/uapi/overseas-stock/v1/trading/order"
+        
+        token = token_manager.get_access_token()
+        if not token:
+            logger.error("❌ 유효한 토큰을 가져올 수 없습니다.")
+            return False
+        
+        headers = {
+            "Content-Type": "application/json",
+            "authorization": f"Bearer {token}",
+            "appkey": config['api_key'],
+            "appsecret": config['api_secret'],
+            "tr_id": "JTTT1006U"  # 해외주식 매도주문
+        }
+        
+        # 주문 데이터
+        order_data = {
+            "CANO": config['cano'],
+            "ACNT_PRDT_CD": config['acnt_prdt_cd'],
+            "OVRS_EXCG_CD": config['trading']['exchange_code'],  # "NASD"
+            "PDNO": execution_data['ticker'],
+            "ORD_QTY": str(execution_data['quantity']),
+            "OVRS_ORD_UNPR": str(sell_price),
+            "ORD_SVR_DVSN_CD": "0",  # 해외주식 주문서버구분코드
+            "ORD_DVSN": config['trading']['default_order_type']  # "00" 지정가
+        }
+        
+        # API 요청
+        response = requests.post(url, headers=headers, json=order_data, timeout=15)
+        
+        if response.status_code == 200:
+            data = response.json()
+            if data.get("rt_cd") == "0":
+                order_no = data.get("output", {}).get("ODNO", "Unknown")
+                logger.info(f"✅ 자동 매도 주문 성공: {execution_data['ticker']} {execution_data['quantity']}주 @ ${sell_price} (주문번호: {order_no})")
+                
+                # 텔레그램 알림
+                if telegram_bot:
+                    profit_rate = (sell_price - buy_price) / buy_price * 100
+                    telegram_bot.send_sell_order_notification(
+                        execution_data['ticker'],
+                        execution_data['quantity'],
+                        buy_price,
+                        sell_price,
+                        profit_rate
+                    )
+                
+                return True
+            else:
+                error_msg = data.get("msg1", "Unknown error")
+                logger.error(f"❌ 매도 주문 API 오류: {error_msg}")
+                if telegram_bot:
+                    telegram_bot.send_error_notification(f"매도 주문 실패: {error_msg}")
+                return False
+        else:
+            logger.error(f"❌ HTTP 오류 {response.status_code}: {response.text}")
+            return False
+            
+    except Exception as e:
+        logger.error(f"❌ 매도 주문 실행 중 오류: {e}")
+        if telegram_bot:
+            telegram_bot.send_error_notification(f"매도 주문 오류: {str(e)}")
+        return False
+
 class OrderMonitor:
     """프리마켓/애프터마켓용 주문 체결 모니터링 시스템"""
     
@@ -69,6 +202,7 @@ class OrderMonitor:
                 "CANO": self.config["cano"],                  # 계좌번호(앞 8자리)
                 "ACNT_PRDT_CD": self.config["acnt_prdt_cd"],  # 계좌상품코드(뒤 2자리)
                 "OVRS_EXCG_CD": "NASD",                       # 거래소코드 (NASDAQ)
+                "TR_CRCY_CD": "USD",
                 "ORD_DT": "",                                 # 주문일자 (당일이면 비움)
                 "SLL_BUY_DVSN_CD": "00",                      # 매수/매도 구분 (00=전체)
                 "INQR_DVSN": "00",                            # 전체 조회
@@ -110,9 +244,9 @@ class OrderMonitor:
                 return None
 
             # ✅ 체결내역 추출
-            output = data.get("output1") or []
+            output = data.get("output") or []
             if not output:
-                logger.info("📭 체결 내역 없음 (output1 비어 있음)")
+                logger.info("📭 체결 내역 없음 (output 비어 있음)")
                 return None
 
             # ✅ 특정 주문번호에 해당하는 데이터 찾기
@@ -246,136 +380,3 @@ class OrderMonitor:
         for order_no in old_orders:
             self.monitoring_orders.pop(order_no, None)
             logger.info(f"🗑️ 오래된 주문 제거: {order_no}")
-
-def is_extended_hours(trading_timezone='US/Eastern'):
-    """
-    미국 동부시간 기준으로 프리마켓/애프터마켓 시간인지 판별
-    정규장: 09:30–16:00 ET
-    정규장 외 시간이면 True 반환 (프리/애프터마켓)
-    """
-    try:
-        tz = timezone(trading_timezone)
-        now = datetime.now(tz).time()
-        regular_start = dtime(9, 30)
-        regular_end = dtime(16, 0)
-        return not (regular_start <= now <= regular_end)
-    except Exception as e:
-        logger.warning(f"시간 판별 오류: {e}, 기본값(정규장) 사용")
-        return False
-
-def is_market_hours(trading_timezone='US/Eastern'):
-    """
-    시장 시간 상태 반환
-    Returns: 'premarket', 'regular', 'aftermarket', 'closed'
-    """
-    try:
-        tz = timezone(trading_timezone)
-        now = datetime.now(tz).time()
-        
-        premarket_start = dtime(4, 0)   # 04:00 ET
-        regular_start = dtime(9, 30)    # 09:30 ET
-        regular_end = dtime(16, 0)      # 16:00 ET
-        aftermarket_end = dtime(20, 0)  # 20:00 ET
-        
-        if premarket_start <= now < regular_start:
-            return 'premarket'
-        elif regular_start <= now < regular_end:
-            return 'regular'
-        elif regular_end <= now < aftermarket_end:
-            return 'aftermarket'
-        else:
-            return 'closed'
-    except Exception as e:
-        logger.warning(f"시간 판별 오류: {e}")
-        return 'unknown'
-
-def place_sell_order(config, token_manager, execution_data, telegram_bot=None):
-    """
-    자동 매도 주문 실행 함수
-    
-    Args:
-        config: 설정 딕셔너리
-        token_manager: TokenManager 인스턴스
-        execution_data: 체결 데이터 {'ticker', 'quantity', 'price'}
-        telegram_bot: TelegramBot 인스턴스 (선택)
-        
-    Returns:
-        bool: 매도 주문 성공 여부
-    """
-    import requests
-    import json
-    import logging
-    from datetime import datetime
-    
-    logger = logging.getLogger(__name__)
-    
-    try:
-        # 매도가 계산
-        buy_price = execution_data['price']
-        profit_margin = config['trading']['profit_margin']
-        sell_price = round(buy_price * (1 + profit_margin), 2)
-        
-        # 한국투자증권 해외주식 매도 API 호출
-        url = f"{config['api']['base_url']}/uapi/overseas-stock/v1/trading/order"
-        
-        token = token_manager.get_access_token()
-        if not token:
-            logger.error("❌ 유효한 토큰을 가져올 수 없습니다.")
-            return False
-        
-        headers = {
-            "Content-Type": "application/json",
-            "authorization": f"Bearer {token}",
-            "appkey": config['api_key'],
-            "appsecret": config['api_secret'],
-            "tr_id": "JTTT1006U"  # 해외주식 매도주문
-        }
-        
-        # 주문 데이터
-        order_data = {
-            "CANO": config['cano'],
-            "ACNT_PRDT_CD": config['acnt_prdt_cd'],
-            "OVRS_EXCG_CD": config['trading']['exchange_code'],  # "NASD"
-            "PDNO": execution_data['ticker'],
-            "ORD_QTY": str(execution_data['quantity']),
-            "OVRS_ORD_UNPR": str(sell_price),
-            "ORD_SVR_DVSN_CD": "0",  # 해외주식 주문서버구분코드
-            "ORD_DVSN": config['trading']['default_order_type']  # "00" 지정가
-        }
-        
-        # API 요청
-        response = requests.post(url, headers=headers, json=order_data, timeout=15)
-        
-        if response.status_code == 200:
-            data = response.json()
-            if data.get("rt_cd") == "0":
-                order_no = data.get("output", {}).get("ODNO", "Unknown")
-                logger.info(f"✅ 자동 매도 주문 성공: {execution_data['ticker']} {execution_data['quantity']}주 @ ${sell_price} (주문번호: {order_no})")
-                
-                # 텔레그램 알림
-                if telegram_bot:
-                    profit_rate = (sell_price - buy_price) / buy_price * 100
-                    telegram_bot.send_sell_order_notification(
-                        execution_data['ticker'],
-                        execution_data['quantity'],
-                        buy_price,
-                        sell_price,
-                        profit_rate
-                    )
-                
-                return True
-            else:
-                error_msg = data.get("msg1", "Unknown error")
-                logger.error(f"❌ 매도 주문 API 오류: {error_msg}")
-                if telegram_bot:
-                    telegram_bot.send_error_notification(f"매도 주문 실패: {error_msg}")
-                return False
-        else:
-            logger.error(f"❌ HTTP 오류 {response.status_code}: {response.text}")
-            return False
-            
-    except Exception as e:
-        logger.error(f"❌ 매도 주문 실행 중 오류: {e}")
-        if telegram_bot:
-            telegram_bot.send_error_notification(f"매도 주문 오류: {str(e)}")
-        return False

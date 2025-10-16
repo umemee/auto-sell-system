@@ -78,7 +78,7 @@ class WebSocketClient:
             logger.error("❌ WebSocket 승인키 없음")
             return None
 
-        tr_key = str(uuid.uuid4())  # 서버가 요구하는 고유 연결 키 생성
+        tr_key = symbol or self.default_symbol  # ✅ 종목 코드 직접 사용
 
         subscribe_message = {
             "header": {
@@ -100,28 +100,23 @@ class WebSocketClient:
         return json.dumps(subscribe_message)
 
     def _refresh_approval_key_if_needed(self):
-        """승인키 만료 시 자동 갱신"""
+        """
+        승인키 갱신 - 오류 발생 시에만 사용
+    
+        ⚠️ 주의: 승인키를 갱신하면 기존 WebSocket 세션이 끊깁니다.
+        따라서 정상 동작 중에는 갱신하지 않고, 오류 발생 시에만 수동으로 호출합니다.
+        """
         try:
-            current_time = time.time()
-            if current_time - self.last_approval_key_refresh >= self.approval_key_refresh_interval:
-                logger.info("🔑 승인키 자동 갱신 시도")
-                
-                # TokenManager에 force_refresh 파라미터가 있는지 확인 후 호출
-                try:
-                    new_key = self.token_manager.get_websocket_approval_key()
-                except TypeError:
-                    # force_refresh 파라미터가 없는 경우
-                    new_key = self.token_manager.get_websocket_approval_key()
-                
-                if new_key:
-                    logger.info("🔑 승인키 자동 갱신 완료")
-                    self.last_approval_key_refresh = current_time
-                    
-                    # 구독 재시도
-                    if self.connected:
-                        self.subscribe(self.default_symbol)
-                else:
-                    logger.error("❌ 승인키 갱신 실패")
+            logging.info("🔑 승인키 강제 갱신 시도 (오류 복구용)")
+        
+            # ✅ force_refresh=True로 새 승인키 발급
+            new_key = self.token_manager.get_websocket_approval_key(force_refresh=True)
+        
+            if new_key:
+                logger.info("🔑 승인키 강제 갱신 완료 (WebSocket 재연결 필요)")
+                self.last_approval_key_refresh = time.time()
+            else:
+                logger.error("❌ 승인키 갱신 실패")
         except Exception as e:
             logger.error(f"❌ 승인키 갱신 중 오류: {e}")
 
@@ -300,8 +295,6 @@ class WebSocketClient:
         def run_loop():
             while self.is_running and self.reconnect_count < self.max_reconnects:
                 try:
-                    # ✅ 개선사항 3: 승인키 만료 시 자동갱신
-                    self._refresh_approval_key_if_needed()
                     
                     approval_key = self.token_manager.get_websocket_approval_key()
                     if not approval_key:
@@ -331,10 +324,18 @@ class WebSocketClient:
                     self.connected = False
                     self.subscribed = False
                     self.reconnect_count += 1
-                    
+
                     if self.is_running and self.reconnect_count < self.max_reconnects:
-                        delay = min(5 * self.reconnect_count, 60)
-                        logger.info(f"⏳ 재접속 대기 {delay}s")
+                        # ✅ 시장 상태에 따른 적응형 재연결 지연
+                        if not self._is_regular_market():
+                           # 프리마켓/장 마감: 5분 대기 (AWS 비용 절감)
+                            delay = 300  # 5분
+                            logger.info(f"🌙 정규장 아님 - 재연결 대기 {delay}초 (5분)")
+                        else:
+                            # 정규장: 빠른 재연결 (5초, 10초, 15초...)
+                            delay = min(5 * self.reconnect_count, 60)
+                            logger.info(f"⏳ 재접속 대기 {delay}초")
+    
                         time.sleep(delay)
 
         thread = threading.Thread(target=run_loop, daemon=True)

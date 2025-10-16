@@ -362,7 +362,7 @@ class SmartOrderMonitor:
             return None
 
         try:
-            url = f"{self.config['api']['base_url']}/uapi/overseas-stock/v1/trading/inquire-nccs"
+            url = f"{self.config['api']['base_url']}/uapi/overseas-stock/v1/trading/inquire-ccnl"
             token = self.token_manager.get_access_token()
             if not token:
                 logger.error("토큰을 가져올 수 없습니다.")
@@ -373,13 +373,14 @@ class SmartOrderMonitor:
                 "authorization": f"Bearer {token}",
                 "appkey": self.config['api_key'],
                 "appsecret": self.config['api_secret'],
-                "tr_id": "JTTT3010R"
+                "tr_id": "TTTS3012R"
             }
 
             today = datetime.now().strftime("%Y%m%d")
             params = {
                 "CANO": self.config['cano'],
                 "ACNT_PRDT_CD": self.config['acnt_prdt_cd'],
+                "TR_CRCY_CD": "USD",                          # ✅ 거래통화코드 추가
                 "ORD_STRT_DT": today,
                 "ORD_END_DT": today,
                 "CTX_AREA_FK100": "",

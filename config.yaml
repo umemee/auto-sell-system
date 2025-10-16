@@ -51,6 +51,14 @@ polling:
     max_interval: 20
     backoff_multiplier: 1.5
     batch_size: 5
+    no_change_threshold: 5           # ✅ 추가
+    consecutive_success_speedup: false  # ✅ 추가
+    order_age_factor:                # ✅ 추가
+    - minutes: 30
+      interval: 15
+    - minutes: 60
+      interval: 20
+    - default: 5
 
 rate_limit:
   requests_per_second: 15
@@ -59,8 +67,11 @@ rate_limit:
   max_consecutive_requests: 10
   consecutive_delay: 2.5
   min_request_interval: 2.5
+  aggressive_mode_limit: 5000   # ✅ 추가
+  smart_mode_limit: 3000         # ✅ 추가
   rate_limit_codes: ["EGW00101", "EGW00102"]
   rate_limit_retry_delay: 60
+  cooldown_on_limit: 60          # ✅ 추가
 
 market_hours:
   premarket:

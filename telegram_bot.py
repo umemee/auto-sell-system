@@ -134,15 +134,38 @@ class TelegramBot:
             self.logger.error(f"업데이트 가져오기 오류: {e}")
             return []
 
-    def clear_message_queue(self):
-        """메시지 큐 정리 - 시작 시 이전 메시지들을 모두 무시"""
+    def clear_message_queue(self, start_time):
+        """
+        메시지 큐 정리 - 시작 시각 이전 메시지만 무시
+    
+        Args:
+            start_time: 시스템 시작 시각 (timestamp)
+        """
         try:
             updates = self.get_updates()
-            if updates:
-                latest_update_id = updates[-1]['update_id']
-                # 모든 이전 메시지를 읽음 처리
-                self.get_updates(offset=latest_update_id + 1)
-                self.logger.info(f"텔레그램 메시지 큐 정리: {len(updates)}개 메시지 무시됨")
+            if not updates:
+                return True
+    
+            # ✅ 시작 시각 이전 메시지만 필터링
+            old_messages = []
+            latest_offset = None
+    
+            for update in updates:
+                message = update.get('message', {})
+                message_date = message.get('date', 0)
+    
+                # 시작 시각 이전 메시지는 무시
+                if message_date < start_time:
+                    old_messages.append(update['update_id'])
+                    latest_offset = update['update_id']
+    
+            # 오래된 메시지만 읽음 처리
+            if latest_offset:
+                self.get_updates(offset=latest_offset + 1)
+                self.logger.info(f"텔레그램 오래된 메시지 정리: {len(old_messages)}개 무시됨")
+            else:
+                self.logger.info("텔레그램 큐에 오래된 메시지 없음")
+    
             return True
         except Exception as e:
             self.logger.error(f"메시지 큐 정리 오류: {e}")
@@ -235,13 +258,15 @@ AWS 최적화:
     def start_polling(self):
         """텔레그램 봇 폴링 시작 - AWS 최적화된 버전"""
         self.logger.info(f"텔레그램 봇 폴링을 시작합니다... (간격: {self.polling_interval}초)")
-
-        # 시작 시 메시지 큐 정리
-        self.clear_message_queue()
+        
+        # ✅ 시작 시각을 먼저 기록
+        start_time = datetime.now().timestamp()
+    
+        # ✅ 시작 시각을 전달하여 메시지 큐 정리
+        self.clear_message_queue(start_time)
         self.is_running = True
         
         offset = None
-        start_time = datetime.now().timestamp()
         consecutive_errors = 0
         max_consecutive_errors = 5
 
