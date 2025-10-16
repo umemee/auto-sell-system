@@ -168,100 +168,103 @@ class OrderMonitor:
         self.monitoring_orders[order_no] = order_info
         logger.info(f"📝 주문 모니터링 등록: {order_no} ({ticker} {quantity}주 @ ${buy_price})")
 
+        
     def check_order_status(self, order_no):
         """
-        해외주식 주문체결내역 조회 (TTTS3012R)
+        ✅ 해외주식 주문/체결내역 조회 (TTTS3035R) - 올바른 API 사용
         주문번호를 기준으로 REST API를 통해 체결 상태를 확인합니다.
         """
         import requests
         import logging
-
         logger = logging.getLogger(__name__)
-
+        
         try:
-            # ✅ 해외주식 주문체결내역 조회 API 엔드포인트
-            url = f"{self.config['api']['base_url']}/uapi/overseas-stock/v1/trading/inquire-ccnl"
-
+            # ✅ 해외주식 주문체결내역 조회 API 엔드포인트 (올바른 API)
+            url = f"{self.config['api']['base_url']}/uapi/overseas-stock/v1/trading/inquire-nccs"
+            
             # ✅ 액세스 토큰 확인
             token = self.token_manager.get_access_token()
             if not token:
                 logger.error("❌ 액세스 토큰 없음 - check_order_status 중단")
                 return None
-
-            # ✅ 헤더 설정 (실전투자 기준: TTTS3012R / 모의투자: VTTS3012R)
+                
+            # ✅ 헤더 설정 (실전투자: TTTS3035R)
             headers = {
                 "Content-Type": "application/json",
                 "authorization": f"Bearer {token}",
                 "appkey": self.config["api_key"],
                 "appsecret": self.config["api_secret"],
-                "tr_id": "TTTS3012R",  # 모의투자는 'VTTS3012R'로 변경
+                "tr_id": "TTTS3035R",  # 올바른 TR_ID
             }
-
-            # ✅ API 문서 기준 요청 파라미터
+            
+            # ✅ 올바른 파라미터 (주문내역 조회)
+            from datetime import datetime
+            today = datetime.now().strftime("%Y%m%d")
             params = {
-                "CANO": self.config["cano"],                  # 계좌번호(앞 8자리)
-                "ACNT_PRDT_CD": self.config["acnt_prdt_cd"],  # 계좌상품코드(뒤 2자리)
-                "OVRS_EXCG_CD": "NASD",                       # 거래소코드 (NASDAQ)
+                "CANO": self.config["cano"],
+                "ACNT_PRDT_CD": self.config["acnt_prdt_cd"],
+                "OVRS_EXCG_CD": "NASD",
                 "TR_CRCY_CD": "USD",
-                "ORD_DT": "",                                 # 주문일자 (당일이면 비움)
-                "SLL_BUY_DVSN_CD": "00",                      # 매수/매도 구분 (00=전체)
-                "INQR_DVSN": "00",                            # 전체 조회
-                "STRT_ODNO": order_no,                        # 시작 주문번호
-                "PDNO": "",                                   # 종목코드
-                "CCLD_DVSN": "00",                            # 체결/미체결 (00=전체)
-                "ORD_GNO_BRNO": "",                           # 주문채번지점번호
-                "ODNO": order_no,                             # 주문번호
-                "INQR_DVSN_3": "00",
-                "INQR_DVSN_1": "",
-                "CTX_AREA_FK200": "",
-                "CTX_AREA_NK200": ""
+                "ORD_STRT_DT": today,
+                "ORD_END_DT": today,
+                "SLL_BUY_DVSN_CD": "00",
+                "CCLD_DVSN": "00",
+                "PDNO": "",
+                "CTX_AREA_FK100": "",
+                "CTX_AREA_NK100": ""
             }
-
+            
             # ✅ 요청 정보 출력 (디버깅용)
             logger.debug(f"📤 주문조회 요청 URL: {url}")
             logger.debug(f"📤 주문조회 헤더: {headers}")
             logger.debug(f"📤 주문조회 파라미터: {params}")
-
-            # ✅ 한국투자증권 해외주식 체결조회는 GET 방식
+            
+            # ✅ GET 방식으로 요청
             response = requests.get(url, headers=headers, params=params, timeout=10)
-
-            # ✅ 응답 전문 출력
+            
+            # ✅ 응답 출력
             logger.debug(f"📥 주문조회 응답(raw): {response.text}")
-
+            
             if response.status_code != 200:
                 logger.error(f"❌ 주문조회 HTTP 오류: {response.status_code}")
                 return None
-
+                
             # ✅ JSON 파싱
             data = response.json()
             logger.debug(f"📑 주문조회 파싱 결과: {data}")
-
-            # ✅ 정상 응답 여부 확인
+            
+            # ✅ 정상 응답 확인
             rt_cd = data.get("rt_cd", "")
             if rt_cd != "0":
                 msg1 = data.get("msg1", "")
                 logger.warning(f"⚠️ 주문조회 실패: {msg1}")
                 return None
-
-            # ✅ 체결내역 추출 (output1이 실제 데이터)
-            output = data.get("output") or data.get("output1") or []
-            if not output:
-                logger.info("📭 체결 내역 없음 (output 비어 있음)")
+                
+            # ✅ 주문 내역에서 해당 주문번호 찾기
+            orders = data.get("output", [])
+            if not orders:
+                logger.info("📭 당일 주문 내역 없음")
                 return None
-
-            # 리스트 형태일 경우 주문번호로 필터링
-            if isinstance(output, list):
-                for item in output:
-                    # 주문번호가 일치하는 항목 찾기
-                    if item.get("odno") == order_no or item.get("ord_no") == order_no:
-                        return {
-                            'status': item.get('ord_stcd', '조회없음'),
-                            'filled_qty': int(item.get('ccld_qty', 0) or 0),
-                            'filled_price': float(item.get('ccld_unpr', 0) or 0)
-                        }
-                logger.info(f"📭 주문번호 {order_no}에 해당하는 체결 데이터 없음")
-                return None
-
+                
+            # 주문번호로 매칭
+            for order in orders:
+                if order.get("odno") == order_no:
+                    ord_status = order.get("ord_stcd", "")
+                    ccld_qty = order.get("ccld_qty", "0")
+                    ccld_unpr = order.get("ccld_unpr", "0")
+                    
+                    logger.info(f"🔍 주문 발견: {order_no} - 상태: {ord_status}, 체결량: {ccld_qty}")
+                    
+                    return {
+                        'status': ord_status,
+                        'filled_qty': int(ccld_qty) if ccld_qty.isdigit() else 0,
+                        'filled_price': float(ccld_unpr) if ccld_unpr.replace('.', '').replace('-', '').isdigit() else 0.0,
+                        'order_data': order
+                    }
+                    
+            logger.info(f"📭 주문번호 {order_no}에 해당하는 주문 없음")
+            return None
+            
         except Exception as e:
             logger.exception(f"❌ check_order_status() 예외 발생: {e}")
             return None

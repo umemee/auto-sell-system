@@ -362,7 +362,7 @@ class SmartOrderMonitor:
             return None
 
         try:
-            url = f"{self.config['api']['base_url']}/uapi/overseas-stock/v1/trading/inquire-ccnl"
+            url = f"{self.config['api']['base_url']}/uapi/overseas-stock/v1/trading/inquire-nccs"
             token = self.token_manager.get_access_token()
             if not token:
                 logger.error("토큰을 가져올 수 없습니다.")
@@ -373,16 +373,20 @@ class SmartOrderMonitor:
                 "authorization": f"Bearer {token}",
                 "appkey": self.config['api_key'],
                 "appsecret": self.config['api_secret'],
-                "tr_id": "TTTS3012R"
+                "tr_id": "TTTS3035R"
             }
 
             today = datetime.now().strftime("%Y%m%d")
             params = {
                 "CANO": self.config['cano'],
                 "ACNT_PRDT_CD": self.config['acnt_prdt_cd'],
-                "TR_CRCY_CD": "USD",                          # ✅ 거래통화코드 추가
+                "OVRS_EXCG_CD": "NASD",  # ✅ 추가
+                "TR_CRCY_CD": "USD",
                 "ORD_STRT_DT": today,
                 "ORD_END_DT": today,
+                "SLL_BUY_DVSN_CD": "00",  # ✅ 추가
+                "CCLD_DVSN": "00",        # ✅ 추가
+                "PDNO": "",               # ✅ 추가
                 "CTX_AREA_FK100": "",
                 "CTX_AREA_NK100": ""
             }
@@ -485,6 +489,115 @@ class SmartOrderMonitor:
             logger.error(f"자동 매도 실행 오류: {e}")
             return False
 
+    def scan_for_new_buy_orders(self):
+        """
+        ✅ 자동 매수 감지 시스템
+        MTS에서 매수 주문이 들어오면 자동으로 감지하여 모니터링에 등록
+        """
+        try:
+            if not self.can_make_request():
+                return
+                
+            # 오늘 날짜의 모든 매수 주문 조회
+            url = f"{self.config['api']['base_url']}/uapi/overseas-stock/v1/trading/inquire-nccs"
+            token = self.token_manager.get_access_token()
+            
+            if not token:
+                logger.error("토큰을 가져올 수 없습니다.")
+                return
+                
+            headers = {
+                "Content-Type": "application/json", 
+                "authorization": f"Bearer {token}",
+                "appkey": self.config['api_key'],
+                "appsecret": self.config['api_secret'],
+                "tr_id": "TTTS3035R"
+            }
+            
+            from datetime import datetime
+            today = datetime.now().strftime("%Y%m%d")
+            params = {
+                "CANO": self.config['cano'],
+                "ACNT_PRDT_CD": self.config['acnt_prdt_cd'],
+                "OVRS_EXCG_CD": "NASD",
+                "TR_CRCY_CD": "USD", 
+                "ORD_STRT_DT": today,
+                "ORD_END_DT": today,
+                "SLL_BUY_DVSN_CD": "02",  # 🔥 매수만 조회 (중요!)
+                "CCLD_DVSN": "01",        # 🔥 체결된 것만 조회 (중요!)
+                "PDNO": "",
+                "CTX_AREA_FK100": "",
+                "CTX_AREA_NK100": ""
+            }
+            
+            import requests
+            response = requests.get(url, headers=headers, params=params, timeout=15)
+            
+            # 카운터 업데이트
+            self.last_request_time = time.time()
+            self.consecutive_requests += 1
+            self.daily_api_count += 1
+            self.hourly_api_count += 1
+            self.stats['total_requests'] += 1
+            
+            if response.status_code != 200:
+                logger.error(f"매수 감지 HTTP 오류: {response.status_code}")
+                return
+                
+            data = response.json()
+            if data.get("rt_cd") != "0":
+                return
+                
+            # 새로운 매수 체결 찾기
+            for order in data.get("output", []):
+                order_no = order.get("odno", "")
+                ord_status = order.get("ord_stcd", "")
+                
+                # 이미 모니터링 중인 주문은 제외
+                if order_no in self.monitoring_orders:
+                    continue
+                    
+                # 체결 완료된 매수 주문만 처리
+                if ord_status in ["02", "체결완료"] and order.get("sll_buy_dvsn_cd") == "02":
+                    ticker = order.get("pdno", "")
+                    ccld_qty = order.get("ccld_qty", "0")
+                    ccld_price = order.get("ccld_unpr", "0")
+                    
+                    # 문자열을 숫자로 변환
+                    try:
+                        ccld_qty = int(ccld_qty) if ccld_qty else 0
+                        ccld_price = float(ccld_price) if ccld_price else 0.0
+                    except:
+                        continue
+                    
+                    if ccld_qty > 0 and ccld_price > 0:
+                        logger.info(f"🎉 신규 매수 체결 발견! {order_no}: {ticker} {ccld_qty}주 @ ${ccld_price}")
+                        
+                        # 주문 정보 구성
+                        order_info = {
+                            'ticker': ticker,
+                            'quantity': ccld_qty,
+                            'buy_price': ccld_price
+                        }
+                        
+                        # 즉시 자동 매도 주문 실행
+                        success = self.execute_auto_sell(order_info, ccld_price)
+                        
+                        if success:
+                            logger.info(f"✅ 자동 매도 주문 즉시 성공: {ticker}")
+                            
+                            # 텔레그램 알림
+                            if self.telegram_bot:
+                                profit_rate = self.config.get('strategy', {}).get('smart_strategy', {}).get('target_profit_margin', 0.03) * 100
+                                message = f"🎉 자동 매수 감지 & 매도 성공!\n🏷️ {ticker} {ccld_qty}주\n💰 매수: ${ccld_price}\n📈 목표 수익: +{profit_rate}%"
+                                self.telegram_bot.send_message(message)
+                        else:
+                            logger.error(f"❌ 자동 매도 주문 실패: {ticker}")
+                            
+        except Exception as e:
+            logger.error(f"매수 감지 스캔 오류: {e}")
+
+
     def cleanup_expired_orders(self):
         """만료된 주문 정리"""
         now = datetime.now()
@@ -524,6 +637,13 @@ class SmartOrderMonitor:
                         # 중지 시간 대기
                         time.sleep(300)  # 5분 대기
                         continue
+                            # ✅ 🔥 자동 매수 감지 (15초마다 스캔)
+                current_time = time.time()
+                if not hasattr(self, 'last_buy_scan') or current_time - self.last_buy_scan > 15:
+                    logger.debug("🔍 자동 매수 감지 스캔 시작...")
+                    self.scan_for_new_buy_orders()
+                    self.last_buy_scan = current_time
+
                 
                 # 모니터링할 주문 없으면 대기
                 if not self.monitoring_orders:
