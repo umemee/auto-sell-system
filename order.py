@@ -243,21 +243,24 @@ class OrderMonitor:
                 logger.warning(f"⚠️ 주문조회 실패: {msg1}")
                 return None
 
-            # ✅ 체결내역 추출
-            output = data.get("output") or []
+            # ✅ 체결내역 추출 (output1이 실제 데이터)
+            output = data.get("output") or data.get("output1") or []
             if not output:
                 logger.info("📭 체결 내역 없음 (output 비어 있음)")
                 return None
 
-            # ✅ 특정 주문번호에 해당하는 데이터 찾기
-            for item in output:
-                logger.debug(f"🔎 체결 항목: {item}")
-                if item.get("ord_no") == order_no:
-                    logger.info(f"✅ 주문번호 {order_no} 체결 데이터 발견!")
-                    return item
-
-            logger.info(f"📭 주문번호 {order_no} 체결 데이터 없음")
-            return None
+            # 리스트 형태일 경우 주문번호로 필터링
+            if isinstance(output, list):
+                for item in output:
+                    # 주문번호가 일치하는 항목 찾기
+                    if item.get("odno") == order_no or item.get("ord_no") == order_no:
+                        return {
+                            'status': item.get('ord_stcd', '조회없음'),
+                            'filled_qty': int(item.get('ccld_qty', 0) or 0),
+                            'filled_price': float(item.get('ccld_unpr', 0) or 0)
+                        }
+                logger.info(f"📭 주문번호 {order_no}에 해당하는 체결 데이터 없음")
+                return None
 
         except Exception as e:
             logger.exception(f"❌ check_order_status() 예외 발생: {e}")
