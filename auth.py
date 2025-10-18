@@ -1,94 +1,133 @@
-# auth.py - WebSocket 승인키 기능 추가된 완전한 버전
+# auth.py - 한국투자증권 API 인증/토큰 관리 (자동 갱신 및 WebSocket Approval Key 포함)
 
 import requests
 import json
 import logging
 from datetime import datetime, timedelta
 
+logger = logging.getLogger(__name__)
+
+
 class TokenManager:
+    """
+    한국투자증권 API용 TokenManager
+    - REST 액세스 토큰 자동 갱신
+    - WebSocket Approval Key 자동 갱신
+    """
+
     def __init__(self, config):
         self.config = config
         self.access_token = None
         self.token_expires_at = None
-        self.websocket_approval_key = None
+        self.approval_key = None
+        self.approval_expires_at = None
 
-    def get_access_token(self, force_refresh=False):
-        """
-        최초 발급 후 만료 10분 전까진 기존 토큰을 재사용.
-        오직 최초 실행 시와 만료 직전(10분 미만 남았을 때)만 새 토큰 발급.
-        """
-        now = datetime.now()
-        if (not force_refresh
-            and self.access_token
-            and self.token_expires_at
-            and now < self.token_expires_at - timedelta(minutes=10)):
-            return self.access_token
+        # 토큰 만료 마진 (토큰 만료 전 재갱신)
+        self.token_refresh_margin = config.get('system', {}).get('token_refresh_margin_minutes', 5)
+        # Approval Key 만료 간격 (초)
+        self.approval_margin_seconds = config.get('system', {}).get('approval_margin_seconds', 30 * 60)
 
-        # 토큰 발급/갱신
-        logging.info("🔑 토큰 발급/갱신 요청")
+    def _request_access_token(self):
+        """
+        REST API용 Access Token 요청
+        """
         url = f"{self.config['api']['base_url']}/oauth2/tokenP"
+        headers = {"Content-Type": "application/json"}
         body = {
             "grant_type": "client_credentials",
             "appkey": self.config['api_key'],
             "appsecret": self.config['api_secret']
         }
+        try:
+            resp = requests.post(url, headers=headers, json=body, timeout=10)
+            resp.raise_for_status()
+            data = resp.json()
+            token = data.get("access_token")
+            expires_in = data.get("expires_in", 86400)
+            if token:
+                self.access_token = token
+                self.token_expires_at = datetime.now() + timedelta(seconds=expires_in)
+                logger.info(f"✅ Access Token 발급 성공 (만료: {self.token_expires_at.strftime('%H:%M:%S')})")
+                return token
+            else:
+                logger.error(f"❌ Access Token 응답 누락: {data}")
+        except Exception as e:
+            logger.error(f"❌ Access Token 요청 오류: {e}")
+        return None
 
-        res = requests.post(
-            url,
-            headers={"Content-Type": "application/json"},
-            data=json.dumps(body),
-            timeout=10
-        )
-
-        res.raise_for_status()
-        data = res.json()
-        self.access_token = data["access_token"]
-
-        # expires_in이 없으면 기본 86400초(24시간) 사용
-        expires_in = data.get("expires_in", 86400)
-        self.token_expires_at = now + timedelta(seconds=expires_in)
-
-        logging.info(f"✅ 토큰 발급 완료 (만료: {self.token_expires_at})")
+    def get_access_token(self, force_refresh=False):
+        """
+        유효한 Access Token 반환
+        - 토큰 만료 5분 전이면 자동 갱신
+        """
+        now = datetime.now()
+        if force_refresh or not self.access_token or not self.token_expires_at:
+            return self._request_access_token()
+        # 만료 전 마진 체크
+        if now + timedelta(minutes=self.token_refresh_margin) >= self.token_expires_at:
+            logger.info("🔄 Access Token 만료 임박, 자동 갱신")
+            return self._request_access_token()
         return self.access_token
 
-    def get_websocket_approval_key(self, force_refresh=False):
+    def _request_approval_key(self):
         """
-        WebSocket 접속을 위한 approval key 발급/재사용
-    
-        한국투자증권은 하나의 승인키로 하나의 WebSocket 세션만 유지.
-        기존 승인키가 있으면 재사용하고, 없거나 force_refresh=True일 때만 새로 발급.
+        WebSocket용 Approval Key 요청
         """
-        try:
-           # ✅ 기존 승인키가 있고 강제 갱신이 아니면 재사용
-            if self.websocket_approval_key and not force_refresh:
-                logging.info("🔑 기존 WebSocket 승인키 재사용")
-                return self.websocket_approval_key
-        
-        # 새 승인키 발급
-            logging.info("🔑 WebSocket 승인키 발급 요청")
-        
-            url = f"{self.config['api']['base_url']}/oauth2/Approval"
-            body = {
-                "grant_type": "client_credentials",
-                "appkey": self.config['api_key'],
-                "secretkey": self.config['api_secret']
-            }
-        
-            headers = {"Content-Type": "application/json"}
-        
-            response = requests.post(url, headers=headers, json=body, timeout=10)
-            response.raise_for_status()
-        
-            data = response.json()
-            self.websocket_approval_key = data.get("approval_key", "")
-        
-            if self.websocket_approval_key:
-                logging.info(f"✅ WebSocket approval key 발급 완료: ***{self.websocket_approval_key[-4:]}")
-                return self.websocket_approval_key
-            else:
-                logging.error("❌ approval_key가 응답에 없습니다.")
-                return None
-            
-        except Exception as e:
-            logging.error(f"❌ WebSocket approval key 발급 실패: {e}")
+        url = f"{self.config['api']['base_url']}/uapi/overseas-stock/v1/websocket/approval"
+        token = self.get_access_token()
+        if not token:
+            logger.error("❌ Approval Key 요청 시 Access Token 없음")
             return None
+
+        headers = {
+            "Content-Type": "application/json",
+            "authorization": f"Bearer {token}",
+            "appkey": self.config['api_key'],
+            "appsecret": self.config['api_secret']
+        }
+        try:
+            resp = requests.post(url, headers=headers, timeout=10)
+            resp.raise_for_status()
+            data = resp.json()
+            key = data.get("approval_key")
+            if key:
+                self.approval_key = key
+                self.approval_expires_at = datetime.now() + timedelta(seconds=self.approval_margin_seconds)
+                logger.info(f"✅ Approval Key 발급 성공 (만료: {self.approval_expires_at.strftime('%H:%M:%S')})")
+                return key
+            else:
+                logger.error(f"❌ Approval Key 응답 누락: {data}")
+        except Exception as e:
+            logger.error(f"❌ Approval Key 요청 오류: {e}")
+        return None
+
+    def get_approval_key(self, force_refresh=False):
+        """
+        유효한 Approval Key 반환
+        - Approval Key 만료 30분 전이면 자동 갱신
+        """
+        now = datetime.now()
+        if force_refresh or not self.approval_key or not self.approval_expires_at:
+            return self._request_approval_key()
+        if now + timedelta(seconds=0) >= self.approval_expires_at:
+            logger.info("🔄 Approval Key 만료, 자동 갱신")
+            return self._request_approval_key()
+        return self.approval_key
+
+
+# 테스트 코드
+if __name__ == "__main__":
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
+    from config import load_config
+
+    cfg = load_config('production')
+    tm = TokenManager(cfg)
+
+    print("=" * 80)
+    print("1) Access Token 발급 테스트")
+    token = tm.get_access_token()
+    print(f"Access Token: {token[:20]}...")
+
+    print("\n2) Approval Key 발급 테스트")
+    key = tm.get_approval_key()
+    print(f"Approval Key: {key[:20]}...")

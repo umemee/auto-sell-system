@@ -1,128 +1,70 @@
-# 1단계 수정: config.yaml (WebSocket URL 수정)
+# config.yaml - 자동매매 시스템 설정
 
 api:
-  # ✅ 정확한 KIS API URL
   base_url: "https://openapi.koreainvestment.com:9443"
-  
-  # 🔥 핵심 수정: /websocket 경로 추가
-  websocket_url: "ws://ops.koreainvestment.com:21000"  # ✅ 실전 계좌용
-  # websocket_url: "ws://ops.koreainvestment.com:21000/websocket"  # 실전용
+  websocket_url: "wss://ops.koreainvestment.com:21000"
 
 system:
-  max_reconnect_attempts: 10
-  base_reconnect_delay: 2
-  reconnect_delay: 60
-  order_retry_attempts: 3
   token_refresh_margin_minutes: 5
-  cleanup_interval_hours: 6
+  approval_margin_seconds: 1800
+  state_file: "tmp/auto-sell-order-state.json"
   graceful_shutdown_timeout: 30
-  state_persistence: true
-  state_file: "/tmp/auto-sell-order-state.json"
 
 trading:
-  profit_margin: 0.03
-  default_order_type: "00"
-  exchange_code: "NASD"
-  timezone: "US/Eastern"
-  
-  # 🔥 핵심 추가: 기본 감시 종목 지정
-  default_symbol: "AAPL"  # WebSocket tr_key 기본값
-
-# 나머지 설정은 기존 유지
-polling:
-  aggressive:
-    time_ranges:
-      - start: "17:00"
-        end: "18:00"
-      - start: "21:30"
-        end: "23:00"
-      - start: "22:30"
-        end: "05:00"
-      - start: "05:00"
-        end: "08:00"
-    interval: 3
-    batch_size: 10
-    
-  smart:
-    time_ranges:
-      - start: "08:00"
-        end: "17:00"
-    initial_interval: 5
-    max_interval: 20
-    backoff_multiplier: 1.5
-    batch_size: 5
-    no_change_threshold: 5           # ✅ 추가
-    consecutive_success_speedup: false  # ✅ 추가
-    order_age_factor:                # ✅ 추가
-    - minutes: 30
-      interval: 15
-    - minutes: 60
-      interval: 20
-    - default: 5
-
-rate_limit:
-  requests_per_second: 15
-  daily_limit: 10000
-  hourly_limit: 1000
-  max_consecutive_requests: 10
-  consecutive_delay: 2.5
-  min_request_interval: 2.5
-  aggressive_mode_limit: 5000   # ✅ 추가
-  smart_mode_limit: 3000         # ✅ 추가
-  rate_limit_codes: ["EGW00101", "EGW00102"]
-  rate_limit_retry_delay: 60
-  cooldown_on_limit: 60          # ✅ 추가
-
-market_hours:
-  premarket:
-    start: "04:00"
-    end: "09:30"
-    description: "프리마켓 - REST 폴링"
-  regular:
-    start: "09:30"
-    end: "16:00"
-    description: "정규장 - WebSocket 실시간"
-  aftermarket:
-    start: "16:00"
-    end: "20:00"
-    description: "애프터마켓 - REST 폴링"
-  closed:
-    start: "20:00"
-    end: "04:00"
-    description: "장 마감 - 대기 모드"
+  profit_margin: 0.03        # 목표 수익률 3%
+  exchange_code: "NASD"      # 기본 거래소 NASDAQ
 
 telegram:
-  polling_interval: 10
-  error_polling_interval: 30
-  timeout: 10
-  max_message_length: 4000
-  notifications:
-    startup: true
-    shutdown: true
-    execution: true
-    error: true
-    order_success: true
-    order_failure: true
-    reconnection: false
+  # 봇 사용 안 하면 빈 문자열로 설정
+  bot_token: ""
+  chat_id: ""
+
+rate_limit:
+  requests_per_second: 1
+  daily_limit: 5000
+  hourly_limit: 500
+  min_request_interval: 2.5
+  consecutive_limit: 10
+  cooldown_on_limit: 60
+
+polling:
+  # 1) 핫모드: 17:00–17:30, 21:00–22:30 → 3초 폴링
+  hot_mode:
+    time_ranges:
+      - start: "17:00"
+        end:   "17:30"
+      - start: "21:00"
+        end:   "22:30"
+    interval: 3
+
+  ws_mode:
+    time_ranges:
+      - start: "22:30"
+        end:   "01:00"
+
+  # 2) 스마트모드: 17:30–21:00 → 60초 기본, 최대 300초, backoff
+  smart:
+    time_ranges:
+      - start: "17:30"
+        end:   "21:00"
+    initial_interval: 60
+    max_interval: 300
+    backoff_multiplier: 1.5
+    no_change_threshold: 5
+    consecutive_success_speedup: false
+    order_age_factor:
+      - minutes: 30
+        interval: 30
+      - minutes: 60
+        interval: 60
+      - default: 60
+
+  # 3) 수면모드: 01:00–17:00 → 중지
+  sleep:
+    time_ranges:
+      - start: "01:00"
+        end:   "17:00"
+    interval: 0
 
 logging:
-  level: "DEBUG"
-  format: "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
-
-aws:
-  cost_optimization: true
-  connection_pooling: true
-  request_compression: false
-  keep_alive: true
-  timeout: 15
-  retry_attempts: 3
-
-websocket:
-  auto_subscribe: true
-  subscribe_all_symbols: false  # false로 변경하여 기본 종목만 구독
-  ping_interval: 30
-  ping_timeout: 10
-  max_reconnect_attempts: 10
-  reconnect_delay: 5
-  message_queue_size: 1000
-  process_timeout: 5
+  level: "INFO"
