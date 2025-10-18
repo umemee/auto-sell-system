@@ -147,27 +147,31 @@ def place_sell_order(config, token_manager, execution_data, telegram_bot=None):
         
         logger.debug(f"📊 거래소 코드: {exchange_code}")
         
-        # 3단계: 주문 데이터 생성 (한국투자증권 공식 파라미터)
+        # 3단계: 주문 데이터 생성 (한국투자증권 공식 파라미터)        
         order_data = {
-            "CANO": config['cano'],                    # 계좌번호 앞 8자리
-            "ACNT_PRDT_CD": config['acnt_prdt_cd'],    # 계좌상품코드 뒤 2자리
-            "OVRS_EXCG_CD": exchange_code,             # 거래소코드 (NASD, NYSE, AMEX 등)
-            "PDNO": ticker,                            # 종목코드 (티커)
-            "ORD_QTY": str(execution_data['quantity']), # 주문수량
-            "OVRS_ORD_UNPR": str(sell_price),          # 해외주문단가 (매도가)
-            "ORD_SVR_DVSN_CD": "0",                    # 주문서버구분코드 (0: 해외)
-            "ORD_DVSN": "00"                           # 주문구분 (00: 지정가, 01: 시장가)
+            "CANO": config['cano'],
+            "ACNT_PRDT_CD": config['acnt_prdt_cd'], 
+            "OVRS_EXCG_CD": exchange_code,
+            "PDNO": ticker,
+            "ORD_QTY": str(execution_data['quantity']),
+            "OVRS_ORD_UNPR": str(sell_price),
+            "CTAC_TLNO": "",              # ✅ 추가 (빈 문자열)
+            "MGCO_APTM_ODNO": "",         # ✅ 추가 (빈 문자열)
+            "SLL_TYPE": "00",  # ✅ 추가: 매도 유형 (00: 지정가)
+            "ORD_SVR_DVSN_CD": "0",  # 변경 없음
+            "ORD_DVSN": "00"
         }
-        
+
         logger.debug(f"📤 주문 데이터: {json.dumps(order_data, ensure_ascii=False)}")
         
         # 4단계: HashKey 생성 (필수!)
         hashkey = get_hash_key(config, token_manager, order_data)
-        
-        # HashKey 생성 실패 시에도 시도 (일부 계좌는 불필요할 수 있음)
+
         if not hashkey:
-            logger.warning("⚠️ HashKey 생성 실패, HashKey 없이 주문 시도")
-            hashkey = ""
+            logger.error("❌ HashKey 생성 실패, 주문 중단")
+            if telegram_bot:
+                telegram_bot.send_error_notification("매도 주문 실패: HashKey 생성 불가")
+            return False  # ✅ 주문 실패로 처리
         
         # 5단계: 액세스 토큰 확인
         token = token_manager.get_access_token()
@@ -183,7 +187,7 @@ def place_sell_order(config, token_manager, execution_data, telegram_bot=None):
             "authorization": f"Bearer {token}",
             "appkey": config['api_key'],
             "appsecret": config['api_secret'],
-            "tr_id": "JTTT1006U",    # 해외주식 매도주문 (실전)
+            "tr_id": "TTTT1006U",    # 해외주식 매도주문 (실전)
             "custtype": "P",          # 개인: P, 법인: B
             "hashkey": hashkey        # HashKey 추가
         }

@@ -73,7 +73,7 @@ class WebSocketClient:
         한국투자증권 WebSocket 실시간 체결 구독 요청 메시지 생성
         symbol : 구독할 종목 코드 (예: 'AAPL')
         """
-        approval_key = self.token_manager.get_websocket_approval_key()
+        approval_key = self.token_manager.get_approval_key()
         if not approval_key:
             logger.error("❌ WebSocket 승인키 없음")
             return None
@@ -296,7 +296,7 @@ class WebSocketClient:
             while self.is_running and self.reconnect_count < self.max_reconnects:
                 try:
                     
-                    approval_key = self.token_manager.get_websocket_approval_key()
+                    approval_key = self.token_manager.get_approval_key()
                     if not approval_key:
                         logger.warning("❌ 승인키 없음, 10초 후 재시도")
                         time.sleep(10)
