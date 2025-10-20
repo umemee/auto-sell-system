@@ -94,7 +94,7 @@ def test_api_connection(config, token_manager):
             "OVRS_EXCG_CD": "NASD",
             "ORD_STRT_DT": today,
             "ORD_END_DT": today,
-            "SLL_BUY_DVSN_CD": "02",
+            "SLL_BUY_DVSN": "02",
             "CCLD_DVSN": "01",
             "PDNO": "",
             "CTX_AREA_FK100": "",

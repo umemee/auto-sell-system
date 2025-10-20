@@ -350,7 +350,7 @@ class SmartOrderMonitor:
                 "OVRS_EXCG_CD": "NASD",
                 "ORD_STRT_DT": today,
                 "ORD_END_DT": today,
-                "SLL_BUY_DVSN_CD": "02", # 매수만 조회 (공식 파라미터)
+                "SLL_BUY_DVSN": "02", # 매수만 조회 (공식 파라미터)
                 "CCLD_DVSN": "01",       # 체결된 것만 조회 (공식)
                 "PDNO": "",
                 "CTX_AREA_FK100": "",
@@ -531,7 +531,7 @@ class SmartOrderMonitor:
                 "OVRS_EXCG_CD": "NASD",
                 "ORD_STRT_DT": today,
                 "ORD_END_DT": today,
-                "SLL_BUY_DVSN_CD": "02", # 매수 체결만
+                "SLL_BUY_DVSN": "02", # 매수 체결만
                 "CCLD_DVSN": "01",       # 체결된 것만
                 "PDNO": "",
                 "CTX_AREA_FK100": "",
