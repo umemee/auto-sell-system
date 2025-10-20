@@ -1,4 +1,4 @@
-# config.yaml - 자동매매 시스템 설정
+# config.yaml - 자동매매 시스템 설정 (미국 동부시간 기준)
 
 api:
   base_url: "https://openapi.koreainvestment.com:9443"
@@ -35,12 +35,15 @@ rate_limit:
   aggressive_mode_limit: 1000
   smart_mode_limit: 2000
 
+# ✅ 모든 시간을 미국 동부시간(ET) 기준으로 설정
 polling:
+  # 프리마켓: ET 04:00-09:30 (한국시간 17:00-22:30 또는 18:00-23:30)
   aggressive:
     interval: 3
     time_ranges:
-      - {start: "17:00", end: "22:30"}
+      - {start: "04:00", end: "09:30"}
   
+  # 애프터마켓: ET 16:00-20:00 (한국시간 다음날 05:00-09:00 또는 06:00-10:00)
   smart:
     initial_interval: 5
     max_interval: 30
@@ -48,15 +51,16 @@ polling:
     no_change_threshold: 5
     consecutive_success_speedup: true
     time_ranges:
-      - {start: "00:30", end: "09:00"}
+      - {start: "16:00", end: "20:00"}
     order_age_factor:
       - {minutes: 5, interval: 10}
       - {minutes: 15, interval: 20}
       - {default: 30}
   
+  # 정규장: ET 09:30-16:00 (한국시간 22:30-05:00 또는 23:30-06:00)
   ws_mode:
     time_ranges:
-      - {start: "22:30", end: "06:00"}
+      - {start: "09:30", end: "16:00"}
 
 strategy:
   aggressive_strategy:

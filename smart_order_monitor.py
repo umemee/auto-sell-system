@@ -113,39 +113,56 @@ class SmartOrderMonitor:
         except Exception as e:
             logger.warning(f"상태 저장 실패: {e}")
 
-    def get_current_trading_mode(self):
-        """현재 시간에 따른 매매 모드 판별 (KST 기준)"""
-        try:
-            kst = timezone('Asia/Seoul')
-            now_kst = datetime.now(kst).time()
+    # smart_order_monitor.py - get_current_trading_mode() 함수 수정
+# (전체 파일에서 이 함수만 교체하세요)
 
-            # ✅ [수정] ws_mode (WebSocket 모드) 우선 감지
+    def get_current_trading_mode(self):
+        """
+        현재 시간에 따른 매매 모드 판별 (config의 timezone 사용)
+    
+        Returns:
+            str: 'aggressive', 'smart', 'ws_mode', 'off'
+        """
+        try:
+            # ✅ config에서 timezone 가져오기 (더 이상 KST 하드코딩 안 함!)
+            trading_tz = self.config['trading'].get('timezone', 'US/Eastern')
+            tz = timezone(trading_tz)
+            now_time = datetime.now(tz).time()
+        
+            logger.debug(f"🕐 현재시간: {now_time.strftime('%H:%M')} ({trading_tz})")
+
+            # ✅ ws_mode (WebSocket 모드) 우선 감지
             if 'ws_mode' in self.config['polling']:
                 for time_range in self.config['polling']['ws_mode'].get('time_ranges', []):
                     start_time = dtime(*[int(x) for x in time_range['start'].split(':')])
                     end_time = dtime(*[int(x) for x in time_range['end'].split(':')])
-                    if start_time <= now_kst < end_time:
+                    if start_time <= now_time < end_time:
+                        logger.debug(f"✅ ws_mode: {time_range['start']} ~ {time_range['end']}")
                         return 'ws_mode'
 
-            # --- 기존 모드 감지 로직 ---
-            off_start = dtime(1,0)
-            off_end = dtime(17,0)
-            if off_start <= now_kst < off_end:
-                return 'off'
+            # aggressive 모드 (프리마켓)
             for time_range in self.aggressive_config['time_ranges']:
                 start_time = dtime(*[int(x) for x in time_range['start'].split(':')])
                 end_time = dtime(*[int(x) for x in time_range['end'].split(':')])
-                if start_time <= now_kst < end_time:
+                if start_time <= now_time < end_time:
+                    logger.debug(f"✅ aggressive: {time_range['start']} ~ {time_range['end']}")
                     return 'aggressive'
+        
+            # smart 모드 (애프터마켓)
             for time_range in self.smart_config['time_ranges']:
                 start_time = dtime(*[int(x) for x in time_range['start'].split(':')])
                 end_time = dtime(*[int(x) for x in time_range['end'].split(':')])
-                if start_time <= now_kst < end_time:
+                if start_time <= now_time < end_time:
+                    logger.debug(f"✅ smart: {time_range['start']} ~ {time_range['end']}")
                     return 'smart'
+        
+            # 장 마감 시간
+            logger.debug(f"⏸️ 장 마감 시간 (off)")
             return 'off'
+        
         except Exception as e:
             logger.error(f"모드 판별 오류: {e}")
-            return 'smart' # 기존 기본값
+            return 'smart'  # 기본값
 
     def switch_mode_if_needed(self):
         """필요 시 모드 전환 및 상태 알림"""
