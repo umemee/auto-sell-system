@@ -354,7 +354,8 @@ class SmartOrderMonitor:
                 "CCLD_NCCS_DVSN": "00",
                 "PDNO": "",
                 "CTX_AREA_FK100": "",
-                "CTX_AREA_NK100": ""
+                "CTX_AREA_NK100": "",
+                "SORT_SQN": "DS"
             }
             request_start = time.time()
             response = requests.get(url, headers=headers, params=params, timeout=15)
@@ -535,7 +536,8 @@ class SmartOrderMonitor:
                 "CCLD_NCCS_DVSN": "00",
                 "PDNO": "",
                 "CTX_AREA_FK100": "",
-                "CTX_AREA_NK100": ""
+                "CTX_AREA_NK100": "",
+                "SORT_SQN": "DS"
             }
             response = requests.get(url, headers=headers, params=params, timeout=15)
             self.last_request_time = time.time()
@@ -557,7 +559,7 @@ class SmartOrderMonitor:
                 if order_no in self.monitoring_orders or order_no in self.processed_ws_orders:
                     continue
                     
-                if ord_status in ["02", "체결완료"] and order.get("SLL_BUY_DVSN_CD") == "02":
+                if ord_status in ["02", "체결완료"] and order.get("sll_buy_dvsn_cd") == "02":
                     ticker = order.get("pdno", "")
                     ccld_qty = order.get("ccld_qty", "0")
                     ccld_price = order.get("ccld_unpr", "0")
