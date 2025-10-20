@@ -342,8 +342,7 @@ class SmartOrderMonitor:
                 "tr_id": "TTTS3035R"
             }
             today = datetime.now().strftime("%Y%m%d")
-            start_date = (datetime.fromisoformat(last_check).strftime("%Y%m%d") 
-                          if last_check else today)
+            start_date = today
             params = {
                 "CANO": self.config['cano'],
                 "ACNT_PRDT_CD": self.config['acnt_prdt_cd'],
@@ -524,8 +523,7 @@ class SmartOrderMonitor:
                 "tr_id": "TTTS3035R"
             }
             today = datetime.now().strftime("%Y%m%d")
-            start_date = (datetime.fromisoformat(last_check).strftime("%Y%m%d") 
-                          if last_check else today)
+            start_date = today
             params = {
                 "CANO": self.config['cano'],
                 "ACNT_PRDT_CD": self.config['acnt_prdt_cd'],
