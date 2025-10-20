@@ -77,8 +77,9 @@ class WebSocketClient:
         if not approval_key:
             logger.error("❌ WebSocket 승인키 없음")
             return None
-
-        tr_key = symbol or self.default_symbol  # ✅ 종목 코드 직접 사용
+    
+        ticker = symbol or self.default_symbol  # ✅ ticker 변수 정의
+        tr_key = ticker  # ✅ tr_key는 ticker와 동일
 
         subscribe_message = {
             "header": {
@@ -91,12 +92,21 @@ class WebSocketClient:
                 "input": {
                     "tr_id": "H0STCNI0",          # 해외주식 체결통보 TR
                     "tr_key": tr_key,             # 서버가 요구하는 필수값
-                    "pdno": symbol or self.default_symbol  # 구독할 종목코드
+                    "pdno": ticker  
                 }
             }
         }
 
-        logger.info(f"📡 구독 메시지 생성 완료 (tr_key={tr_key}, symbol={symbol or self.default_symbol})")
+            # ✅ 전송할 메시지 로그
+        logger.info("=" * 60)
+        logger.info("🔍 WebSocket 구독 메시지 생성")
+        logger.info(f"  - TR_ID: H0STCNI0")
+        logger.info(f"  - TR_KEY: {tr_key}")
+        logger.info(f"  - PDNO: {ticker}")
+        logger.info(f"  - Approval Key: {approval_key[:20]}...")
+        logger.info("=" * 60)
+        logger.debug(f"전체 메시지:\n{json.dumps(subscribe_message, indent=2)}")
+ 
         return json.dumps(subscribe_message)
 
     def _refresh_approval_key_if_needed(self):
@@ -110,8 +120,8 @@ class WebSocketClient:
             logging.info("🔑 승인키 강제 갱신 시도 (오류 복구용)")
         
             # ✅ force_refresh=True로 새 승인키 발급
-            new_key = self.token_manager.get_websocket_approval_key(force_refresh=True)
-        
+            new_key = self.token_manager.get_approval_key(force_refresh=True)
+
             if new_key:
                 logger.info("🔑 승인키 강제 갱신 완료 (WebSocket 재연결 필요)")
                 self.last_approval_key_refresh = time.time()
@@ -163,6 +173,9 @@ class WebSocketClient:
 
     def on_message(self, ws, message):
         try:
+            # ✅ 먼저 원본 출력
+            logger.debug(f"📥 WebSocket 수신: {message[:500]}")
+
             # 구독 성공 확인 메시지
             if "SUBSCRIBE SUCCESS" in message or "SUBSCRIBED" in message:
                 logger.info("✅ WebSocket 구독 성공")

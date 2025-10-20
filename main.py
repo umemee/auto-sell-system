@@ -16,6 +16,9 @@ from websocket_client import WebSocketClient
 from telegram_bot import TelegramBot
 from smart_order_monitor import SmartOrderMonitor, is_market_hours
 
+# 런타임 import로 순환 import 해결
+from order import place_sell_order
+
 # 전역 변수
 shutdown_requested = False
 ws_client = None
@@ -75,9 +78,6 @@ def handle_websocket_execution(execution_data, config, token_manager, telegram_b
     """WebSocket 체결 데이터 처리 (정규장) - 순환 import 해결"""
     try:
         logging.info(f"🔥 [정규장] WebSocket 체결 감지: {execution_data}")
-        
-        # 런타임 import로 순환 import 해결
-        from order import place_sell_order
         
         # 즉시 자동 매도 실행
         success = place_sell_order(config, token_manager, execution_data, telegram_bot)
@@ -167,6 +167,7 @@ def adaptive_market_monitor(config, token_manager, telegram_bot):
     
     last_status = None
     websocket_thread = None
+    websocket_running = False
     
     while not shutdown_requested:
         try:
@@ -183,28 +184,67 @@ def adaptive_market_monitor(config, token_manager, telegram_bot):
                         if hasattr(smart_monitor, 'stop'):
                             smart_monitor.stop()
                         logging.info("⏸️ 스마트 폴링 중지됨")
-                    
-                    if not ws_client or not (hasattr(ws_client, 'is_connected') and ws_client.is_connected()):
+
+                    # ✅ WebSocket 중복 방지
+                    if not websocket_running:
+                        # 기존 WebSocket 정리
+                        if ws_client:
+                            try:
+                                if hasattr(ws_client, 'stop'):
+                                    ws_client.stop()
+                                logging.info("🔄 기존 WebSocket 정리")
+                            except Exception as e:
+                                logging.warning(f"⚠️ 기존 WebSocket 정리 중 오류: {e}")
+                        
+                        # 새 WebSocket 시작
                         websocket_thread = threading.Thread(
                             target=start_websocket_for_regular_hours,
                             args=(config, token_manager, telegram_bot, smart_monitor),
-                            daemon=True
+                            daemon=True,
+                            name="WebSocketThread"
                         )
                         websocket_thread.start()
+                        websocket_running = True
+                        logging.info("✅ WebSocket 스레드 시작됨")
+                    else:
+                        logging.info("ℹ️ WebSocket 이미 실행 중, 건너뜀")
                 
                 elif current_status in ['premarket', 'aftermarket']:
-                    # 장외 시간: 스마트 폴링 활성화
                     logging.info(f"🔄 {current_status} 시작 - 스마트 폴링 모드로 전환")
                     
+                    # ✅ WebSocket 중지
+                    if websocket_running:
+                        if ws_client and hasattr(ws_client, 'stop'):
+                            try:
+                                ws_client.stop()
+                                logging.info("🛑 WebSocket 중지됨")
+                            except Exception as e:
+                                logging.warning(f"⚠️ WebSocket 중지 중 오류: {e}")
+                        
+                        websocket_running = False
+                        
+                        # WebSocket 스레드 종료 대기
+                        if websocket_thread and websocket_thread.is_alive():
+                            websocket_thread.join(timeout=5)
+                            if websocket_thread.is_alive():
+                                logging.warning("⚠️ WebSocket 스레드가 5초 내에 종료되지 않음")
+                    
+                    # 스마트 모니터 시작
                     if smart_monitor and hasattr(smart_monitor, 'is_running') and not smart_monitor.is_running:
                         if hasattr(smart_monitor, 'start'):
                             smart_monitor.start()
                         logging.info("🧠 스마트 폴링 활성화됨")
                 
                 elif current_status == 'closed':
-                    # 장 마감: 모든 서비스 대기 상태
                     logging.info("🔄 장 마감 - 대기 모드")
                     
+                    # WebSocket 중지
+                    if websocket_running:
+                        if ws_client and hasattr(ws_client, 'stop'):
+                            ws_client.stop()
+                        websocket_running = False
+                    
+                    # 스마트 모니터 중지
                     if smart_monitor and hasattr(smart_monitor, 'is_running') and smart_monitor.is_running:
                         if hasattr(smart_monitor, 'stop'):
                             smart_monitor.stop()
@@ -245,10 +285,8 @@ def main():
         logging.info(f"🕒 현재 시장 상태: {market_status}")
         
         # 토큰 매니저 초기화
-        token_manager = TokenManager(config)
-        
-        # 텔레그램 봇 시작
         telegram_bot = start_telegram_bot(config)
+        token_manager = TokenManager(config, telegram_bot)
         
         # 스마트 모니터 초기화 (항상 준비)
         smart_monitor = SmartOrderMonitor(config, token_manager, telegram_bot)

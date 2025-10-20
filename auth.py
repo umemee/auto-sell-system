@@ -15,8 +15,9 @@ class TokenManager:
     - WebSocket Approval Key 자동 갱신
     """
 
-    def __init__(self, config):
+    def __init__(self, config, telegram_bot=None):
         self.config = config
+        self.telegram_bot = telegram_bot
         self.access_token = None
         self.token_expires_at = None
         self.approval_key = None
@@ -109,8 +110,7 @@ class TokenManager:
         now = datetime.now()
         if force_refresh or not self.approval_key or not self.approval_expires_at:
             return self._request_approval_key()
-        if now + timedelta(seconds=0) >= self.approval_expires_at:
-            logger.info("🔄 Approval Key 만료, 자동 갱신")
+        if now >= self.approval_expires_at - timedelta(seconds=self.approval_margin_seconds):
             return self._request_approval_key()
         return self.approval_key
 

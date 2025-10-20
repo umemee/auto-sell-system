@@ -156,6 +156,10 @@ def load_config(mode='development'):
             }
             logging.info("💡 Rate Limit 기본값 적용")
         
+        logging.info("🔍 설정 최종 검증 시작...")
+        if not validate_config(config):
+            raise ValueError("❌ 설정 검증 실패")
+
         # 11단계: 최종 로그
         logging.info(
             f"🎉 설정 파일이 성공적으로 로드되었습니다!\n"

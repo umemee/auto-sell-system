@@ -100,7 +100,7 @@ class SmartOrderMonitor:
     def save_state(self):
         """현재 상태 저장"""
         try:
-            state = {'timestamp': datetime.now().isoformat(),'orders': {}}
+            state = {'timestamp': datetime.now().isoformat(),'last_check': datetime.now().isoformat(), 'orders': {}}
             for order_no, order_data in self.monitoring_orders.items():
                 order_copy = order_data.copy()
                 order_copy['created_at'] = order_data['created_at'].isoformat()
@@ -325,6 +325,8 @@ class SmartOrderMonitor:
                 "tr_id": "TTTS3035R"
             }
             today = datetime.now().strftime("%Y%m%d")
+            start_date = (datetime.fromisoformat(last_check).strftime("%Y%m%d") 
+                          if last_check else today)
             params = {
                 "CANO": self.config['cano'],
                 "ACNT_PRDT_CD": self.config['acnt_prdt_cd'],
@@ -504,6 +506,8 @@ class SmartOrderMonitor:
                 "tr_id": "TTTS3035R"
             }
             today = datetime.now().strftime("%Y%m%d")
+            start_date = (datetime.fromisoformat(last_check).strftime("%Y%m%d") 
+                          if last_check else today)
             params = {
                 "CANO": self.config['cano'],
                 "ACNT_PRDT_CD": self.config['acnt_prdt_cd'],
