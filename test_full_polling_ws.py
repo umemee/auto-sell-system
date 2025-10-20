@@ -96,6 +96,7 @@ def test_api_connection(config, token_manager):
             "ORD_END_DT": today,
             "SLL_BUY_DVSN": "02",
             "CCLD_DVSN": "01",
+            "CCLD_NCCS_DVSN": "00",
             "PDNO": "",
             "CTX_AREA_FK100": "",
             "CTX_AREA_NK100": ""

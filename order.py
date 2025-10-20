@@ -357,6 +357,7 @@ class OrderMonitor:
                 "ORD_END_DT": today,
                 "SLL_BUY_DVSN_CD": "02",  # 매수만 (01: 매도, 02: 매수, 00: 전체)
                 "CCLD_DVSN": "01",        # 체결만 (00: 전체, 01: 체결, 02: 미체결)
+                "CCLD_NCCS_DVSN": "00",
                 "PDNO": "",               # 종목코드 (전체)
                 "CTX_AREA_FK100": "",
                 "CTX_AREA_NK100": ""

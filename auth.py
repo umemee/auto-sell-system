@@ -74,7 +74,7 @@ class TokenManager:
         """
         WebSocket용 Approval Key 요청
         """
-        url = f"{self.config['api']['base_url']}/uapi/overseas-stock/v1/websocket/approval"
+        url = f"{self.config['api']['base_url']}/oauth2/Approval"
         token = self.get_access_token()
         if not token:
             logger.error("❌ Approval Key 요청 시 Access Token 없음")
