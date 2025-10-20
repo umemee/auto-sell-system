@@ -107,9 +107,6 @@ class TokenManager:
         유효한 Approval Key 반환
         - Approval Key 만료 30분 전이면 자동 갱신
         """
-        try:            
-            # ✅ 수정 후 URL
-            url = f"{self.config['api']['base_url']}/oauth2/Approval"
         now = datetime.now()
         if force_refresh or not self.approval_key or not self.approval_expires_at:
             return self._request_approval_key()
