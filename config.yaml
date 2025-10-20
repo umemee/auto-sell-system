@@ -2,22 +2,28 @@
 
 api:
   base_url: "https://openapi.koreainvestment.com:9443"
-  websocket_url: "wss://ops.koreainvestment.com:21000"
+  websocket_url: "ws://ops.koreainvestment.com:21000"
+  request_timeout: 15
 
 system:
   token_refresh_margin_minutes: 5
   approval_margin_seconds: 1800
-  state_file: "tmp/auto-sell-order-state.json"
+  state_file: "/tmp/auto-sell-order-state.json"
   graceful_shutdown_timeout: 30
+  max_reconnect_attempts: 10
+  base_reconnect_delay: 5
 
 trading:
-  profit_margin: 0.03        # 목표 수익률 3%
-  exchange_code: "NASD"      # 기본 거래소 NASDAQ
+  profit_margin: 0.03
+  exchange_code: "NASD"
+  default_order_type: "00"
+  timezone: "US/Eastern"
+  default_symbol: "AAPL"
 
 telegram:
-  # 봇 사용 안 하면 빈 문자열로 설정
-  bot_token: ""
-  chat_id: ""
+  polling_interval: 10
+  error_polling_interval: 30
+  timeout: 10
 
 rate_limit:
   requests_per_second: 1
@@ -26,45 +32,45 @@ rate_limit:
   min_request_interval: 2.5
   consecutive_limit: 10
   cooldown_on_limit: 60
+  aggressive_mode_limit: 1000
+  smart_mode_limit: 2000
 
+# ✅ 코드와 호환되는 polling 구조
 polling:
-  # 1) 핫모드: 17:00–17:30, 21:00–22:30 → 3초 폴링
-  hot_mode:
-    time_ranges:
-      - start: "17:00"
-        end:   "17:30"
-      - start: "21:00"
-        end:   "22:30"
+  # 1) aggressive 모드 (프리마켓 시간대 - 3초 간격)
+  aggressive:
     interval: 3
-
+    time_ranges:
+      - {start: "17:00", end: "23:30"}  # KST 17:00-23:30 = ET 04:00-09:30
+  
+  # 2) smart 모드 (애프터마켓 시간대 - 가변 간격)
+  smart:
+    initial_interval: 5
+    max_interval: 30
+    backoff_multiplier: 1.2
+    no_change_threshold: 5
+    consecutive_success_speedup: true
+    time_ranges:
+      - {start: "00:30", end: "09:00"}  # KST 00:30-09:00 = ET 09:30-20:00
+    order_age_factor:
+      - {minutes: 5, interval: 10}
+      - {minutes: 15, interval: 20}
+      - {default: 30}
+  
+  # 3) WebSocket 모드 (정규장 시간대)
   ws_mode:
     time_ranges:
-      - start: "22:30"
-        end:   "01:00"
+      - {start: "23:30", end: "06:00"}  # KST 23:30-06:00 = ET 09:30-16:00
 
-  # 2) 스마트모드: 17:30–21:00 → 60초 기본, 최대 300초, backoff
-  smart:
-    time_ranges:
-      - start: "17:30"
-        end:   "21:00"
-    initial_interval: 60
-    max_interval: 300
-    backoff_multiplier: 1.5
-    no_change_threshold: 5
-    consecutive_success_speedup: false
-    order_age_factor:
-      - minutes: 30
-        interval: 30
-      - minutes: 60
-        interval: 60
-      - default: 60
-
-  # 3) 수면모드: 01:00–17:00 → 중지
-  sleep:
-    time_ranges:
-      - start: "01:00"
-        end:   "17:00"
-    interval: 0
+# 전략 설정
+strategy:
+  aggressive_strategy:
+    target_profit_margin: 0.03
+  smart_strategy:
+    target_profit_margin: 0.03
 
 logging:
   level: "INFO"
+EOF
+
+echo "✅ config.yaml 수정 완료"
