@@ -1,4 +1,4 @@
-# main.py - 수정된 전체 코드 (TelegramBot start/stop 호출 문제 해결)
+# main.py - 수정된 전체 코드 (import 오류 수정)
 
 import logging
 import time
@@ -11,14 +11,13 @@ from logging.handlers import RotatingFileHandler
 from config import load_config
 from auth import TokenManager
 
-# 순환 import 해결을 위해 런타임 import로 변경
+# ✅ 순환 import 해결을 위해 런타임 import로 변경
 from websocket_client import WebSocketClient
 from telegram_bot import TelegramBot
 from smart_order_monitor import SmartOrderMonitor
-from order import is_market_hours
 
-# 런타임 import로 순환 import 해결
-from order import place_sell_order
+# ✅ order.py에서 is_market_hours import (수정!)
+from order import is_market_hours, place_sell_order
 
 # 전역 변수
 shutdown_requested = False
@@ -76,7 +75,7 @@ def signal_handler(signum, frame):
     sys.exit(0)
 
 def handle_websocket_execution(execution_data, config, token_manager, telegram_bot, smart_monitor):
-    """WebSocket 체결 데이터 처리 (정규장) - 순환 import 해결"""
+    """WebSocket 체결 데이터 처리 (정규장)"""
     try:
         logging.info(f"🔥 [정규장] WebSocket 체결 감지: {execution_data}")
         
@@ -111,7 +110,7 @@ def start_websocket_for_regular_hours(config, token_manager, telegram_bot, smart
                 time.sleep(60)
                 continue
                 
-            logging.info(f"🔌 [정규장] WebSocket 연결 시도 ({attempt}/{max_attempts})")
+            logging.info(f"📌 [정규장] WebSocket 연결 시도 ({attempt}/{max_attempts})")
             ws_client.start()
             break
             
@@ -175,7 +174,7 @@ def adaptive_market_monitor(config, token_manager, telegram_bot):
             current_status = is_market_hours(config['trading']['timezone'])
             
             if current_status != last_status:
-                logging.info(f"🕒 시장 상태 변경: {last_status} → {current_status}")
+                logging.info(f"🕐 시장 상태 변경: {last_status} → {current_status}")
                 
                 if current_status == 'regular':
                     # 정규장 시작: WebSocket 활성화, 스마트 폴링 중지
@@ -283,7 +282,7 @@ def main():
         
         config = load_config(args.mode)
         market_status = is_market_hours(config['trading']['timezone'])
-        logging.info(f"🕒 현재 시장 상태: {market_status}")
+        logging.info(f"🕐 현재 시장 상태: {market_status}")
         
         # 토큰 매니저 초기화
         telegram_bot = start_telegram_bot(config)
@@ -294,14 +293,14 @@ def main():
         
         # 시작 알림
         if telegram_bot:
-            message = f"🚀 스마트 자동매매 시작!\\n🕒 시장상태: {market_status}\\n🧠 Rate Limit 안전모드\\n⚡ 적응형 폴링 활성화"
+            message = f"🚀 스마트 자동매매 시작!\n🕐 시장상태: {market_status}\n🧠 Rate Limit 안전모드\n⚡ 적응형 폴링 활성화"
             if hasattr(telegram_bot, 'send_message'):
                 telegram_bot.send_message(message)
         
         # 현재 시장 상태에 따른 초기 서비스 시작
         if market_status == 'regular':
             # 정규장: WebSocket 시작
-            logging.info("🔌 정규장 감지 - WebSocket 모드로 시작")
+            logging.info("📌 정규장 감지 - WebSocket 모드로 시작")
             ws_thread = threading.Thread(
                 target=start_websocket_for_regular_hours,
                 args=(config, token_manager, telegram_bot, smart_monitor),
@@ -344,7 +343,7 @@ def main():
                         stats = smart_monitor.get_detailed_stats()
                         api_usage = stats.get('utilization_pct', 0)
                         total_requests = stats.get('total_requests', 0)
-                        logging.info(f"📊 상태: {market_status} | WS: {ws_status} | 모니터링: {monitor_count}건 | API: {api_usage} | 총요청: {total_requests}")
+                        logging.info(f"📊 상태: {market_status} | WS: {ws_status} | 모니터링: {monitor_count}건 | API: {api_usage} | 이요청: {total_requests}")
                         
                         # 10분마다 상세 통계 리포트
                         if status_count - last_stats_report >= 120:  # 10분
@@ -366,6 +365,8 @@ def main():
                 
     except Exception as e:
         logging.error(f"시스템 초기화 실패: {e}")
+        import traceback
+        traceback.print_exc()
         sys.exit(1)
         
     finally:
@@ -376,7 +377,7 @@ def main():
                 final_stats = smart_monitor.get_detailed_stats()
                 total_requests = final_stats.get('total_requests', 0)
                 successful_detections = final_stats.get('successful_detections', 0)
-                logging.info(f"📊 최종통계 - 총요청: {total_requests}, 성공감지: {successful_detections}")
+                logging.info(f"📊 최종통계 - 이요청: {total_requests}, 성공감지: {successful_detections}")
                 
             if smart_monitor and hasattr(smart_monitor, 'stop'):
                 smart_monitor.stop()

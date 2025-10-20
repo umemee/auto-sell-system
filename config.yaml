@@ -35,15 +35,12 @@ rate_limit:
   aggressive_mode_limit: 1000
   smart_mode_limit: 2000
 
-# ✅ 코드와 호환되는 polling 구조
 polling:
-  # 1) aggressive 모드 (프리마켓 시간대 - 3초 간격)
   aggressive:
     interval: 3
     time_ranges:
-      - {start: "17:00", end: "23:30"}  # KST 17:00-23:30 = ET 04:00-09:30
+      - {start: "17:00", end: "22:30"}
   
-  # 2) smart 모드 (애프터마켓 시간대 - 가변 간격)
   smart:
     initial_interval: 5
     max_interval: 30
@@ -51,18 +48,16 @@ polling:
     no_change_threshold: 5
     consecutive_success_speedup: true
     time_ranges:
-      - {start: "00:30", end: "09:00"}  # KST 00:30-09:00 = ET 09:30-20:00
+      - {start: "00:30", end: "09:00"}
     order_age_factor:
       - {minutes: 5, interval: 10}
       - {minutes: 15, interval: 20}
       - {default: 30}
   
-  # 3) WebSocket 모드 (정규장 시간대)
   ws_mode:
     time_ranges:
-      - {start: "23:30", end: "06:00"}  # KST 23:30-06:00 = ET 09:30-16:00
+      - {start: "22:30", end: "06:00"}
 
-# 전략 설정
 strategy:
   aggressive_strategy:
     target_profit_margin: 0.03
@@ -71,6 +66,3 @@ strategy:
 
 logging:
   level: "INFO"
-EOF
-
-echo "✅ config.yaml 수정 완료"
