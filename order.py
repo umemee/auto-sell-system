@@ -324,87 +324,92 @@ class OrderMonitor:
 
     def check_order_status(self, order_no):
         """
-        해외주식 주문/체결내역 조회 (TTTS3035R)
+        해외주식 주문/체결내역 조회
         주문번호를 기준으로 REST API를 통해 체결 상태를 확인합니다.
         """
         try:
-            # API 엔드포인트
-            url = f"{self.config['api']['base_url']}/uapi/overseas-stock/v1/trading/inquire-nccs"
-            
+           # ✅ 올바른 API 엔드포인트로 변경!
+            url = f"{self.config['api']['base_url']}/uapi/overseas-stock/v1/trading/inquire-ccnl"
+        
             # 액세스 토큰 확인
             token = self.token_manager.get_access_token()
             if not token:
                 logger.error("❌ 액세스 토큰 없음")
                 return None
-        
+    
             # 헤더 설정
             headers = {
                 "Content-Type": "application/json",
                 "authorization": f"Bearer {token}",
                 "appkey": self.config["api_key"],
                 "appsecret": self.config["api_secret"],
-                "tr_id": "TTTS3035R",  # 해외주식 주문체결내역조회
+                "tr_id": "TTTS3035R",
                 "custtype": "P"
             }
-            
-            # 파라미터 설정 (공식 표준)
+        
+            # 파라미터 설정
             today = datetime.now().strftime("%Y%m%d")
+        
+            # ✅ 올바른 파라미터로 변경!
             params = {
                 "CANO": self.config["cano"],
                 "ACNT_PRDT_CD": self.config["acnt_prdt_cd"],
-                "OVRS_EXCG_CD": "NASD",
+                "PDNO": "",                    # 전종목
                 "ORD_STRT_DT": today,
                 "ORD_END_DT": today,
-                "SLL_BUY_DVSN_CD": "02",  # 매수만 (01: 매도, 02: 매수, 00: 전체)
-                "CCLD_DVSN": "01",        # 체결만 (00: 전체, 01: 체결, 02: 미체결)
-                "CCLD_NCCS_DVSN": "00",
-                "PDNO": "",               # 종목코드 (전체)
-                "CTX_AREA_FK100": "",
-                "CTX_AREA_NK100": ""
+                "SLL_BUY_DVSN": "02",          # 매수만
+                "CCLD_NCCS_DVSN": "01",        # 체결만
+                "OVRS_EXCG_CD": "NASD",
+                "SORT_SQN": "DS",
+                "ORD_DT": "",
+                "ORD_GNO_BRNO": "",
+                "ODNO": "",
+                "CTX_AREA_NK200": "",          # ✅ 변경!
+                "CTX_AREA_FK200": ""           # ✅ 변경!
             }
-            
+        
             # GET 요청
             response = requests.get(url, headers=headers, params=params, timeout=10)
-            
+        
             if response.status_code != 200:
                 logger.error(f"❌ 주문조회 HTTP 오류: {response.status_code}")
                 return None
-            
+        
             # JSON 파싱
             data = response.json()
-            
+        
             # 정상 응답 확인
             if data.get("rt_cd") != "0":
                 logger.warning(f"⚠️ 주문조회 실패: {data.get('msg1', '')}")
                 return None
-            
+        
             # 주문 내역에서 해당 주문번호 찾기
             orders = data.get("output", [])
             if not orders:
                 return None
-            
+        
             # 주문번호로 매칭
             for order in orders:
                 if order.get("odno") == order_no:
-                    ord_status = order.get("ord_stcd", "")
-                    ccld_qty = order.get("ccld_qty", "0")
-                    ccld_unpr = order.get("ccld_unpr", "0")
-                    
-                    logger.debug(f"🔍 주문 발견: {order_no} - 상태: {ord_status}, 체결량: {ccld_qty}")
-                    
+                # ✅ 필드명 변경!
+                    ccld_qty = order.get("ft_ccld_qty", "0")
+                    ccld_unpr = order.get("ft_ccld_unpr3", "0")
+                
+                    logger.debug(f"🔍 주문 발견: {order_no} - 체결량: {ccld_qty}")
+                
                     return {
-                        'status': ord_status,
-                        'filled_qty': int(ccld_qty) if ccld_qty.isdigit() else 0,
-                        'filled_price': float(ccld_unpr) if ccld_unpr.replace('.', '').isdigit() else 0.0,
+                       'status': '02',  # 체결완료
+                        'filled_qty': int(ccld_qty) if ccld_qty else 0,
+                        'filled_price': float(ccld_unpr) if ccld_unpr else 0.0,
                         'order_data': order
                     }
-            
-            return None
         
+            return None
+    
         except Exception as e:
             logger.error(f"❌ check_order_status() 오류: {e}")
             return None
-
+            
     def execute_auto_sell(self, order_info, filled_price):
         """자동 매도 주문 실행"""
         try:

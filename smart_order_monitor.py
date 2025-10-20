@@ -15,11 +15,12 @@ from pytz import timezone
 try:
     from websocket_client import WebSocketClient
 except ImportError:
-    logger.error("websocket_client.py를 찾을 수 없습니다. WebSocket 모드가 작동하지 않습니다.")
+    # logger.error("websocket_client.py를 찾을 수 없습니다. WebSocket 모드가 작동하지 않습니다.")
     # WebSocketClient가 없어도 시스템이 중단되지 않도록 임시 클래스 정의
     class WebSocketClient:
         def __init__(self, *args, **kwargs):
-            logger.error("WebSocketClient가 import되지 않아 비활성화 상태로 실행됩니다.")
+            # logger.error("WebSocketClient가 import되지 않아 비활성화 상태로 실행됩니다.")
+            pass
         def start(self): pass
         def stop(self): pass
 
@@ -325,15 +326,21 @@ class SmartOrderMonitor:
             message = f"{mode_emoji.get(current_mode, '📝')} 주문 등록\n📄 {order_no}\n🏷️ {ticker} {quantity}주\n💰 ${buy_price}"
             self.telegram_bot.send_message(message)
 
+    # *** [수정] ***
+    # 아래 함수들의 들여쓰기를 수정하여 add_order_to_monitor 함수 밖으로 이동시켰습니다.
+    
     def check_order_status_smart(self, order_no):
         if not self.can_make_request():
             return None
         try:
-            url = f"{self.config['api']['base_url']}/uapi/overseas-stock/v1/trading/inquire-nccs"
+        # ✅ 올바른 API 엔드포인트로 변경!
+            url = f"{self.config['api']['base_url']}/uapi/overseas-stock/v1/trading/inquire-ccnl"
+    
             token = self.token_manager.get_access_token()
             if not token:
                 logger.error("토큰을 가져올 수 없습니다.")
                 return None
+    
             headers = {
                 "Content-Type": "application/json",
                 "authorization": f"Bearer {token}",
@@ -341,22 +348,27 @@ class SmartOrderMonitor:
                 "appsecret": self.config['api_secret'],
                 "tr_id": "TTTS3035R"
             }
+    
             today = datetime.now().strftime("%Y%m%d")
-            start_date = today
+    
+            # ✅ 올바른 파라미터로 변경!
             params = {
                 "CANO": self.config['cano'],
                 "ACNT_PRDT_CD": self.config['acnt_prdt_cd'],
-                "OVRS_EXCG_CD": "NASD",
+                "PDNO": "",
                 "ORD_STRT_DT": today,
                 "ORD_END_DT": today,
-                "SLL_BUY_DVSN_CD": "02", # 매수만 조회 (공식 파라미터)
-                "CCLD_DVSN": "01",       # 체결된 것만 조회 (공식)
-                "CCLD_NCCS_DVSN": "00",
-                "PDNO": "",
-                "CTX_AREA_FK100": "",
-                "CTX_AREA_NK100": "",
-                "SORT_SQN": "DS"
+                "SLL_BUY_DVSN": "02",          # 매수만
+                "CCLD_NCCS_DVSN": "01",        # 체결만
+                "OVRS_EXCG_CD": "NASD",
+                "SORT_SQN": "DS",
+                "ORD_DT": "",
+                "ORD_GNO_BRNO": "",
+                "ODNO": "",
+                "CTX_AREA_NK200": "",          # ✅ 변경!
+                "CTX_AREA_FK200": ""           # ✅ 변경!
             }
+    
             request_start = time.time()
             response = requests.get(url, headers=headers, params=params, timeout=15)
             self.last_request_time = time.time()
@@ -364,40 +376,50 @@ class SmartOrderMonitor:
             self.daily_api_count += 1
             self.hourly_api_count += 1
             self.stats['total_requests'] += 1
+    
             current_mode = self.get_current_trading_mode()
             self.stats[f'{current_mode}_mode_calls'] = self.stats.get(f'{current_mode}_mode_calls', 0) + 1
+    
             if response.status_code != 200:
                 logger.error(f"HTTP 오류: {response.status_code}")
                 return None
+    
             data = response.json()
             error_code = data.get("msg_cd", "")
             if error_code and error_code != "MCA00000":
                 error_msg = data.get('msg1', 'Unknown error')
                 if self.handle_api_error(error_code, error_msg):
                     return None
+    
             if data.get("rt_cd") != "0":
                 logger.error(f"API 오류: {data.get('msg1', 'Unknown')}")
                 return None
+    
             response_time = time.time() - request_start
             if response_time > 5:
                 logger.warning(f"⏰ 느린 API 응답: {response_time:.2f}초")
+    
             for item in data.get("output", []):
                 if item.get("odno") == order_no:
-                    ord_status = item.get("ord_stcd", "")
-                    ccld_qty = item.get("ccld_qty", "0")
-                    ccld_unpr = item.get("ccld_unpr", "0")
+                    # ✅ 필드명 변경!
+                    ccld_qty = item.get("ft_ccld_qty", "0")
+                    ccld_unpr = item.get("ft_ccld_unpr3", "0")
+            
                     return {
-                        'status': ord_status,
-                        'filled_qty': int(ccld_qty) if ccld_qty.isdigit() else 0,
-                        'filled_price': float(ccld_unpr) if ccld_unpr.replace('.', '').isdigit() else 0.0
+                        'status': '02',  # 체결완료
+                        'filled_qty': int(ccld_qty) if ccld_qty else 0,
+                        'filled_price': float(ccld_unpr) if ccld_unpr else 0.0
                     }
+    
             return {'status': '조회없음', 'filled_qty': 0, 'filled_price': 0.0}
+    
         except requests.exceptions.Timeout:
             logger.warning(f"⏰ API 타임아웃: {order_no}")
             return None
         except Exception as e:
             logger.error(f"상태 확인 오류: {e}")
             return None
+            
 
     def execute_auto_sell(self, order_info, filled_price):
         try:
@@ -511,7 +533,7 @@ class SmartOrderMonitor:
         try:
             if not self.can_make_request():
                 return
-            url = f"{self.config['api']['base_url']}/uapi/overseas-stock/v1/trading/inquire-nccs"
+            url = f"{self.config['api']['base_url']}/uapi/overseas-stock/v1/trading/inquire-ccnl"
             token = self.token_manager.get_access_token()
             if not token:
                 logger.error("토큰을 가져올 수 없습니다.")
@@ -528,72 +550,82 @@ class SmartOrderMonitor:
             params = {
                 "CANO": self.config['cano'],
                 "ACNT_PRDT_CD": self.config['acnt_prdt_cd'],
-                "OVRS_EXCG_CD": "NASD",
+                "PDNO": "",                    # 전종목
                 "ORD_STRT_DT": today,
                 "ORD_END_DT": today,
-                "SLL_BUY_DVSN_CD": "02", # 매수 체결만
-                "CCLD_DVSN": "01",       # 체결된 것만
-                "CCLD_NCCS_DVSN": "00",
-                "PDNO": "",
-                "CTX_AREA_FK100": "",
-                "CTX_AREA_NK100": "",
-                "SORT_SQN": "DS"
+                "SLL_BUY_DVSN": "02",          # 매수
+                "CCLD_NCCS_DVSN": "01",        # 체결
+                "OVRS_EXCG_CD": "NASD",
+                "SORT_SQN": "DS",
+                "ORD_DT": "",
+                "ORD_GNO_BRNO": "",
+                "ODNO": "",
+                "CTX_AREA_NK200": "",          # ✅ NK200으로 변경!
+                "CTX_AREA_FK200": ""           # ✅ FK200으로 변경!
             }
+
             response = requests.get(url, headers=headers, params=params, timeout=15)
             self.last_request_time = time.time()
             self.consecutive_requests += 1
             self.daily_api_count += 1
             self.hourly_api_count += 1
             self.stats['total_requests'] += 1
+        
             if response.status_code != 200:
                 logger.error(f"매수 감지 HTTP 오류: {response.status_code}")
                 return
+        
             data = response.json()
             if data.get("rt_cd") != "0":
                 return
+        
             for order in data.get("output", []):
                 order_no = order.get("odno", "")
-                ord_status = order.get("ord_stcd", "")
-                
-                # ✅ [수정] 폴링 감지 시 WS에서 이미 처리했는지 확인
+            
+                # ✅ 이미 처리한 주문 확인
                 if order_no in self.monitoring_orders or order_no in self.processed_ws_orders:
                     continue
+            
+                # ✅ 체결 수량 필드명 변경!
+                ticker = order.get("pdno", "")
+                ccld_qty = order.get("ft_ccld_qty", "0")      # ✅ 변경!
+                ccld_price = order.get("ft_ccld_unpr3", "0")  # ✅ 변경!
+            
+                try:
+                    ccld_qty = int(ccld_qty) if ccld_qty else 0
+                    ccld_price = float(ccld_price) if ccld_price else 0.0
+                except:
+                    continue
+            
+                if ccld_qty > 0 and ccld_price > 0:
+                    logger.info(f"🎉 [POLL] 신규 매수 체결 발견! {order_no}: {ticker} {ccld_qty}주 @ ${ccld_price}")
+                
+                    order_info = {
+                        'ticker': ticker,
+                        'quantity': ccld_qty,
+                        'buy_price': ccld_price,
+                        'created_at': datetime.now(),
+                        'last_checked': None,
+                        'check_count': 0,
+                        'no_change_count': 0,
+                        'consecutive_successes': 0,
+                        'consecutive_failures': 0,
+                        'last_status': None,
+                        'mode_when_created': self.get_current_trading_mode()
+                    }
+                
+                    success = self.execute_auto_sell(order_info, ccld_price)
+                
+                    if success:
+                        logger.info(f"✅ [POLL] 자동 매도 주문 즉시 성공: {ticker}")
+                        if self.telegram_bot:
+                            profit_rate = self.config.get('strategy', {}).get('smart_strategy', {}).get('target_profit_margin', 0.03) * 100
+                            message = f"🎉 [POLL] 자동 매수 감지 & 매도 성공!\n🏷️ {ticker} {ccld_qty}주\n💰 매수: ${ccld_price}\n📈 목표 수익: +{profit_rate}%"
+                            self.telegram_bot.send_message(message)
+                    else:
+                        logger.error(f"❌ [POLL] 자동 매도 주문 실패: {ticker}. 폴링 리스트 추가.")
+                        self.add_order_to_monitor(order_no, ticker, ccld_qty, ccld_price)
                     
-                if ord_status in ["02", "체결완료"] and order.get("sll_buy_dvsn_cd") == "02":
-                    ticker = order.get("pdno", "")
-                    ccld_qty = order.get("ccld_qty", "0")
-                    ccld_price = order.get("ccld_unpr", "0")
-                    try:
-                        ccld_qty = int(ccld_qty) if ccld_qty else 0
-                        ccld_price = float(ccld_price) if ccld_price else 0.0
-                    except:
-                        continue
-                    if ccld_qty > 0 and ccld_price > 0:
-                        logger.info(f"🎉 [POLL] 신규 매수 체결 발견! {order_no}: {ticker} {ccld_qty}주 @ ${ccld_price}")
-                        order_info = {
-                            'ticker': ticker,
-                            'quantity': ccld_qty,
-                            'buy_price': ccld_price,
-                            'created_at': datetime.now(),
-                            'last_checked': None,
-                            'check_count': 0,
-                            'no_change_count': 0,
-                            'consecutive_successes': 0,
-                            'consecutive_failures': 0,
-                            'last_status': None,
-                            'mode_when_created': self.get_current_trading_mode()
-                        }
-                        success = self.execute_auto_sell(order_info, ccld_price)
-                        if success:
-                            logger.info(f"✅ [POLL] 자동 매도 주문 즉시 성공: {ticker}")
-                            if self.telegram_bot:
-                                profit_rate = self.config.get('strategy', {}).get('smart_strategy', {}).get('target_profit_margin', 0.03) * 100
-                                message = f"🎉 [POLL] 자동 매수 감지 & 매도 성공!\n🏷️ {ticker} {ccld_qty}주\n💰 매수: ${ccld_price}\n📈 목표 수익: +{profit_rate}%"
-                                self.telegram_bot.send_message(message)
-                        else:
-                            logger.error(f"❌ [POLL] 자동 매도 주문 실패: {ticker}. 폴링 리스트 추가.")
-                            self.add_order_to_monitor(order_no, ticker, ccld_qty, ccld_price)
-                            
         except Exception as e:
             logger.error(f"매수 감지 스캔 오류: {e}")
 
