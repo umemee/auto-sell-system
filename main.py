@@ -14,7 +14,8 @@ from auth import TokenManager
 # 순환 import 해결을 위해 런타임 import로 변경
 from websocket_client import WebSocketClient
 from telegram_bot import TelegramBot
-from smart_order_monitor import SmartOrderMonitor, is_market_hours
+from smart_order_monitor import SmartOrderMonitor
+from order import is_market_hours
 
 # 런타임 import로 순환 import 해결
 from order import place_sell_order
