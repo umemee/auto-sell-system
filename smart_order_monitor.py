@@ -80,6 +80,10 @@ class SmartOrderMonitor:
         self.ws_client = WebSocketClient(config, token_manager, self.handle_ws_message)
         # ✅ [추가] WebSocket 중복 체결 방지용
         self.processed_ws_orders = set()
+        
+        # ✅ 새로 추가: 처리 완료된 주문 추적
+        self.processed_orders = set()  # 매도 성공한 주문
+        self.failed_orders = {}      # 매도 실패한 주문 {order_no: (timestamp, reason)}
 
 
     def load_persisted_state(self):
@@ -263,6 +267,9 @@ class SmartOrderMonitor:
             return False
         return True
 
+    # ============================================================================
+    # reset_counters_if_needed() 함수 수정 (날짜 변경 시 리셋)
+    # ============================================================================
     def reset_counters_if_needed(self):
         now = datetime.now()
         if now.date() != self.last_reset_date:
@@ -275,7 +282,13 @@ class SmartOrderMonitor:
             self.stats['smart_mode_calls'] = 0
             self.stats['rate_limit_violations'] = 0
             self.stats['api_errors'] = {}
-            self.processed_ws_orders.clear() # 날짜 변경 시 WS 중복 방지 셋 초기화
+            
+            # ✅ 새로 추가: 처리 완료 목록 리셋
+            self.processed_ws_orders.clear()
+            self.processed_orders.clear()
+            self.failed_orders.clear()
+            logger.info("🔄 처리 완료 주문 목록 초기화")
+            
         if now.hour != self.last_hour_reset:
             logger.debug(f"📊 시간별 API 리셋: {self.hourly_api_count}회")
             self.hourly_api_count = 0
@@ -325,9 +338,6 @@ class SmartOrderMonitor:
             mode_emoji = {'aggressive': '🔥', 'smart': '🧠', 'off': '⏸️', 'ws_mode': '⚡️'}
             message = f"{mode_emoji.get(current_mode, '📝')} 주문 등록\n📄 {order_no}\n🏷️ {ticker} {quantity}주\n💰 ${buy_price}"
             self.telegram_bot.send_message(message)
-
-    # *** [수정] ***
-    # 아래 함수들의 들여쓰기를 수정하여 add_order_to_monitor 함수 밖으로 이동시켰습니다.
     
     def check_order_status_smart(self, order_no):
         if not self.can_make_request():
@@ -420,14 +430,16 @@ class SmartOrderMonitor:
             logger.error(f"상태 확인 오류: {e}")
             return None
             
-
-    def execute_auto_sell(self, order_info, filled_price):
+    # ============================================================================
+    # execute_auto_sell() 함수 수정 (성공 시 기록 추가)
+    # ============================================================================
+    def execute_auto_sell(self, order_info, filled_price, order_no=None):
+        """자동 매도 실행 (주문번호 추적 포함)"""
         try:
-            from order import place_sell_order # order.py에서 함수 import
+            from order import place_sell_order
             current_mode = self.get_current_trading_mode()
             profit_margin = self.config.get('strategy', {}).get('smart_strategy', {}).get('target_profit_margin', 0.03)
             
-            # ws_mode일 때도 aggressive 전략을 따르도록 설정 (또는 별도 ws_strategy 설정)
             if current_mode in ['aggressive', 'ws_mode'] and 'aggressive_strategy' in self.config.get('strategy', {}):
                 profit_margin = self.config['strategy']['aggressive_strategy']['target_profit_margin']
                 
@@ -450,12 +462,23 @@ class SmartOrderMonitor:
                     self.stats['successful_detections'] += 1
                     total_detected = self.stats['successful_detections']
                 
+                # ✅ 새로 추가: 성공한 주문번호 기록
+                if order_no:
+                    self.processed_orders.add(order_no)
+                    logger.info(f"✅ 주문 {order_no} 처리 완료로 기록")
+                
                 logger.info(f"✅ 자동 매도 성공: {execution_data['ticker']} (총 감지: {total_detected}회)")
                 
                 if self.telegram_bot:
                     mode_emoji = {'aggressive': '🔥', 'smart': '🧠', 'ws_mode': '⚡️'}
                     message = f"{mode_emoji.get(current_mode, '🎉')} 매도 성공!\n🏷️ {execution_data['ticker']}\n💰 ${filled_price} → ${sell_price}\n📈 +{profit_margin*100:.1f}%\n📊 총 {current_mode} 감지: {total_detected}회"
                     self.telegram_bot.send_message(message)
+            else:
+                # ✅ 새로 추가: 실패한 주문 기록 (특정 오류만)
+                if order_no:
+                    self.failed_orders[order_no] = (datetime.now(), '매도 실패')
+                    logger.warning(f"⚠️ 주문 {order_no} 매도 실패로 기록")
+                    
             return success
         except Exception as e:
             logger.error(f"자동 매도 실행 오류: {e}")
@@ -488,8 +511,8 @@ class SmartOrderMonitor:
                     if not order_no:
                         continue
 
-                    # ✅ 중복 처리 방지
-                    if order_no in self.processed_ws_orders:
+                    # ✅ 중복 처리 방지 (WS 자체 중복 + POLLING 중복)
+                    if order_no in self.processed_ws_orders or order_no in self.processed_orders:
                         logger.debug(f"이미 처리된 WS 체결: {order_no}")
                         continue
 
@@ -512,12 +535,12 @@ class SmartOrderMonitor:
                             # (execute_auto_sell에 필요한 최소 정보)
                         }
                         
-                        # 즉시 자동 매도 실행
-                        success = self.execute_auto_sell(order_info, ccld_price)
+                        # ✅ 주문번호 전달
+                        success = self.execute_auto_sell(order_info, ccld_price, order_no)
                         
                         if success:
                             logger.info(f"✅ [WS] 자동 매도 주문 즉시 성공: {ticker}")
-                            self.processed_ws_orders.add(order_no) # 성공 시 중복 방지 셋에 추가
+                            self.processed_ws_orders.add(order_no) # 성공 시 WS 중복 방지 셋에 추가
                         else:
                             logger.error(f"❌ [WS] 자동 매도 주문 실패: {ticker}. REST 폴링으로 전환.")
                             # 실패 시 REST 폴링 모니터링에 등록 (다음 모드 전환 시 폴링됨)
@@ -528,16 +551,21 @@ class SmartOrderMonitor:
         except Exception as e:
             logger.error(f"WS 메시지 처리 오류: {e} - 메시지: {message}")
 
+    # ============================================================================
+    # scan_for_new_buy_orders() 함수 수정 (중복 방지 강화)
+    # ============================================================================
     def scan_for_new_buy_orders(self):
-        """MTS 매수 주문 자동 감지 및 모니터링 등록 (폴링 모드용)"""
+        """MTS 매수 주문 자동 감지 및 모니터링 등록 (중복 방지 강화)"""
         try:
             if not self.can_make_request():
                 return
+                
             url = f"{self.config['api']['base_url']}/uapi/overseas-stock/v1/trading/inquire-ccnl"
             token = self.token_manager.get_access_token()
             if not token:
                 logger.error("토큰을 가져올 수 없습니다.")
                 return
+                
             headers = {
                 "Content-Type": "application/json",
                 "authorization": f"Bearer {token}",
@@ -545,61 +573,75 @@ class SmartOrderMonitor:
                 "appsecret": self.config['api_secret'],
                 "tr_id": "TTTS3035R"
             }
+            
             today = datetime.now().strftime("%Y%m%d")
-            start_date = today
+            
             params = {
                 "CANO": self.config['cano'],
                 "ACNT_PRDT_CD": self.config['acnt_prdt_cd'],
-                "PDNO": "",                    # 전종목
+                "PDNO": "",
                 "ORD_STRT_DT": today,
                 "ORD_END_DT": today,
-                "SLL_BUY_DVSN": "02",          # 매수
-                "CCLD_NCCS_DVSN": "01",        # 체결
+                "SLL_BUY_DVSN": "02",
+                "CCLD_NCCS_DVSN": "01",
                 "OVRS_EXCG_CD": "NASD",
                 "SORT_SQN": "DS",
                 "ORD_DT": "",
                 "ORD_GNO_BRNO": "",
                 "ODNO": "",
-                "CTX_AREA_NK200": "",          # ✅ NK200으로 변경!
-                "CTX_AREA_FK200": ""           # ✅ FK200으로 변경!
+                "CTX_AREA_NK200": "",
+                "CTX_AREA_FK200": ""
             }
-
+            
             response = requests.get(url, headers=headers, params=params, timeout=15)
             self.last_request_time = time.time()
             self.consecutive_requests += 1
             self.daily_api_count += 1
             self.hourly_api_count += 1
             self.stats['total_requests'] += 1
-        
+            
             if response.status_code != 200:
                 logger.error(f"매수 감지 HTTP 오류: {response.status_code}")
                 return
-        
+            
             data = response.json()
             if data.get("rt_cd") != "0":
                 return
-        
+            
             for order in data.get("output", []):
                 order_no = order.get("odno", "")
-            
-                # ✅ 이미 처리한 주문 확인
-                if order_no in self.monitoring_orders or order_no in self.processed_ws_orders:
-                    continue
-            
-                # ✅ 체결 수량 필드명 변경!
+                
+                # ✅ 강화된 중복 체크: 여러 조건 확인
+                if order_no in self.monitoring_orders:
+                    continue  # 이미 모니터링 중
+                if order_no in self.processed_ws_orders:
+                    continue  # WS에서 처리됨
+                if order_no in self.processed_orders:
+                    logger.debug(f"⏭️ 이미 처리 완료된 주문: {order_no}")
+                    continue  # ✅ 이미 매도 성공
+                if order_no in self.failed_orders:
+                    # ✅ 실패한 주문은 1시간 동안 재시도 안 함
+                    fail_time, reason = self.failed_orders[order_no]
+                    if (datetime.now() - fail_time).total_seconds() < 3600:
+                        logger.debug(f"⏭️ 매도 실패 주문 (1시간 대기): {order_no}")
+                        continue
+                    else:
+                        # 1시간 지났으면 재시도
+                        del self.failed_orders[order_no]
+                
                 ticker = order.get("pdno", "")
-                ccld_qty = order.get("ft_ccld_qty", "0")      # ✅ 변경!
-                ccld_price = order.get("ft_ccld_unpr3", "0")  # ✅ 변경!
-            
+                ccld_qty = order.get("ft_ccld_qty", "0")
+                ccld_price = order.get("ft_ccld_unpr3", "0")
+                
                 try:
                     ccld_qty = int(ccld_qty) if ccld_qty else 0
                     ccld_price = float(ccld_price) if ccld_price else 0.0
                 except:
                     continue
-            
+                
                 if ccld_qty > 0 and ccld_price > 0:
                     logger.info(f"🎉 [POLL] 신규 매수 체결 발견! {order_no}: {ticker} {ccld_qty}주 @ ${ccld_price}")
-                
+                    
                     order_info = {
                         'ticker': ticker,
                         'quantity': ccld_qty,
@@ -613,9 +655,10 @@ class SmartOrderMonitor:
                         'last_status': None,
                         'mode_when_created': self.get_current_trading_mode()
                     }
-                
-                    success = self.execute_auto_sell(order_info, ccld_price)
-                
+                    
+                    # ✅ 주문번호 전달
+                    success = self.execute_auto_sell(order_info, ccld_price, order_no)
+                    
                     if success:
                         logger.info(f"✅ [POLL] 자동 매도 주문 즉시 성공: {ticker}")
                         if self.telegram_bot:
@@ -625,7 +668,7 @@ class SmartOrderMonitor:
                     else:
                         logger.error(f"❌ [POLL] 자동 매도 주문 실패: {ticker}. 폴링 리스트 추가.")
                         self.add_order_to_monitor(order_no, ticker, ccld_qty, ccld_price)
-                    
+                        
         except Exception as e:
             logger.error(f"매수 감지 스캔 오류: {e}")
 
@@ -711,9 +754,16 @@ class SmartOrderMonitor:
                     
                     if current_status in ['02','체결완료','완전체결'] and status_info['filled_qty'] > 0:
                         logger.info(f"🎉 [POLL] 체결 완료: {order_no} (모드: {current_mode}, 체크: {order_info['check_count']}회)")
-                        self.execute_auto_sell(order_info, status_info['filled_price'])
-                        self.monitoring_orders.pop(order_no, None)
-                        self.save_state()
+                        
+                        # ✅ 주문번호 전달
+                        success = self.execute_auto_sell(order_info, status_info['filled_price'], order_no)
+                        
+                        if success:
+                            self.monitoring_orders.pop(order_no, None)
+                            self.save_state()
+                        else:
+                            # 매도 실패 시 monitoring_orders에 남겨두고, failed_orders에 기록됨 (execute_auto_sell 내부에서)
+                            logger.warning(f"⚠️ [POLL] 체결 감지 후 매도 실패: {order_no}. 다음 스캔까지 대기.")
                         
                     time.sleep(max(1, self.rate_config.get('min_request_interval', 2.5)-1))
                     
