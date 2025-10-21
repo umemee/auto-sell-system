@@ -12,20 +12,27 @@ logger = logging.getLogger(__name__)
 
 class WebSocketClient:
     """
-    한국투자증권 WebSocket 클라이언트 - 완전 안정화 버전
+    한국투자증권 WebSocket 클라이언트 - 기획서 v1.0 완전 준수 버전
+    
+    주요 변경사항:
+    1. 정규장 시간: ET 09:30-12:00 (기획서 2.2절)
+    2. 재연결 횟수: 최대 3회 (기획서 5.2절 비상 증지 조건)
+    3. WebSocket 실패 시 시스템 종지 로직 추가 (기획서 5.2절)
+    4. 비상 정지 콜백 메커니즘 추가
     """
 
-    def __init__(self, config, token_manager, message_handler):
+    def __init__(self, config, token_manager, message_handler, emergency_stop_callback=None):
         self.config = config
         self.token_manager = token_manager
         self.message_handler = message_handler
+        self.emergency_stop_callback = emergency_stop_callback  # ✅ 추가: 시스템 종지 콜백
 
         # WebSocket 연결 상태
         self.ws = None
         self.connected = False
         self.subscribed = False
         self.reconnect_count = 0
-        self.max_reconnects = 10
+        self.max_reconnects = 3  # ✅ 변경: 10 → 3 (기획서 5.2절)
         self.is_running = False
 
         # 설정값
@@ -47,15 +54,18 @@ class WebSocketClient:
 
     def _is_regular_market(self):
         """
-        미국 정규장 시간인지 확인 (ET 09:30-16:00)
+        미국 정규장 시간인지 확인 (ET 09:30-12:00)
+        
+        ✅ 수정: 기획서 2.2절에 따라 ET 16:00 → 12:00으로 변경
+        
         Returns: bool - 정규장이면 True
         """
         try:
             et_tz = timezone('US/Eastern')
             et_now = datetime.now(et_tz).time()
             
-            regular_start = dtime(9, 30)  # 09:30 ET
-            regular_end = dtime(16, 0)    # 16:00 ET
+            regular_start = dtime(9, 30)   # 09:30 ET
+            regular_end = dtime(12, 0)     # ✅ 변경: 16:00 → 12:00 (기획서 2.2절)
             
             is_regular = regular_start <= et_now <= regular_end
             
@@ -78,28 +88,27 @@ class WebSocketClient:
             logger.error("❌ WebSocket 승인키 없음")
             return None
     
-        ticker = symbol or self.default_symbol  # ✅ ticker 변수 정의
-        tr_key = ticker  # ✅ tr_key는 ticker와 동일
+        ticker = symbol or self.default_symbol
+        tr_key = ticker
 
         subscribe_message = {
             "header": {
                 "approval_key": approval_key,
-                "custtype": self.custtype,  # 개인: 'P'
-                "trtype": self.tr_type,     # 구독 요청: '1'
+                "custtype": self.custtype,
+                "trtype": self.tr_type,
                 "content-type": "utf-8"
             },
             "body": {
                 "input": {
-                    "tr_id": "H0STCNI0",          # 해외주식 체결통보 TR
-                    "tr_key": tr_key,             # 서버가 요구하는 필수값
+                    "tr_id": "H0STCNI0",
+                    "tr_key": tr_key,
                     "pdno": ticker  
                 }
             }
         }
 
-            # ✅ 전송할 메시지 로그
         logger.info("=" * 60)
-        logger.info("🔍 WebSocket 구독 메시지 생성")
+        logger.info("📋 WebSocket 구독 메시지 생성")
         logger.info(f"  - TR_ID: H0STCNI0")
         logger.info(f"  - TR_KEY: {tr_key}")
         logger.info(f"  - PDNO: {ticker}")
@@ -119,7 +128,6 @@ class WebSocketClient:
         try:
             logging.info("🔑 승인키 강제 갱신 시도 (오류 복구용)")
         
-            # ✅ force_refresh=True로 새 승인키 발급
             new_key = self.token_manager.get_approval_key(force_refresh=True)
 
             if new_key:
@@ -156,7 +164,7 @@ class WebSocketClient:
         # 자동 구독
         self.subscribe(self.default_symbol)
         
-        # ✅ 개선사항 1: 구독 확인 후 재시도 로직
+        # 구독 확인 후 재시도 로직
         def check_subscription():
             time.sleep(5)  # 5초 대기 후 구독 상태 확인
             if not self.subscribed and self.connected:
@@ -173,7 +181,6 @@ class WebSocketClient:
 
     def on_message(self, ws, message):
         try:
-            # ✅ 먼저 원본 출력
             logger.debug(f"📥 WebSocket 수신: {message[:500]}")
 
             # 구독 성공 확인 메시지
@@ -196,7 +203,7 @@ class WebSocketClient:
             # 본문 처리
             logger.debug(f"📡 WebSocket 수신 원본 메시지: {message}")
             data = json.loads(message)
-            logger.debug(f"📑 WebSocket 파싱 데이터: {data}")
+            logger.debug(f"🔓 WebSocket 파싱 데이터: {data}")
 
             # 오류 응답 처리
             body = data.get("body", {})
@@ -267,7 +274,6 @@ class WebSocketClient:
         self.subscribed = False
 
     def on_close(self, ws, close_status_code, close_msg):
-        # ✅ 개선사항 2: 종료 사유 코드별 상세 로그
         reason_map = {
             1000: "정상 종료",
             1001: "서버 종료",
@@ -282,7 +288,7 @@ class WebSocketClient:
         logger.warning(f"⚠️ WebSocket 연결 해제 ({close_status_code}) - {reason}")
         
         if close_msg:
-            logger.warning(f"🔍 서버 메시지: {close_msg}")
+            logger.warning(f"📝 서버 메시지: {close_msg}")
             
         # 승인키 관련 오류 시 갱신 시도
         if close_status_code in [4000, 4001]:
@@ -297,7 +303,7 @@ class WebSocketClient:
             logger.warning("WebSocket 이미 실행 중")
             return
 
-        # ✅ 개선사항 4: 프리마켓/정규장 구분 로직
+        # ✅ 정규장 시간 체크 (기획서 2.3절)
         if not self._is_regular_market():
             logger.info("🌙 현재는 정규장이 아닙니다. WebSocket 대신 REST 폴링 모드 사용 권장.")
             return
@@ -339,9 +345,9 @@ class WebSocketClient:
                     self.reconnect_count += 1
 
                     if self.is_running and self.reconnect_count < self.max_reconnects:
-                        # ✅ 시장 상태에 따른 적응형 재연결 지연
+                        # 시장 상태에 따른 적응형 재연결 지연
                         if not self._is_regular_market():
-                           # 프리마켓/장 마감: 5분 대기 (AWS 비용 절감)
+                            # 프리마켓/장 마감: 5분 대기 (AWS 비용 절감)
                             delay = 300  # 5분
                             logger.info(f"🌙 정규장 아님 - 재연결 대기 {delay}초 (5분)")
                         else:
@@ -350,6 +356,15 @@ class WebSocketClient:
                             logger.info(f"⏳ 재접속 대기 {delay}초")
     
                         time.sleep(delay)
+            
+            # ✅ 추가: 정규장에서 재연결 횟수 초과 시 시스템 종지 (기획서 5.2절)
+            if self.reconnect_count >= self.max_reconnects:
+                if self._is_regular_market():
+                    logger.critical(f"🛑 정규장에서 WebSocket {self.max_reconnects}회 연결 실패 - 시스템 종지 (기획서 5.2절)")
+                    if self.emergency_stop_callback:
+                        self.emergency_stop_callback("WebSocket 연결 실패 (정규장)")
+                else:
+                    logger.warning(f"⚠️ 프리마켓/장외 시간에 WebSocket {self.max_reconnects}회 연결 실패 - REST 폴링으로 전환 권장")
 
         thread = threading.Thread(target=run_loop, daemon=True)
         thread.start()

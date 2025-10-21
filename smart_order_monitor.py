@@ -1,5 +1,6 @@
-# smart_order_monitor.py - 한국투자증권 실전 자동 감시 시스템 최신 공식 표준 완전 반영
-# (WebSocket 실시간 감시 모드 통합 버전)
+# smart_order_monitor.py - Korea Investment Securities Smart Order Monitor
+# Specification v1.0 Compliant
+# Pre-market REST Polling + Regular Hours WebSocket Monitoring System
 
 import requests
 import json
@@ -7,51 +8,62 @@ import logging
 import time
 import threading
 import os
+import fcntl
 from datetime import datetime, timedelta, time as dtime
 from pytz import timezone
 
-# ✅ [추가] WebSocket 클라이언트 import
-# (프로젝트 내에 websocket_client.py 파일이 있다고 가정)
+logger = logging.getLogger(__name__)
+
+# Try to import WebSocket client
 try:
     from websocket_client import WebSocketClient
 except ImportError:
-    # logger.error("websocket_client.py를 찾을 수 없습니다. WebSocket 모드가 작동하지 않습니다.")
-    # WebSocketClient가 없어도 시스템이 중단되지 않도록 임시 클래스 정의
+    logger.warning("WebSocketClient not found. WebSocket mode will be disabled.")
     class WebSocketClient:
+        """Fallback WebSocket client if import fails"""
         def __init__(self, *args, **kwargs):
-            # logger.error("WebSocketClient가 import되지 않아 비활성화 상태로 실행됩니다.")
             pass
-        def start(self): pass
-        def stop(self): pass
+        def start(self):
+            pass
+        def stop(self):
+            pass
 
-logger = logging.getLogger(__name__)
 
 class SmartOrderMonitor:
-    """KIS API 실전 환경 최적화 집중/스마트 폴링 및 WebSocket 실시간 감시 시스템"""
+    """
+    Smart Order Monitor System (Specification v1.0)
+    
+    Operating Hours (ET):
+    - Pre-market: 04:00-09:30 (REST Polling with Smart Intervals)
+    - Regular Hours: 09:30-12:00 (WebSocket Real-time)
+    - Sleep Mode: 12:00-04:00 (System Off)
+    
+    Key Features:
+    - Spec 3.1: Smart polling (3s/10s intervals)
+    - Spec 5.1: Rate limit protection (15 req/sec)
+    - Spec 2.3: WebSocket failure → System stop
+    - Spec 4.4: Sell failure → Immediate abandon
+    """
 
     def __init__(self, config, token_manager, telegram_bot=None):
         self.config = config
         self.token_manager = token_manager
         self.telegram_bot = telegram_bot
-        self.monitoring_orders = {}
+        
+        # Monitoring state
+        self.monitoring_orders = {}  # {order_no: order_info}
         self.is_running = False
         self.monitor_thread = None
-
-        # 폴링 모드별 설정
+        
+        # Mode tracking
         self.current_mode = None
         self.last_mode_change = datetime.now()
-
-        # 집중 폴링 설정
-        self.aggressive_config = config['polling']['aggressive']
-        self.aggressive_interval = self.aggressive_config['interval']
-
-        # 스마트 폴링 설정
-        self.smart_config = config['polling']['smart']
-        self.smart_initial_interval = self.smart_config['initial_interval']
-        self.smart_max_interval = self.smart_config['max_interval']
-        self.backoff_multiplier = self.smart_config['backoff_multiplier']
-
-        # Rate Limit 보호 강화
+        
+        # Spec 3.1: Polling configurations
+        self.premarket_config = config['polling'].get('premarket', {})
+        self.ws_config = config['polling'].get('regular', {})
+        
+        # Spec 5.1: Rate limit protection
         self.rate_config = config['rate_limit']
         self.daily_api_count = 0
         self.last_reset_date = datetime.now().date()
@@ -59,264 +71,413 @@ class SmartOrderMonitor:
         self.last_hour_reset = datetime.now().hour
         self.last_request_time = 0
         self.consecutive_requests = 0
-
-        # 상태 영속화 파일
+        
+        # State persistence (Spec 7.1)
         self.state_file = config['system'].get('state_file', '/tmp/auto-sell-order-state.json')
         self.load_persisted_state()
-
-        # 통계
+        
+        # Statistics
         self.stats = {
             'total_requests': 0,
             'successful_detections': 0,
-            'aggressive_mode_calls': 0,
-            'smart_mode_calls': 0,
-            'ws_detections': 0, # WS 감지 통계
+            'ws_detections': 0,
             'mode_switches': 0,
             'rate_limit_violations': 0,
-            'api_errors': {}
+            'api_errors': {},
+            'premarket_calls': 0,
+            'consecutive_api_errors': 0
         }
         
-        # ✅ [추가] WebSocket 클라이언트 초기화
-        self.ws_client = WebSocketClient(config, token_manager, self.handle_ws_message)
-        # ✅ [추가] WebSocket 중복 체결 방지용
-        self.processed_ws_orders = set()
+        # Spec 4.4: Order tracking (prevent duplicates)
+        self.processed_orders = set()      # Successfully sold
+        self.failed_orders = {}           # Failed orders: {order_no: (timestamp, reason)}
+        self.processed_ws_orders = set()  # Processed via WebSocket
         
-        # ✅ 새로 추가: 처리 완료된 주문 추적
-        self.processed_orders = set()  # 매도 성공한 주문
-        self.failed_orders = {}      # 매도 실패한 주문 {order_no: (timestamp, reason)}
+        # WebSocket client initialization
+        self.ws_client = None
+        self.ws_failure_count = 0
+        self.ws_max_failures = 3  # Spec 2.3: 3 attempts before system stop
+        
+        # Last buy order scan time
+        self.last_buy_scan = 0
 
+        # ✅ 스레드 안전을 위한 Lock 추가
+        self._counter_lock = threading.Lock()
 
     def load_persisted_state(self):
-        """저장된 상태 복원"""
+        """Spec 7.1: Load persisted state from file"""
         try:
             if os.path.exists(self.state_file):
                 with open(self.state_file, 'r', encoding='utf-8') as f:
                     state = json.load(f)
+                
+                # Only restore orders from last 1 hour
                 cutoff_time = datetime.now() - timedelta(hours=1)
+                
                 for order_no, order_data in state.get('orders', {}).items():
                     created_at = datetime.fromisoformat(order_data['created_at'])
                     if created_at > cutoff_time:
                         order_data['created_at'] = created_at
+                        if 'last_checked' in order_data and order_data['last_checked']:
+                            order_data['last_checked'] = datetime.fromisoformat(order_data['last_checked'])
                         self.monitoring_orders[order_no] = order_data
-                logger.info(f"💾 상태 복원: {len(self.monitoring_orders)}개 주문")
+                
+                logger.info(f"💾 State restored: {len(self.monitoring_orders)} orders")
         except Exception as e:
-            logger.warning(f"상태 복원 실패: {e}")
+            logger.warning(f"State restoration failed: {e}")
 
     def save_state(self):
-        """현재 상태 저장"""
+        """Spec 7.1: Save current state to file"""
         try:
-            state = {'timestamp': datetime.now().isoformat(),'last_check': datetime.now().isoformat(), 'orders': {}}
+            state = {
+                'timestamp': datetime.now().isoformat(),
+                'last_check': datetime.now().isoformat(),
+                'orders': {}
+            }
+            
             for order_no, order_data in self.monitoring_orders.items():
                 order_copy = order_data.copy()
                 order_copy['created_at'] = order_data['created_at'].isoformat()
                 if order_data.get('last_checked'):
                     order_copy['last_checked'] = order_data['last_checked'].isoformat()
                 state['orders'][order_no] = order_copy
+            
             os.makedirs(os.path.dirname(self.state_file), exist_ok=True)
+            
             with open(self.state_file, 'w', encoding='utf-8') as f:
+                fcntl.flock(f, fcntl.LOCK_EX)  # 배타적 잠금
                 json.dump(state, f, ensure_ascii=False, indent=2)
-        except Exception as e:
-            logger.warning(f"상태 저장 실패: {e}")
+                fcntl.flock(f, fcntl.LOCK_UN)  # 잠금 해제
 
-    # smart_order_monitor.py - get_current_trading_mode() 함수 수정
-# (전체 파일에서 이 함수만 교체하세요)
+        except Exception as e:
+            logger.warning(f"State save failed: {e}")
+
+    def should_system_run(self):
+        """
+        Spec 2.2: Check if system should be running
+        Operating hours: ET 04:00-12:00
+        
+        Returns:
+            bool: True if within operating hours
+        """
+        try:
+            trading_tz = self.config.get('order_settings', {}).get('timezone', 'US/Eastern')
+            tz = timezone(trading_tz)
+            now_time = datetime.now(tz).time()
+            
+            start_time = dtime(4, 0)   # 04:00 ET
+            end_time = dtime(12, 0)    # 12:00 ET
+            
+            return start_time <= now_time < end_time
+        except Exception as e:
+            logger.error(f"System time check error: {e}")
+            return False
 
     def get_current_trading_mode(self):
         """
-        현재 시간에 따른 매매 모드 판별 (config의 timezone 사용)
-    
+        Spec 2.2, 2.3: Determine current trading mode
+        
         Returns:
-            str: 'aggressive', 'smart', 'ws_mode', 'off'
+            str: 'premarket', 'regular', 'closed'
         """
         try:
-            # ✅ config에서 timezone 가져오기 (더 이상 KST 하드코딩 안 함!)
-            trading_tz = self.config['trading'].get('timezone', 'US/Eastern')
+            trading_tz = self.config.get('order_settings', {}).get('timezone', 'US/Eastern')
             tz = timezone(trading_tz)
             now_time = datetime.now(tz).time()
-        
-            logger.debug(f"🕐 현재시간: {now_time.strftime('%H:%M')} ({trading_tz})")
-
-            # ✅ ws_mode (WebSocket 모드) 우선 감지
-            if 'ws_mode' in self.config['polling']:
-                for time_range in self.config['polling']['ws_mode'].get('time_ranges', []):
+            
+            logger.debug(f"🕐 Current time: {now_time.strftime('%H:%M')} ({trading_tz})")
+            
+            # Spec 2.3: Regular hours (WebSocket mode)
+            if 'regular' in self.config['polling']:
+                for time_range in self.config['polling']['regular'].get('time_ranges', []):
                     start_time = dtime(*[int(x) for x in time_range['start'].split(':')])
                     end_time = dtime(*[int(x) for x in time_range['end'].split(':')])
                     if start_time <= now_time < end_time:
-                        logger.debug(f"✅ ws_mode: {time_range['start']} ~ {time_range['end']}")
-                        return 'ws_mode'
-
-            # aggressive 모드 (프리마켓)
-            for time_range in self.aggressive_config['time_ranges']:
-                start_time = dtime(*[int(x) for x in time_range['start'].split(':')])
-                end_time = dtime(*[int(x) for x in time_range['end'].split(':')])
-                if start_time <= now_time < end_time:
-                    logger.debug(f"✅ aggressive: {time_range['start']} ~ {time_range['end']}")
-                    return 'aggressive'
-        
-            # smart 모드 (애프터마켓)
-            for time_range in self.smart_config['time_ranges']:
-                start_time = dtime(*[int(x) for x in time_range['start'].split(':')])
-                end_time = dtime(*[int(x) for x in time_range['end'].split(':')])
-                if start_time <= now_time < end_time:
-                    logger.debug(f"✅ smart: {time_range['start']} ~ {time_range['end']}")
-                    return 'smart'
-        
-            # 장 마감 시간
-            logger.debug(f"⏸️ 장 마감 시간 (off)")
-            return 'off'
+                        logger.debug(f"✅ Regular hours: {time_range['start']} ~ {time_range['end']}")
+                        return 'regular'
+            
+            # Spec 2.3: Pre-market (REST polling)
+            if 'premarket' in self.config['polling']:
+                for time_range in self.config['polling']['premarket'].get('time_ranges', []):
+                    start_time = dtime(*[int(x) for x in time_range['start'].split(':')])
+                    end_time = dtime(*[int(x) for x in time_range['end'].split(':')])
+                    if start_time <= now_time < end_time:
+                        logger.debug(f"✅ Pre-market: {time_range['start']} ~ {time_range['end']}")
+                        return 'premarket'
+            
+            # Spec 2.2: Sleep mode
+            logger.debug(f"⏸️ Sleep mode (closed)")
+            return 'closed'
         
         except Exception as e:
-            logger.error(f"모드 판별 오류: {e}")
-            return 'smart'  # 기본값
+            logger.error(f"Mode detection error: {e}")
+            return 'premarket'  # Safe default
 
     def switch_mode_if_needed(self):
-        """필요 시 모드 전환 및 상태 알림"""
+        """Spec 2.3: Switch mode if needed and notify"""
         new_mode = self.get_current_trading_mode()
+        
         if new_mode != self.current_mode:
             old_mode = self.current_mode
             self.current_mode = new_mode
             self.last_mode_change = datetime.now()
             self.stats['mode_switches'] += 1
-            logger.info(f"🔄 매매 모드 전환: {old_mode} → {new_mode}")
+            
+            logger.info(f"🔄 Mode switch: {old_mode} → {new_mode}")
+            
+            # Spec 6.1: Telegram notification
             if self.telegram_bot:
-                # ✅ [수정] ws_mode 텔레그램 알림 추가
                 mode_names = {
-                    'aggressive': '🔥 집중 매매 (3초 간격)', 
-                    'smart': '🧠 스마트 폴링 (5-20초)', 
-                    'off': '⏸️ 중지 (취침)',
-                    'ws_mode': '⚡️ 실시간 (WebSocket)'
+                    'premarket': '🔵 Pre-market (REST Polling)',
+                    'regular': '⚡ Regular Hours (WebSocket)',
+                    'closed': '😴 Sleep Mode'
                 }
-                message = f"🔄 모드 전환\n{mode_names.get(old_mode, old_mode)} → {mode_names.get(new_mode, new_mode)}"
+                message = (
+                    f"🔄 Mode Switch\n"
+                    f"{mode_names.get(old_mode, old_mode)} → {mode_names.get(new_mode, new_mode)}"
+                )
                 self.telegram_bot.send_message(message)
+            
             self.save_state()
-            if new_mode == 'off':
-                self.stop_for_off_hours()
+            
+            # Spec 2.3: Handle mode-specific actions
+            if new_mode == 'closed':
+                self.handle_sleep_mode()
+            elif new_mode == 'regular':
+                self.start_websocket_mode()
+            elif new_mode == 'premarket':
+                self.stop_websocket_mode()
+            
             return True
+        
         return False
 
-    def stop_for_off_hours(self):
-        """중지 시간 처리"""
-        logger.info("⏸️ 매매 중지 시간 - 모니터링 일시 중지")
+    def handle_sleep_mode(self):
+        """Spec 2.2: Handle sleep mode (ET 12:00-04:00)"""
+        logger.info("😴 Entering sleep mode - System off until 04:00 ET")
+        
+        # Spec 6.1: Daily statistics telegram notification
         if self.telegram_bot:
-            next_start = "17:00 KST"
-            message = f"😴 취침 모드 시작\n⏰ 다음 시작: {next_start}\n📊 오늘 통계:\n- 총 요청: {self.stats['total_requests']}회\n- 성공 감지: {self.stats['successful_detections']}회\n- WS 감지: {self.stats['ws_detections']}회\n- Rate Limit: {self.stats['rate_limit_violations']}회"
+            next_start = "04:00 ET (17:00 KST)"
+            message = (
+                f"😴 Sleep Mode Started\n"
+                f"⏰ Next start: {next_start}\n"
+                f"📊 Today's Statistics:\n"
+                f"- Total requests: {self.stats['total_requests']}\n"
+                f"- Successful detections: {self.stats['successful_detections']}\n"
+                f"- WebSocket detections: {self.stats['ws_detections']}\n"
+                f"- Rate limit hits: {self.stats['rate_limit_violations']}"
+            )
             self.telegram_bot.send_message(message)
 
-    def calculate_polling_interval(self, order_no, order_info):
-        """모드별 폴링 간격 계산"""
-        # ws_mode일 경우 이 함수가 호출되지 않아야 하지만, 안전장치로 추가
-        if self.current_mode == 'ws_mode':
-            return 3600 # 1시간 (사실상 폴링 안 함)
-        if self.current_mode == 'off':
-            return 3600
-        elif self.current_mode == 'aggressive':
-            return self.aggressive_interval
-        elif self.current_mode == 'smart':
-            return self.calculate_smart_interval(order_info)
-        return self.smart_initial_interval
+    def start_websocket_mode(self):
+        """
+        Spec 2.3: Start WebSocket for regular hours (ET 09:30-12:00)
+        Spec 5.2: If WebSocket fails after 3 attempts → System stop
+        """
+        logger.info("⚡ Starting WebSocket mode...")
+        
+        try:
+            # Initialize WebSocket client if not exists
+            if self.ws_client is None:
+                self.ws_client = WebSocketClient(
+                    self.config,
+                    self.token_manager,
+                    self.handle_ws_message
+                )
+            
+            # Start WebSocket
+            self.ws_client.start()
+            self.ws_failure_count = 0  # Reset failure count
+            
+            logger.info("✅ WebSocket started successfully")
+            
+        except Exception as e:
+            self.ws_failure_count += 1
+            logger.error(f"❌ WebSocket start failed (Attempt {self.ws_failure_count}/{self.ws_max_failures}): {e}")
+            
+            # Spec 2.3, 5.2: After 3 failures → System stop
+            if self.ws_failure_count >= self.ws_max_failures:
+                logger.critical("🚨 WebSocket failed 3 times → SYSTEM STOP (Spec 2.3)")
+                
+                if self.telegram_bot:
+                    self.telegram_bot.send_error_notification(
+                        f"🚨 System Stopped: WebSocket connection failed {self.ws_max_failures} times\n"
+                        f"Spec 2.3: WebSocket failure → System stop"
+                    )
+                
+                # STOP THE ENTIRE SYSTEM
+                self.stop()
+                raise RuntimeError("WebSocket connection failed - System stopped per Spec 2.3")
 
-    def calculate_smart_interval(self, order_info):
-        now = datetime.now()
-        order_age_minutes = (now - order_info['created_at']).total_seconds() / 60
-        base_interval = self.smart_initial_interval
-        for age_config in self.smart_config['order_age_factor']:
-            if 'minutes' in age_config and order_age_minutes >= age_config['minutes']:
-                base_interval = age_config['interval']
-            elif 'default' in age_config:
-                base_interval = age_config['default']
-        if order_info['no_change_count'] > self.smart_config['no_change_threshold']:
-            excess_count = order_info['no_change_count'] - self.smart_config['no_change_threshold']
-            backoff_factor = self.backoff_multiplier ** min(excess_count, 4)
-            base_interval = min(int(base_interval * backoff_factor), self.smart_max_interval)
-        if (self.smart_config.get('consecutive_success_speedup', False) and order_info.get('consecutive_successes', 0) > 3):
-            base_interval = max(int(base_interval * 0.9), 5)
-        return base_interval
+    def stop_websocket_mode(self):
+        """Stop WebSocket when switching to pre-market mode"""
+        if self.ws_client:
+            logger.info("⏸️ Stopping WebSocket mode...")
+            self.ws_client.stop()
+
+    def calculate_polling_interval(self, order_info):
+        """
+        Spec 3.2: Calculate smart polling interval
+        
+        Pre-market intervals:
+        - High activity (04:00-05:00, 08:00-09:30): 3 seconds
+        - Low activity (05:00-08:00): 10 seconds
+        """
+        if self.current_mode == 'regular':
+            return 3600  # WebSocket mode - no polling needed
+        
+        if self.current_mode == 'closed':
+            return 3600  # Sleep mode
+        
+        if self.current_mode == 'premarket':
+            # Spec 3.2: Determine high/low activity period
+            try:
+                trading_tz = self.config.get('order_settings', {}).get('timezone', 'US/Eastern')
+                tz = timezone(trading_tz)
+                now_time = datetime.now(tz).time()
+                
+                # High activity periods (Spec 3.2)
+                high_activity_periods = [
+                    (dtime(4, 0), dtime(5, 0)),    # 04:00-05:00
+                    (dtime(8, 0), dtime(9, 30))    # 08:00-09:30
+                ]
+                
+                for start, end in high_activity_periods:
+                    if start <= now_time < end:
+                        return self.premarket_config.get('interval_seconds', {}).get('high_activity', 3)
+                
+                # Low activity period (05:00-08:00)
+                return self.premarket_config.get('interval_seconds', {}).get('low_activity', 10)
+                
+            except Exception as e:
+                logger.error(f"Polling interval calculation error: {e}")
+                return 5  # Safe default
+        
+        return 5  # Safe default
 
     def can_make_request(self):
-        """Rate Limit 및 연속 요청 체크"""
+        """
+        Spec 5.1: Check if API request can be made
+        
+        Rate limits:
+        - 15 requests/second (75% of official 20/sec limit)
+        - 500 requests/hour
+        - 5000 requests/day
+        """
         self.reset_counters_if_needed()
         
-        # ws_mode 또는 off 모드에서는 REST API 요청 금지
-        if self.current_mode in ['ws_mode', 'off']:
+        # Spec 2.3: No REST API requests in regular or closed mode
+        if self.current_mode in ['regular', 'closed']:
             return False
-            
-        current_mode = self.get_current_trading_mode() # 이중 확인
-        if current_mode in ['ws_mode', 'off']:
-            return False
-            
+        
+        # Spec 5.1: Minimum interval check (0.07 seconds = 1/15)
         now_time = time.time()
-        min_interval = self.rate_config.get('min_request_interval', 2.5)
+        min_interval = self.rate_config.get('min_request_interval', 0.07)
+        
         if now_time - self.last_request_time < min_interval:
             return False
+        
+        # Consecutive request limit
         consecutive_limit = self.rate_config.get('consecutive_limit', 10)
         if self.consecutive_requests >= consecutive_limit:
-            logger.warning(f"⚠️ 연속 요청 제한 도달: {self.consecutive_requests}/{consecutive_limit}")
-            time.sleep(5)
+            logger.warning(f"⚠️ Consecutive limit reached: {self.consecutive_requests}/{consecutive_limit}")
+            time.sleep(1)
             self.consecutive_requests = 0
+        
+        # Spec 5.1: Daily limit
         if self.daily_api_count >= self.rate_config['daily_limit']:
-            logger.warning(f"⚠️ 일일 API 한도 도달: {self.daily_api_count}/{self.rate_config['daily_limit']}")
+            logger.warning(f"⚠️ Daily API limit reached: {self.daily_api_count}/{self.rate_config['daily_limit']}")
             return False
+        
+        # Spec 5.1: Hourly limit
         if self.hourly_api_count >= self.rate_config['hourly_limit']:
-            logger.warning(f"⚠️ 시간당 API 한도 도달: {self.hourly_api_count}/{self.rate_config['hourly_limit']}")
+            logger.warning(f"⚠️ Hourly API limit reached: {self.hourly_api_count}/{self.rate_config['hourly_limit']}")
             return False
-        mode_limits = {'aggressive': self.rate_config['aggressive_mode_limit'], 'smart': self.rate_config['smart_mode_limit']}
-        mode_count = self.stats.get(f'{current_mode}_mode_calls', 0)
-        mode_limit = mode_limits.get(current_mode, 1000)
-        if mode_count >= mode_limit:
-            logger.warning(f"⚠️ {current_mode} 모드 한도 도달: {mode_count}/{mode_limit}")
-            return False
+        # Rate Limit 90% 도달 시 텔레그램 알림
+        utilization_pct = (self.daily_api_count / self.rate_config['daily_limit']) * 100
+        if utilization_pct >= 90 and self.telegram_bot:
+            if hasattr(self.telegram_bot, 'send_rate_limit_warning'):
+                self.telegram_bot.send_rate_limit_warning(
+                    self.daily_api_count,
+                    self.rate_config['daily_limit'],
+                    utilization_pct
+                )
         return True
 
-    # ============================================================================
-    # reset_counters_if_needed() 함수 수정 (날짜 변경 시 리셋)
-    # ============================================================================
     def reset_counters_if_needed(self):
+        """Reset API counters daily/hourly"""
         now = datetime.now()
+        
+        # Daily reset
         if now.date() != self.last_reset_date:
-            logger.info(f"📊 일일 통계 리셋 - API: {self.daily_api_count}, 성공: {self.stats['successful_detections']}, WS: {self.stats['ws_detections']}")
+            logger.info(
+                f"📊 Daily reset - API: {self.daily_api_count}, "
+                f"Success: {self.stats['successful_detections']}, "
+                f"WS: {self.stats['ws_detections']}"
+            )
+            
             self.daily_api_count = 0
             self.last_reset_date = now.date()
             self.stats['successful_detections'] = 0
             self.stats['ws_detections'] = 0
-            self.stats['aggressive_mode_calls'] = 0
-            self.stats['smart_mode_calls'] = 0
+            self.stats['premarket_calls'] = 0
             self.stats['rate_limit_violations'] = 0
             self.stats['api_errors'] = {}
             
-            # ✅ 새로 추가: 처리 완료 목록 리셋
-            self.processed_ws_orders.clear()
+            # Spec 4.4: Clear processed orders tracking
             self.processed_orders.clear()
+            self.processed_ws_orders.clear()
             self.failed_orders.clear()
-            logger.info("🔄 처리 완료 주문 목록 초기화")
-            
+            logger.info("🔄 Processed orders list cleared")
+        
+        # Hourly reset
         if now.hour != self.last_hour_reset:
-            logger.debug(f"📊 시간별 API 리셋: {self.hourly_api_count}회")
+            logger.debug(f"📊 Hourly reset: {self.hourly_api_count} calls")
             self.hourly_api_count = 0
             self.last_hour_reset = now.hour
             self.consecutive_requests = 0
 
     def handle_api_error(self, error_code, error_msg):
+        """Spec 5.1, 8.1: Handle API errors"""
         self.stats['api_errors'][error_code] = self.stats['api_errors'].get(error_code, 0) + 1
+        
+        # Rate limit errors
         if error_code in ['EGW00101', 'EGW00102']:
             self.stats['rate_limit_violations'] += 1
-            wait_time = self.rate_config.get('cooldown_on_limit', 60)
-            logger.error(f"🚨 Rate Limit 감지! {wait_time}초 대기 (오류: {error_code})")
+            wait_time = self.rate_config.get('cooldown_seconds', 60)
+            
+            logger.error(f"🚨 Rate Limit detected! Waiting {wait_time}s (Error: {error_code})")
+            
             if self.telegram_bot:
-                message = f"⚠️ Rate Limit 감지\n🔸 오류: {error_code}\n⏰ 대기: {wait_time}초\n📊 일일 호출: {self.daily_api_count}회"
+                message = (
+                    f"⚠️ Rate Limit Detected\n"
+                    f"📛 Error: {error_code}\n"
+                    f"⏰ Waiting: {wait_time}s\n"
+                    f"📊 Daily calls: {self.daily_api_count}"
+                )
                 self.telegram_bot.send_message(message)
+            
             time.sleep(wait_time)
             return True
+        
+        # Temporary errors
         elif error_code in ['EGW90001']:
-            logger.warning(f"⚠️ 일시적 오류: {error_code} - {error_msg}")
+            logger.warning(f"⚠️ Temporary error: {error_code} - {error_msg}")
             time.sleep(5)
             return False
+        
+        # Other errors
         else:
-            logger.error(f"❌ API 오류: {error_code} - {error_msg}")
+            logger.error(f"❌ API error: {error_code} - {error_msg}")
+        
         return False
 
     def add_order_to_monitor(self, order_no, ticker, quantity, buy_price, order_time=None):
+        """Add order to monitoring list"""
         if not order_time:
             order_time = datetime.now()
+        
         order_info = {
             'ticker': ticker,
             'quantity': quantity,
@@ -324,254 +485,321 @@ class SmartOrderMonitor:
             'created_at': order_time,
             'last_checked': None,
             'check_count': 0,
-            'no_change_count': 0,
-            'consecutive_successes': 0,
-            'consecutive_failures': 0,
-            'last_status': None,
             'mode_when_created': self.get_current_trading_mode()
         }
+        
         self.monitoring_orders[order_no] = order_info
         current_mode = self.get_current_trading_mode()
-        logger.info(f"📝 주문 등록: {order_no} ({ticker} {quantity}주 @ ${buy_price}) - 모드: {current_mode}")
+        
+        logger.info(f"📝 Order registered: {order_no} ({ticker} {quantity} @ ${buy_price}) - Mode: {current_mode}")
         self.save_state()
+        
+        # Spec 6.1: Telegram notification
         if self.telegram_bot:
-            mode_emoji = {'aggressive': '🔥', 'smart': '🧠', 'off': '⏸️', 'ws_mode': '⚡️'}
-            message = f"{mode_emoji.get(current_mode, '📝')} 주문 등록\n📄 {order_no}\n🏷️ {ticker} {quantity}주\n💰 ${buy_price}"
+            mode_emoji = {'premarket': '🔵', 'regular': '⚡', 'closed': '😴'}
+            message = (
+                f"{mode_emoji.get(current_mode, '📝')} Order Registered\n"
+                f"📄 {order_no}\n"
+                f"🏷️ {ticker} {quantity} shares\n"
+                f"💰 ${buy_price}"
+            )
             self.telegram_bot.send_message(message)
-    
-    def check_order_status_smart(self, order_no):
+
+    def check_order_status(self, order_no):
+        """
+        Spec 3장: Check order status via REST API
+        Korea Investment Securities Official API
+        """
         if not self.can_make_request():
             return None
+        
         try:
-        # ✅ 올바른 API 엔드포인트로 변경!
+            # Official API endpoint
             url = f"{self.config['api']['base_url']}/uapi/overseas-stock/v1/trading/inquire-ccnl"
-    
+            
             token = self.token_manager.get_access_token()
             if not token:
-                logger.error("토큰을 가져올 수 없습니다.")
+                logger.error("❌ No access token available")
                 return None
-    
+            
             headers = {
                 "Content-Type": "application/json",
                 "authorization": f"Bearer {token}",
                 "appkey": self.config['api_key'],
                 "appsecret": self.config['api_secret'],
-                "tr_id": "TTTS3035R"
+                "tr_id": "TTTS3035R",
+                "custtype": "P"
             }
-    
+            
             today = datetime.now().strftime("%Y%m%d")
-    
-            # ✅ 올바른 파라미터로 변경!
+            
+            # Official API parameters (GitHub verified)
             params = {
                 "CANO": self.config['cano'],
                 "ACNT_PRDT_CD": self.config['acnt_prdt_cd'],
                 "PDNO": "",
                 "ORD_STRT_DT": today,
                 "ORD_END_DT": today,
-                "SLL_BUY_DVSN": "02",          # 매수만
-                "CCLD_NCCS_DVSN": "01",        # 체결만
+                "SLL_BUY_DVSN": "02",          # Buy only
+                "CCLD_NCCS_DVSN": "01",        # Filled only
                 "OVRS_EXCG_CD": "NASD",
                 "SORT_SQN": "DS",
                 "ORD_DT": "",
                 "ORD_GNO_BRNO": "",
                 "ODNO": "",
-                "CTX_AREA_NK200": "",          # ✅ 변경!
-                "CTX_AREA_FK200": ""           # ✅ 변경!
+                "CTX_AREA_NK200": "",
+                "CTX_AREA_FK200": ""
             }
-    
+            
             request_start = time.time()
             response = requests.get(url, headers=headers, params=params, timeout=15)
+            
+            # Update counters
             self.last_request_time = time.time()
-            self.consecutive_requests += 1
-            self.daily_api_count += 1
-            self.hourly_api_count += 1
-            self.stats['total_requests'] += 1
-    
-            current_mode = self.get_current_trading_mode()
-            self.stats[f'{current_mode}_mode_calls'] = self.stats.get(f'{current_mode}_mode_calls', 0) + 1
-    
+            with self._counter_lock:
+                self.consecutive_requests += 1
+                self.daily_api_count += 1
+                self.hourly_api_count += 1
+                self.stats['total_requests'] += 1
+                self.stats['premarket_calls'] += 1
+            
             if response.status_code != 200:
-                logger.error(f"HTTP 오류: {response.status_code}")
+                logger.error(f"❌ HTTP error: {response.status_code}")
                 return None
-    
+            
             data = response.json()
+            
+            # Check for API errors
             error_code = data.get("msg_cd", "")
             if error_code and error_code != "MCA00000":
                 error_msg = data.get('msg1', 'Unknown error')
                 if self.handle_api_error(error_code, error_msg):
                     return None
-    
+            
             if data.get("rt_cd") != "0":
-                logger.error(f"API 오류: {data.get('msg1', 'Unknown')}")
+                logger.error(f"❌ API error: {data.get('msg1', 'Unknown')}")
                 return None
-    
+            
+            # Log slow responses
             response_time = time.time() - request_start
             if response_time > 5:
-                logger.warning(f"⏰ 느린 API 응답: {response_time:.2f}초")
-    
+                logger.warning(f"⏱️ Slow API response: {response_time:.2f}s")
+            
+            # Find matching order
             for item in data.get("output", []):
                 if item.get("odno") == order_no:
-                    # ✅ 필드명 변경!
+                    # Official field names (GitHub verified)
                     ccld_qty = item.get("ft_ccld_qty", "0")
                     ccld_unpr = item.get("ft_ccld_unpr3", "0")
-            
+                    
                     return {
-                        'status': '02',  # 체결완료
+                        'status': '02',  # Filled
                         'filled_qty': int(ccld_qty) if ccld_qty else 0,
-                        'filled_price': float(ccld_unpr) if ccld_unpr else 0.0
+                        'filled_price': float(ccld_unpr) if ccld_unpr else 0.0,
+                        'order_data': item
                     }
-    
-            return {'status': '조회없음', 'filled_qty': 0, 'filled_price': 0.0}
-    
+            
+            return {'status': 'not_found', 'filled_qty': 0, 'filled_price': 0.0}
+        
         except requests.exceptions.Timeout:
-            logger.warning(f"⏰ API 타임아웃: {order_no}")
+            logger.warning(f"⏱️ API timeout: {order_no}")
             return None
         except Exception as e:
-            logger.error(f"상태 확인 오류: {e}")
+            logger.error(f"❌ Status check error: {e}")
+
+            # ✅ 연속 오류 카운터 증가
+            with self._counter_lock:
+                self.stats['consecutive_api_errors'] += 1
+    
+            # ✅ 10회 도달 시 비상 정지
+            if self.stats['consecutive_api_errors'] >= 10:
+                logger.critical(f"🚨 연속 {self.stats['consecutive_api_errors']}회 API 오류 - 시스템 종지")
+                if self.telegram_bot:
+                    self.telegram_bot.send_error_notification(
+                        f"연속 API 오류 {self.stats['consecutive_api_errors']}회\n시스템을 안전하게 종료합니다.",
+                        level="critical"
+                    )
+                self.stop()
+                import sys
+                sys.exit(1)
+
             return None
-            
-    # ============================================================================
-    # execute_auto_sell() 함수 수정 (성공 시 기록 추가)
-    # ============================================================================
+
     def execute_auto_sell(self, order_info, filled_price, order_no=None):
-        """자동 매도 실행 (주문번호 추적 포함)"""
+        """
+        Spec 4장: Execute automatic sell order
+        
+        Args:
+            order_info: Order information dict
+            filled_price: Fill price
+            order_no: Order number (for tracking)
+        
+        Returns:
+            bool: Success status
+        """
         try:
             from order import place_sell_order
-            current_mode = self.get_current_trading_mode()
-            profit_margin = self.config.get('strategy', {}).get('smart_strategy', {}).get('target_profit_margin', 0.03)
             
-            if current_mode in ['aggressive', 'ws_mode'] and 'aggressive_strategy' in self.config.get('strategy', {}):
-                profit_margin = self.config['strategy']['aggressive_strategy']['target_profit_margin']
-                
+            current_mode = self.get_current_trading_mode()
+            
+            # Spec 4.1: Get profit margin from config
+            # order_settings.target_profit_rate (percentage)
+            target_profit_rate = self.config.get('order_settings', {}).get('target_profit_rate', 3.0)
+            profit_margin = target_profit_rate / 100
+            
             sell_price = round(filled_price * (1 + profit_margin), 2)
+            
             execution_data = {
                 'ticker': order_info['ticker'],
                 'quantity': order_info['quantity'],
                 'price': filled_price
             }
-            logger.info(f"🎯 체결 감지! {execution_data['ticker']} ${filled_price} → 매도 ${sell_price} (모드: {current_mode})")
             
-            success = place_sell_order(self.config, self.token_manager, execution_data, self.telegram_bot)
+            logger.info(
+                f"🎯 Fill detected! {execution_data['ticker']} ${filled_price} "
+                f"→ Sell @ ${sell_price} (Mode: {current_mode})"
+            )
+            
+            # Execute sell order
+            success = place_sell_order(
+                self.config,
+                self.token_manager,
+                execution_data,
+                self.telegram_bot
+            )
             
             if success:
-                # 통계는 WS와 REST 구분
-                if current_mode == 'ws_mode':
+                # Update statistics
+                if current_mode == 'regular':
                     self.stats['ws_detections'] += 1
                     total_detected = self.stats['ws_detections']
                 else:
                     self.stats['successful_detections'] += 1
                     total_detected = self.stats['successful_detections']
                 
-                # ✅ 새로 추가: 성공한 주문번호 기록
+                # Spec 4.4: Record successful order
                 if order_no:
                     self.processed_orders.add(order_no)
-                    logger.info(f"✅ 주문 {order_no} 처리 완료로 기록")
+                    logger.info(f"✅ Order {order_no} marked as processed")
                 
-                logger.info(f"✅ 자동 매도 성공: {execution_data['ticker']} (총 감지: {total_detected}회)")
+                logger.info(f"✅ Auto-sell success: {execution_data['ticker']} (Total: {total_detected})")
                 
+                # Spec 6.1: Telegram notification
                 if self.telegram_bot:
-                    mode_emoji = {'aggressive': '🔥', 'smart': '🧠', 'ws_mode': '⚡️'}
-                    message = f"{mode_emoji.get(current_mode, '🎉')} 매도 성공!\n🏷️ {execution_data['ticker']}\n💰 ${filled_price} → ${sell_price}\n📈 +{profit_margin*100:.1f}%\n📊 총 {current_mode} 감지: {total_detected}회"
+                    mode_emoji = {'premarket': '🔵', 'regular': '⚡'}
+                    message = (
+                        f"{mode_emoji.get(current_mode, '🎉')} Sell Success!\n"
+                        f"🏷️ {execution_data['ticker']}\n"
+                        f"💰 ${filled_price} → ${sell_price}\n"
+                        f"📈 +{target_profit_rate}%\n"
+                        f"📊 Total {current_mode} detections: {total_detected}"
+                    )
                     self.telegram_bot.send_message(message)
             else:
-                # ✅ 새로 추가: 실패한 주문 기록 (특정 오류만)
+                # Spec 4.4: Record failed order
                 if order_no:
-                    self.failed_orders[order_no] = (datetime.now(), '매도 실패')
-                    logger.warning(f"⚠️ 주문 {order_no} 매도 실패로 기록")
-                    
+                    self.failed_orders[order_no] = (datetime.now(), 'Sell failed')
+                    logger.warning(f"⚠️ Order {order_no} marked as failed")
+            
             return success
+        
         except Exception as e:
-            logger.error(f"자동 매도 실행 오류: {e}")
+            logger.error(f"❌ Auto-sell execution error: {e}")
             return False
 
-    # ✅ [추가] WebSocket 메시지 핸들러
     def handle_ws_message(self, message):
-        """WebSocket으로부터 실시간 체결 메시지 처리 (H0STCNI0)"""
+        """
+        Spec 2.3: Handle WebSocket real-time messages (H0STCNI0)
+        
+        Args:
+            message: WebSocket message (JSON string)
+        """
         try:
-            # KIS WebSocket 메시지는 JSON 문자열
             data = json.loads(message)
             
-            # 실시간 체결 데이터 (H0STCNI0)
+            # Real-time fill data (H0STCNI0)
             if data.get('header', {}).get('tr_id') == 'H0STCNI0':
                 body = data.get('body', {})
                 if not body:
                     return
-
-                # 'output'이 리스트일 수 있음 (여러 체결 동시)
+                
+                # Handle multiple fills
                 outputs = body.get('output', [])
                 if not isinstance(outputs, list):
-                    outputs = [outputs] # 단일 객체면 리스트로 감싸기
-
+                    outputs = [outputs]
+                
                 for item in outputs:
-                    # 매수(02) 체결만 처리
+                    # Only process buy orders (02)
                     if item.get('sll_buy_dvsn_cd') != '02':
                         continue
-                        
+                    
                     order_no = item.get("odno", "")
                     if not order_no:
                         continue
-
-                    # ✅ 중복 처리 방지 (WS 자체 중복 + POLLING 중복)
-                    if order_no in self.processed_ws_orders or order_no in self.processed_orders:
-                        logger.debug(f"이미 처리된 WS 체결: {order_no}")
+                    
+                    # Spec 4.4: Prevent duplicate processing
+                    if (order_no in self.processed_ws_orders or 
+                        order_no in self.processed_orders):
+                        logger.debug(f"Already processed WS fill: {order_no}")
                         continue
-
+                    
                     ticker = item.get("pdno", "")
                     try:
                         ccld_qty = int(item.get("ccld_qty", "0"))
                         ccld_price = float(item.get("ccld_unpr", "0"))
                     except ValueError:
-                        logger.warning(f"WS 데이터 파싱 오류: {item}")
+                        logger.warning(f"WS data parsing error: {item}")
                         continue
-
+                    
                     if ccld_qty > 0 and ccld_price > 0:
-                        logger.info(f"🎉 [WS] 신규 매수 체결 발견! {order_no}: {ticker} {ccld_qty}주 @ ${ccld_price}")
+                        logger.info(f"🎉 [WS] New buy fill! {order_no}: {ticker} {ccld_qty} @ ${ccld_price}")
                         
                         order_info = {
                             'ticker': ticker,
                             'quantity': ccld_qty,
                             'buy_price': ccld_price,
-                            'created_at': datetime.now(),
-                            # (execute_auto_sell에 필요한 최소 정보)
+                            'created_at': datetime.now()
                         }
                         
-                        # ✅ 주문번호 전달
+                        # Execute auto-sell with order number
                         success = self.execute_auto_sell(order_info, ccld_price, order_no)
                         
                         if success:
-                            logger.info(f"✅ [WS] 자동 매도 주문 즉시 성공: {ticker}")
-                            self.processed_ws_orders.add(order_no) # 성공 시 WS 중복 방지 셋에 추가
+                            logger.info(f"✅ [WS] Auto-sell immediate success: {ticker}")
+                            self.processed_ws_orders.add(order_no)
                         else:
-                            logger.error(f"❌ [WS] 자동 매도 주문 실패: {ticker}. REST 폴링으로 전환.")
-                            # 실패 시 REST 폴링 모니터링에 등록 (다음 모드 전환 시 폴링됨)
+                            logger.error(f"❌ [WS] Auto-sell failed: {ticker}. Switching to REST polling.")
+                            # On failure, add to REST polling monitoring
                             self.add_order_to_monitor(order_no, ticker, ccld_qty, ccld_price)
-
+        
         except json.JSONDecodeError:
-            logger.debug(f"WS 메시지 파싱 실패 (JSON 아님): {message[:50]}...")
+            logger.debug(f"WS message parsing failed (not JSON): {message[:50]}...")
         except Exception as e:
-            logger.error(f"WS 메시지 처리 오류: {e} - 메시지: {message}")
+            logger.error(f"❌ WS message handling error: {e} - Message: {message}")
 
-    # ============================================================================
-    # scan_for_new_buy_orders() 함수 수정 (중복 방지 강화)
-    # ============================================================================
     def scan_for_new_buy_orders(self):
-        """MTS 매수 주문 자동 감지 및 모니터링 등록 (중복 방지 강화)"""
+        """
+        Spec 3장: Scan for new buy orders (auto-detection)
+        Prevents duplicate processing
+        """
         try:
             if not self.can_make_request():
                 return
-                
+            
             url = f"{self.config['api']['base_url']}/uapi/overseas-stock/v1/trading/inquire-ccnl"
+            
             token = self.token_manager.get_access_token()
             if not token:
-                logger.error("토큰을 가져올 수 없습니다.")
+                logger.error("❌ No access token available")
                 return
-                
+            
             headers = {
                 "Content-Type": "application/json",
                 "authorization": f"Bearer {token}",
                 "appkey": self.config['api_key'],
                 "appsecret": self.config['api_secret'],
-                "tr_id": "TTTS3035R"
+                "tr_id": "TTTS3035R",
+                "custtype": "P"
             }
             
             today = datetime.now().strftime("%Y%m%d")
@@ -594,14 +822,17 @@ class SmartOrderMonitor:
             }
             
             response = requests.get(url, headers=headers, params=params, timeout=15)
+            
+            # Update counters
             self.last_request_time = time.time()
-            self.consecutive_requests += 1
-            self.daily_api_count += 1
-            self.hourly_api_count += 1
-            self.stats['total_requests'] += 1
+            with self._counter_lock:
+                self.consecutive_requests += 1
+                self.daily_api_count += 1
+                self.hourly_api_count += 1
+                self.stats['total_requests'] += 1
             
             if response.status_code != 200:
-                logger.error(f"매수 감지 HTTP 오류: {response.status_code}")
+                logger.error(f"❌ Buy detection HTTP error: {response.status_code}")
                 return
             
             data = response.json()
@@ -611,22 +842,22 @@ class SmartOrderMonitor:
             for order in data.get("output", []):
                 order_no = order.get("odno", "")
                 
-                # ✅ 강화된 중복 체크: 여러 조건 확인
+                # Spec 4.4: Enhanced duplicate prevention
                 if order_no in self.monitoring_orders:
-                    continue  # 이미 모니터링 중
+                    continue  # Already monitoring
                 if order_no in self.processed_ws_orders:
-                    continue  # WS에서 처리됨
+                    continue  # Processed via WebSocket
                 if order_no in self.processed_orders:
-                    logger.debug(f"⏭️ 이미 처리 완료된 주문: {order_no}")
-                    continue  # ✅ 이미 매도 성공
+                    logger.debug(f"⏭️ Already processed order: {order_no}")
+                    continue
                 if order_no in self.failed_orders:
-                    # ✅ 실패한 주문은 1시간 동안 재시도 안 함
+                    # Don't retry failed orders for 1 hour
                     fail_time, reason = self.failed_orders[order_no]
                     if (datetime.now() - fail_time).total_seconds() < 3600:
-                        logger.debug(f"⏭️ 매도 실패 주문 (1시간 대기): {order_no}")
+                        logger.debug(f"⏭️ Failed order (1hr wait): {order_no}")
                         continue
                     else:
-                        # 1시간 지났으면 재시도
+                        # Retry after 1 hour
                         del self.failed_orders[order_no]
                 
                 ticker = order.get("pdno", "")
@@ -640,7 +871,7 @@ class SmartOrderMonitor:
                     continue
                 
                 if ccld_qty > 0 and ccld_price > 0:
-                    logger.info(f"🎉 [POLL] 신규 매수 체결 발견! {order_no}: {ticker} {ccld_qty}주 @ ${ccld_price}")
+                    logger.info(f"🎉 [POLL] New buy fill detected! {order_no}: {ticker} {ccld_qty} @ ${ccld_price}")
                     
                     order_info = {
                         'ticker': ticker,
@@ -649,180 +880,226 @@ class SmartOrderMonitor:
                         'created_at': datetime.now(),
                         'last_checked': None,
                         'check_count': 0,
-                        'no_change_count': 0,
-                        'consecutive_successes': 0,
-                        'consecutive_failures': 0,
-                        'last_status': None,
                         'mode_when_created': self.get_current_trading_mode()
                     }
                     
-                    # ✅ 주문번호 전달
+                    # Execute auto-sell with order number
                     success = self.execute_auto_sell(order_info, ccld_price, order_no)
                     
                     if success:
-                        logger.info(f"✅ [POLL] 자동 매도 주문 즉시 성공: {ticker}")
+                        logger.info(f"✅ [POLL] Auto-sell immediate success: {ticker}")
+                        
+                        # Spec 6.1: Telegram notification
                         if self.telegram_bot:
-                            profit_rate = self.config.get('strategy', {}).get('smart_strategy', {}).get('target_profit_margin', 0.03) * 100
-                            message = f"🎉 [POLL] 자동 매수 감지 & 매도 성공!\n🏷️ {ticker} {ccld_qty}주\n💰 매수: ${ccld_price}\n📈 목표 수익: +{profit_rate}%"
+                            target_profit_rate = self.config.get('order_settings', {}).get('target_profit_rate', 3.0)
+                            message = (
+                                f"🎉 [POLL] Auto-detection & Sell Success!\n"
+                                f"🏷️ {ticker} {ccld_qty} shares\n"
+                                f"💰 Buy: ${ccld_price}\n"
+                                f"📈 Target profit: +{target_profit_rate}%"
+                            )
                             self.telegram_bot.send_message(message)
                     else:
-                        logger.error(f"❌ [POLL] 자동 매도 주문 실패: {ticker}. 폴링 리스트 추가.")
+                        logger.error(f"❌ [POLL] Auto-sell failed: {ticker}. Adding to polling list.")
                         self.add_order_to_monitor(order_no, ticker, ccld_qty, ccld_price)
-                        
+        
         except Exception as e:
-            logger.error(f"매수 감지 스캔 오류: {e}")
+            logger.error(f"❌ Buy detection scan error: {e}")
 
     def cleanup_expired_orders(self):
+        """Remove expired orders from monitoring"""
         now = datetime.now()
         expired_orders = []
+        
         for order_no, order_info in self.monitoring_orders.items():
             age_hours = (now - order_info['created_at']).total_seconds() / 3600
+            
+            # Expiration time based on mode
             current_mode = self.get_current_trading_mode()
-            max_hours = 0.5 if current_mode == 'aggressive' else 2
+            max_hours = 0.5 if current_mode == 'premarket' else 2
+            
             if age_hours > max_hours:
                 expired_orders.append(order_no)
+        
         for order_no in expired_orders:
             order_info = self.monitoring_orders.pop(order_no, None)
             if order_info:
                 age_hours = (now - order_info['created_at']).total_seconds() / 3600
-                logger.info(f"⏰ 감시 시간 만료: {order_no} ({age_hours:.1f}시간)")
+                logger.info(f"⏰ Order expired: {order_no} ({age_hours:.1f} hours)")
+        
         if expired_orders:
             self.save_state()
 
     def smart_monitor_loop(self):
-        logger.info("🚀 KIS API 실전 최적화 폴링/WS 시스템 시작")
+        """
+        Spec 3장: Main monitoring loop
+        - Pre-market: REST polling with smart intervals
+        - Regular hours: WebSocket real-time (no polling)
+        - Sleep mode: System off
+        """
+        logger.info("🚀 Smart Order Monitor started")
+        
         while self.is_running:
             try:
-                # ✅ [수정] 모드 전환 (ws_mode 포함)
+                # Spec 2.2: Check if system should be running
+                if not self.should_system_run():
+                    logger.info("🌙 Outside operating hours (ET 12:00) - Stopping system")
+                    self.stop()
+                    break
+                
+                # Spec 2.3: Switch mode if needed
                 if self.switch_mode_if_needed():
-                    if self.current_mode == 'off':
-                        time.sleep(300) # 'off' 모드면 5분 대기
+                    if self.current_mode == 'closed':
+                        time.sleep(300)  # 5 min wait in sleep mode
                         continue
-
-                # ✅ [추가] ws_mode일 경우 폴링 로직 전체를 건너뛰기
-                if self.current_mode == 'ws_mode':
-                    logger.debug("⚡️ 실시간 WebSocket 모드... 폴링 중지.")
-                    time.sleep(5) # CPU 방지를 위해 5초 대기
+                
+                # Spec 2.3: In regular hours (WebSocket), skip REST polling
+                if self.current_mode == 'regular':
+                    logger.debug("⚡ WebSocket mode active... No REST polling")
+                    time.sleep(5)  # Prevent CPU spinning
                     continue
                 
-                # ▼▼▼ 기존 'aggressive' 또는 'smart' 모드일 때만 아래 폴링 로직 실행 ▼▼▼
+                # ▼ Pre-market REST polling logic ▼
                 
+                # Scan for new buy orders every 15 seconds
                 current_time = time.time()
-                if not hasattr(self, 'last_buy_scan') or current_time - self.last_buy_scan > 15:
-                    logger.debug("🔍 자동 매수 감지 스캔 시작...")
+                if current_time - self.last_buy_scan > 15:
+                    logger.debug("🔍 Scanning for new buy orders...")
                     self.scan_for_new_buy_orders()
                     self.last_buy_scan = current_time
-                    
+                
+                # If no orders to monitor, wait
                 if not self.monitoring_orders:
                     time.sleep(30)
                     continue
-                    
-                current_mode = self.get_current_trading_mode() # 폴링 중 모드 변경 대비
+                
+                # Clean up expired orders
                 self.cleanup_expired_orders()
+                
+                # Process each monitoring order
                 processed_count = 0
                 
                 for order_no, order_info in list(self.monitoring_orders.items()):
-                    if not self.is_running: break
+                    if not self.is_running:
+                        break
                     
-                    polling_interval = self.calculate_polling_interval(order_no, order_info)
+                    # Calculate polling interval
+                    polling_interval = self.calculate_polling_interval(order_info)
                     now = datetime.now()
                     
-                    if (order_info['last_checked'] and (now - order_info['last_checked']).total_seconds() < polling_interval):
+                    # Skip if checked recently
+                    if (order_info['last_checked'] and 
+                        (now - order_info['last_checked']).total_seconds() < polling_interval):
                         continue
-                        
-                    status_info = self.check_order_status_smart(order_no)
+                    
+                    # Check order status
+                    status_info = self.check_order_status(order_no)
                     order_info['last_checked'] = now
                     order_info['check_count'] += 1
                     processed_count += 1
                     
                     if status_info is None:
-                        order_info['consecutive_failures'] += 1
-                        order_info['consecutive_successes'] = 0
                         continue
+                    
+                    # Check if filled
+                    if (status_info['status'] in ['02', 'Filled', 'Complete'] and 
+                        status_info['filled_qty'] > 0):
                         
-                    order_info['consecutive_failures'] = 0
-                    order_info['consecutive_successes'] += 1
-                    current_status = status_info['status']
-                    
-                    if current_status == order_info['last_status']:
-                        order_info['no_change_count'] += 1
-                    else:
-                        order_info['no_change_count'] = 0
-                        logger.debug(f"🔄 상태 변화: {order_no} → {current_status}")
-                    
-                    order_info['last_status'] = current_status
-                    
-                    if current_status in ['02','체결완료','완전체결'] and status_info['filled_qty'] > 0:
-                        logger.info(f"🎉 [POLL] 체결 완료: {order_no} (모드: {current_mode}, 체크: {order_info['check_count']}회)")
+                        logger.info(
+                            f"🎉 [POLL] Fill complete: {order_no} "
+                            f"(Mode: {self.current_mode}, Checks: {order_info['check_count']})"
+                        )
                         
-                        # ✅ 주문번호 전달
+                        # Execute auto-sell with order number
                         success = self.execute_auto_sell(order_info, status_info['filled_price'], order_no)
                         
                         if success:
                             self.monitoring_orders.pop(order_no, None)
                             self.save_state()
                         else:
-                            # 매도 실패 시 monitoring_orders에 남겨두고, failed_orders에 기록됨 (execute_auto_sell 내부에서)
-                            logger.warning(f"⚠️ [POLL] 체결 감지 후 매도 실패: {order_no}. 다음 스캔까지 대기.")
-                        
-                    time.sleep(max(1, self.rate_config.get('min_request_interval', 2.5)-1))
+                            logger.warning(f"⚠️ [POLL] Fill detected but sell failed: {order_no}. Will retry next scan.")
                     
-                if current_mode == 'aggressive':
+                    # Rate limit: Wait between checks
+                    time.sleep(max(1, self.rate_config.get('min_request_interval', 0.07)))
+                
+                # Mode-specific wait times
+                if self.current_mode == 'premarket':
                     time.sleep(2)
-                elif current_mode == 'smart':
-                    time.sleep(5)
-                else: # 'off' 모드로 변경된 경우
+                else:
                     time.sleep(60)
-                    
+                
+                # Periodic state save
                 if processed_count > 0 and processed_count % 20 == 0:
                     self.save_state()
-                    
+                
+                # Periodic statistics log
                 if self.stats['total_requests'] > 0 and self.stats['total_requests'] % 100 == 0:
                     rate_limit_rate = (self.stats['rate_limit_violations'] / self.stats['total_requests']) * 100
-                    logger.info(f"📊 통계 - 요청: {self.stats['total_requests']}, 성공: {self.stats['successful_detections']}, WS: {self.stats['ws_detections']}, Rate Limit: {rate_limit_rate:.1f}%")
-                    
+                    logger.info(
+                        f"📊 Stats - Requests: {self.stats['total_requests']}, "
+                        f"Success: {self.stats['successful_detections']}, "
+                        f"WS: {self.stats['ws_detections']}, "
+                        f"Rate Limit: {rate_limit_rate:.1f}%"
+                    )
+            
             except Exception as e:
-                logger.error(f"메인 루프 오류: {e}")
+                logger.error(f"❌ Main loop error: {e}")
                 time.sleep(30)
-                
-        logger.info("🛑 KIS API 실전 최적화 폴링/WS 시스템 종료")
+        
+        logger.info("🛑 Smart Order Monitor stopped")
 
     def start(self):
+        """Start monitoring system"""
         if self.is_running:
-            logger.warning("이미 모니터링이 실행 중입니다.")
+            logger.warning("⚠️ Monitoring already running")
             return
+        
         self.current_mode = self.get_current_trading_mode()
         self.is_running = True
         
-        # ✅ [추가] WebSocket 클라이언트 시작
-        logger.info("🔌 WebSocket 클라이언트 시작 시도...")
-        self.ws_client.start()
+        # Start WebSocket if in regular hours
+        if self.current_mode == 'regular':
+            self.start_websocket_mode()
         
+        # Start monitoring thread
         self.monitor_thread = threading.Thread(target=self.smart_monitor_loop, daemon=True)
         self.monitor_thread.start()
-        logger.info(f"🚀 KIS API 실전 모니터링 시작 - 초기 모드: {self.current_mode}")
+        
+        logger.info(f"🚀 Smart Order Monitor started - Initial mode: {self.current_mode}")
 
     def stop(self):
+        """Stop monitoring system"""
         if not self.is_running:
             return
-            
-        logger.info("🛑 모니터링 중지 요청...")
+        
+        logger.info("🛑 Stopping monitor...")
         self.is_running = False
         
-        # ✅ [추가] WebSocket 클라이언트 중지
-        logger.info("🔌 WebSocket 클라이언트 중지 시도...")
-        self.ws_client.stop()
-
+        # Stop WebSocket
+        self.stop_websocket_mode()
+        
+        # Save state
         self.save_state()
+        
+        # Wait for thread
         if self.monitor_thread and self.monitor_thread.is_alive():
             self.monitor_thread.join(timeout=10)
-        logger.info(f"🛑 모니터링 중지 완료 - 최종 통계: 요청 {self.stats['total_requests']}회, 성공 {self.stats['successful_detections']}회, WS {self.stats['ws_detections']}회")
+        
+        logger.info(
+            f"🛑 Monitor stopped - Final stats: "
+            f"Requests: {self.stats['total_requests']}, "
+            f"Success: {self.stats['successful_detections']}, "
+            f"WS: {self.stats['ws_detections']}"
+        )
 
     def get_monitoring_count(self):
+        """Get current monitoring order count"""
         return len(self.monitoring_orders)
 
     def get_detailed_stats(self):
+        """Get detailed statistics"""
         current_mode = self.get_current_trading_mode()
+        
         return {
             'monitoring_count': len(self.monitoring_orders),
             'current_mode': current_mode,
@@ -832,8 +1109,7 @@ class SmartOrderMonitor:
             'successful_detections': self.stats['successful_detections'],
             'ws_detections': self.stats.get('ws_detections', 0),
             'mode_switches': self.stats['mode_switches'],
-            'aggressive_calls': self.stats.get('aggressive_mode_calls', 0),
-            'smart_calls': self.stats.get('smart_mode_calls', 0),
+            'premarket_calls': self.stats.get('premarket_calls', 0),
             'rate_limit_violations': self.stats['rate_limit_violations'],
             'api_errors': self.stats['api_errors'],
             'consecutive_requests': self.consecutive_requests

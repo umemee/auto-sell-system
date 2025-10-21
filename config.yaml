@@ -1,72 +1,181 @@
-# config.yaml - 자동매매 시스템 설정 (미국 동부시간 기준)
+# config.yaml - 해외주식 자동매도 시스템 설정
+# 기획서 v1.0 기준
+# 모든 시간은 미국 동부시간(ET) 기준
 
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# 1. API 설정
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 api:
   base_url: "https://openapi.koreainvestment.com:9443"
   websocket_url: "ws://ops.koreainvestment.com:21000"
   request_timeout: 15
 
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# 2. 시스템 설정 (기획서 2장, 9장)
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 system:
+  # 기획서 2.2: 운영 시간 (ET 04:00-12:00 = 8시간)
+  operating_hours:
+    start: "04:00"  # 한국시간 17:00 (서머타임)
+    end: "12:00"    # 한국시간 01:00 (서머타임)
+  
+  # 기획서 2.3: 12:00에 자동 종료
+  auto_shutdown: true
+  graceful_shutdown_timeout: 30
+  
+  # 상태 파일 (기획서 7.1)
+  state_file: "/tmp/auto-sell-order-state.json"
+  
+  # 토큰 관리
   token_refresh_margin_minutes: 5
   approval_margin_seconds: 1800
-  state_file: "/tmp/auto-sell-order-state.json"
-  graceful_shutdown_timeout: 30
-  max_reconnect_attempts: 10
-  base_reconnect_delay: 5
+  
+  # WebSocket 재연결 (기획서 5.2: 3회 재시도)
+  max_reconnect_attempts: 3
+  base_reconnect_delay: 10
 
-trading:
-  profit_margin: 0.03
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# 3. 자동 매도 전략 (기획서 4장)
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+order_settings:
+  # 기획서 4.1: 수익률 3% 고정
+  # ⭐ 수정하려면 여기만 변경하고 시스템 재시작
+  target_profit_rate: 3.0  # 단위: %
+  
+  # 기본 설정
   exchange_code: "NASD"
-  default_order_type: "00"
+  order_type: "00"
   timezone: "US/Eastern"
-  default_symbol: "AAPL"
 
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# 4. 스마트 폴링 전략 (기획서 3장)
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+polling:
+  # 기획서 3.1: 프리마켓 모드 (ET 04:00-09:30)
+  premarket:
+    time_ranges:
+      - {start: "04:00", end: "05:00"}   # 고활성: 3초 폴링
+      - {start: "05:00", end: "08:00"}   # 저활성: 10초 폴링
+      - {start: "08:00", end: "09:30"}   # 고활성: 3초 폴링
+    
+    interval_seconds:
+      high_activity: 3   # 기획서 3.2: 장 시작/종료 1시간
+      low_activity: 10   # 기획서 3.2: 중간 시간대
+  
+  # 기획서 3.1: 정규장 모드 (ET 09:30-12:00)
+  regular:
+    time_ranges:
+      - {start: "09:30", end: "12:00"}
+    
+    mode: "websocket"  # WebSocket 우선
+    fallback: "stop"   # 기획서 2.3: 실패 시 시스템 중지
+    
+    # WebSocket 실패 시 재시도 (기획서 5.2)
+    retry_attempts: 3
+    retry_delay: 10
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# 5. Rate Limit (기획서 5장)
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+rate_limit:
+  # 기획서 5.1: 한투증권 공식 제한 초당 20회
+  # 안전 마진: 75% 활용 = 초당 15회
+  requests_per_second: 15
+  min_request_interval: 0.07  # 1초 / 15회 = 0.067초
+  
+  # 기획서 5.1: 일일/시간 제한
+  daily_limit: 5000
+  hourly_limit: 500
+  
+  # 기획서 5.2: 비상 중지 조건
+  emergency_stop:
+    daily_usage_threshold: 0.9  # 90% 도달 시 (4,500회)
+    consecutive_errors: 10       # 연속 10회 오류
+    no_response_timeout: 300     # 5분간 응답 없음
+  
+  # Rate Limit 초과 시 대기
+  cooldown_seconds: 60
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# 6. 텔레그램 알림 (기획서 6.1)
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 telegram:
+  # 알림 설정
+  notifications:
+    system_start_stop: true       # 시스템 시작/종료
+    mode_change: true             # 프리마켓 ↔ 정규장
+    buy_detected: true            # 매수 감지
+    sell_success: true            # 매도 성공
+    sell_failed: true             # 매도 실패
+    errors: true                  # 오류 발생
+    rate_limit_warning: true      # Rate Limit 90%
+    daily_summary: true           # 일일 통계 (01:00 한국시간)
+  
+  # 연결 설정
   polling_interval: 10
   error_polling_interval: 30
   timeout: 10
 
-rate_limit:
-  requests_per_second: 1
-  daily_limit: 5000
-  hourly_limit: 500
-  min_request_interval: 2.5
-  consecutive_limit: 10
-  cooldown_on_limit: 60
-  aggressive_mode_limit: 1000
-  smart_mode_limit: 2000
-
-# ✅ 모든 시간을 미국 동부시간(ET) 기준으로 설정
-polling:
-  # 프리마켓: ET 04:00-09:30 (한국시간 17:00-22:30 또는 18:00-23:30)
-  aggressive:
-    interval: 3
-    time_ranges:
-      - {start: "04:00", end: "09:30"}
-  
-  # 애프터마켓: ET 16:00-20:00 (한국시간 다음날 05:00-09:00 또는 06:00-10:00)
-  smart:
-    initial_interval: 5
-    max_interval: 30
-    backoff_multiplier: 1.2
-    no_change_threshold: 5
-    consecutive_success_speedup: true
-    time_ranges:
-      - {start: "16:00", end: "20:00"}
-    order_age_factor:
-      - {minutes: 5, interval: 10}
-      - {minutes: 15, interval: 20}
-      - {default: 30}
-  
-  # 정규장: ET 09:30-16:00 (한국시간 22:30-05:00 또는 23:30-06:00)
-  ws_mode:
-    time_ranges:
-      - {start: "09:30", end: "16:00"}
-
-strategy:
-  aggressive_strategy:
-    target_profit_margin: 0.03
-  smart_strategy:
-    target_profit_margin: 0.03
-
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# 7. 로깅 설정 (기획서 6.2)
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 logging:
-  level: "INFO"
+  level: "INFO"  # DEBUG, INFO, WARNING, ERROR, CRITICAL
+  
+  file:
+    path: "logs/app.log"
+    max_size_mb: 10
+    backup_count: 5
+    retention_days: 30
+  
+  # 콘솔 출력 설정
+  console:
+    enabled: true
+    level: "INFO"
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# 8. 백업 설정 (기획서 7장)
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+backup:
+  # 기획서 7.1: 상태 파일 백업
+  state_files:
+    enabled: true
+    path: "/home/ec2-user/backups/states/"
+    retention_days: 7
+    auto_backup_on_sell: true
+    daily_backup_time: "01:00"  # 한국시간 (시스템 종료 시)
+  
+  # 기획서 7.2: 로그 파일 백업
+  log_files:
+    enabled: true
+    path: "/home/ec2-user/backups/logs/"
+    retention_days: 30
+    compress: true
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# 9. 오류 처리 (기획서 8장)
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+error_handling:
+  # 기획서 8.1: 오류 유형별 재시도
+  network_error:
+    max_retries: 3
+    retry_delay: 10
+  
+  rate_limit_error:
+    max_retries: 1
+    retry_delay: 60
+  
+  auth_error:
+    max_retries: 2
+    retry_delay: 5
+  
+  # 기획서 4.4: 매도 실패 처리
+  sell_failed:
+    retry: false  # 즉시 포기
+    log_only: true
+    notify_telegram: true
+  
+  # 기획서 5.2: WebSocket 실패
+  websocket_failed:
+    action: "stop_system"  # 시스템 중지
+    notify_telegram: true

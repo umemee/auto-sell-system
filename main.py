@@ -1,4 +1,4 @@
-# main.py - 수정된 전체 코드 (import 오류 수정)
+# main.py - 기획서 v1.0 완전 준수 버전
 
 import logging
 import time
@@ -10,13 +10,9 @@ from logging.handlers import RotatingFileHandler
 
 from config import load_config
 from auth import TokenManager
-
-# ✅ 순환 import 해결을 위해 런타임 import로 변경
 from websocket_client import WebSocketClient
 from telegram_bot import TelegramBot
 from smart_order_monitor import SmartOrderMonitor
-
-# ✅ order.py에서 is_market_hours import (수정!)
 from order import is_market_hours, place_sell_order
 
 # 전역 변수
@@ -46,6 +42,55 @@ def setup_logging(debug=False):
     root_logger.setLevel(log_level)
     root_logger.addHandler(file_handler)
     root_logger.addHandler(console_handler)
+
+def emergency_stop(reason):
+    """
+    ✅ 추가: 비상 정지 함수 (기획서 5.2절)
+    
+    정규장에서 WebSocket 3회 연결 실패 시 시스템을 안전하게 종료합니다.
+    """
+    global shutdown_requested, ws_client, telegram_bot, smart_monitor
+    
+    logging.critical(f"🚨 긴급 시스템 종지 발동!")
+    logging.critical(f"📋 종지 사유: {reason}")
+    
+    # 텔레그램 알림
+    if telegram_bot and hasattr(telegram_bot, 'send_message'):
+        alert_message = f"""
+🚨 **시스템 긴급 종지**
+
+📋 **사유**: {reason}
+⏰ **시각**: {time.strftime('%Y-%m-%d %H:%M:%S')}
+⚠️ **조치**: 시스템이 안전하게 종료됩니다
+
+기획서 5.2절에 따른 비상 증지 조건 충족
+"""
+        try:
+            telegram_bot.send_message(alert_message)
+            logging.info("✅ 텔레그램 긴급 알림 전송 완료")
+        except Exception as e:
+            logging.error(f"❌ 텔레그램 알림 실패: {e}")
+    
+    # 시스템 안전 종료
+    shutdown_requested = True
+    
+    try:
+        if smart_monitor and hasattr(smart_monitor, 'stop'):
+            smart_monitor.stop()
+            logging.info("✅ 스마트 모니터 정리 완료")
+            
+        if ws_client and hasattr(ws_client, 'stop'):
+            ws_client.stop()
+            logging.info("✅ WebSocket 정리 완료")
+            
+        if telegram_bot and hasattr(telegram_bot, 'stop'):
+            telegram_bot.stop()
+            logging.info("✅ 텔레그램 봇 정리 완료")
+    except Exception as e:
+        logging.error(f"❌ 정리 중 오류: {e}")
+    
+    logging.critical("🛑 시스템 종료")
+    sys.exit(1)
 
 def signal_handler(signum, frame):
     """안전한 종료 처리"""
@@ -89,15 +134,26 @@ def handle_websocket_execution(execution_data, config, token_manager, telegram_b
         logging.error(f"WebSocket 체결 처리 중 오류: {e}")
 
 def start_websocket_for_regular_hours(config, token_manager, telegram_bot, smart_monitor):
-    """정규장 전용 WebSocket 시작"""
+    """
+    정규장 전용 WebSocket 시작
+    
+    ✅ 수정: emergency_stop_callback 전달 추가 (기획서 5.2절)
+    """
     global ws_client
     
     def message_handler(execution_data):
         handle_websocket_execution(execution_data, config, token_manager, telegram_bot, smart_monitor)
     
-    ws_client = WebSocketClient(config, token_manager, message_handler)
+    # ✅ 추가: emergency_stop_callback 전달
+    ws_client = WebSocketClient(
+        config, 
+        token_manager, 
+        message_handler,
+        emergency_stop_callback=emergency_stop  # 기획서 5.2절
+    )
     
-    max_attempts = config['system']['max_reconnect_attempts']
+    # ✅ 수정: 재연결 횟수 3회로 고정 (기획서 5.2절)
+    max_attempts = 3  # 기획서 5.2절: WebSocket 3회 재시도 후 실패 시 종지
     attempt = 0
     
     while not shutdown_requested and attempt < max_attempts:
@@ -110,16 +166,27 @@ def start_websocket_for_regular_hours(config, token_manager, telegram_bot, smart
                 time.sleep(60)
                 continue
                 
-            logging.info(f"📌 [정규장] WebSocket 연결 시도 ({attempt}/{max_attempts})")
+            logging.info(f"🔌 [정규장] WebSocket 연결 시도 ({attempt}/{max_attempts})")
             ws_client.start()
+            
+            # WebSocket이 정상 실행되면 루프 종료
             break
             
         except Exception as e:
             logging.error(f"WebSocket 연결 실패 ({attempt}/{max_attempts}): {e}")
             if attempt < max_attempts and not shutdown_requested:
-                delay = min(config['system']['base_reconnect_delay'] * (2 ** (attempt - 1)), 300)
+                # ✅ 수정: 재연결 지연을 config에서 가져오되, 없으면 기본값 5초
+                base_delay = config.get('system', {}).get('base_reconnect_delay', 5)
+                delay = min(base_delay * (2 ** (attempt - 1)), 60)
                 logging.info(f"🔄 {delay}초 후 재시도합니다...")
                 time.sleep(delay)
+    
+    # ✅ 추가: 3회 재시도 후 실패 시 경고 (WebSocketClient 내부에서 emergency_stop 호출됨)
+    if attempt >= max_attempts and not shutdown_requested:
+        market_status = is_market_hours(config['trading']['timezone'])
+        if market_status == 'regular':
+            logging.critical(f"🚨 정규장에서 WebSocket {max_attempts}회 연결 실패 - WebSocketClient가 시스템 종지 예정")
+            # WebSocketClient의 emergency_stop_callback이 자동으로 호출됨
 
 def start_smart_monitor(config, token_manager, telegram_bot):
     """스마트 모니터 시작"""
@@ -162,7 +229,11 @@ def start_telegram_bot(config):
         return None
 
 def adaptive_market_monitor(config, token_manager, telegram_bot):
-    """적응형 시장 모니터 - 시장 상태에 따른 서비스 자동 전환"""
+    """
+    적응형 시장 모니터 - 시장 상태에 따른 서비스 자동 전환
+    
+    ✅ 기획서 2.3절 준수: 시간대별 동작 모드
+    """
     global ws_client, smart_monitor
     
     last_status = None
@@ -177,7 +248,7 @@ def adaptive_market_monitor(config, token_manager, telegram_bot):
                 logging.info(f"🕐 시장 상태 변경: {last_status} → {current_status}")
                 
                 if current_status == 'regular':
-                    # 정규장 시작: WebSocket 활성화, 스마트 폴링 중지
+                    # ✅ 정규장 시작: WebSocket 활성화, 스마트 폴링 중지 (기획서 2.3절)
                     logging.info("🔄 정규장 시작 - WebSocket 모드로 전환")
                     
                     if smart_monitor and hasattr(smart_monitor, 'is_running') and smart_monitor.is_running:
@@ -185,7 +256,7 @@ def adaptive_market_monitor(config, token_manager, telegram_bot):
                             smart_monitor.stop()
                         logging.info("⏸️ 스마트 폴링 중지됨")
 
-                    # ✅ WebSocket 중복 방지
+                    # WebSocket 중복 방지
                     if not websocket_running:
                         # 기존 WebSocket 정리
                         if ws_client:
@@ -210,9 +281,10 @@ def adaptive_market_monitor(config, token_manager, telegram_bot):
                         logging.info("ℹ️ WebSocket 이미 실행 중, 건너뜀")
                 
                 elif current_status in ['premarket', 'aftermarket']:
+                    # ✅ 프리마켓/애프터마켓: 스마트 폴링 활성화 (기획서 2.3절)
                     logging.info(f"🔄 {current_status} 시작 - 스마트 폴링 모드로 전환")
                     
-                    # ✅ WebSocket 중지
+                    # WebSocket 중지
                     if websocket_running:
                         if ws_client and hasattr(ws_client, 'stop'):
                             try:
@@ -236,6 +308,7 @@ def adaptive_market_monitor(config, token_manager, telegram_bot):
                         logging.info("🧠 스마트 폴링 활성화됨")
                 
                 elif current_status == 'closed':
+                    # ✅ 장 마감: 모든 서비스 중지 (기획서 2.3절)
                     logging.info("🔄 장 마감 - 대기 모드")
                     
                     # WebSocket 중지
@@ -278,7 +351,9 @@ def main():
     try:
         # 시스템 초기화
         logging.info(f"🚀 스마트 하이브리드 자동매매 시스템 시작 ({args.mode} 모드)")
-        logging.info("💡 Rate Limit 안전 모드, 적응형 폴링, WebSocket 자동 전환")
+        logging.info("💡 기획서 v1.0 완전 준수 버전")
+        logging.info("✅ Rate Limit 안전 모드, 적응형 폴링, WebSocket 자동 전환")
+        logging.info("✅ 정규장 WebSocket 3회 실패 시 시스템 종지 (기획서 5.2절)")
         
         config = load_config(args.mode)
         market_status = is_market_hours(config['trading']['timezone'])
@@ -293,14 +368,19 @@ def main():
         
         # 시작 알림
         if telegram_bot:
-            message = f"🚀 스마트 자동매매 시작!\n🕐 시장상태: {market_status}\n🧠 Rate Limit 안전모드\n⚡ 적응형 폴링 활성화"
+            message = f"""🚀 스마트 자동매매 시작!
+🕐 시장상태: {market_status}
+🧠 Rate Limit 안전모드
+⚡ 적응형 폴링 활성화
+✅ 기획서 v1.0 준수
+⚠️ 정규장 WebSocket 3회 실패 시 시스템 종지"""
             if hasattr(telegram_bot, 'send_message'):
                 telegram_bot.send_message(message)
         
         # 현재 시장 상태에 따른 초기 서비스 시작
         if market_status == 'regular':
             # 정규장: WebSocket 시작
-            logging.info("📌 정규장 감지 - WebSocket 모드로 시작")
+            logging.info("🔌 정규장 감지 - WebSocket 모드로 시작")
             ws_thread = threading.Thread(
                 target=start_websocket_for_regular_hours,
                 args=(config, token_manager, telegram_bot, smart_monitor),

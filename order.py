@@ -1,4 +1,5 @@
-# order.py - 한국투자증권 해외주식 자동매도 시스템 (공식 API 완전 반영)
+# order.py - 해외주식 자동매도 시스템 (기획서 v1.0 완전 반영)
+# 한국투자증권 공식 API 사용
 
 import requests
 import json
@@ -12,51 +13,80 @@ logger = logging.getLogger(__name__)
 
 
 # ============================================================================
-# 시장 시간 판별 함수
+# 시장 시간 판별 함수 (기획서 2.2, 2.3)
 # ============================================================================
 
-def is_extended_hours(trading_timezone='US/Eastern'):
+def is_market_hours(trading_timezone='US/Eastern'):
     """
-    미국 동부시간 기준으로 프리마켓/애프터마켓 시간인지 판별
-    정규장: 09:30–16:00 ET
-    정규장 외 시간이면 True 반환 (프리/애프터마켓)
+    기획서 2.2: 시장 시간 상태 반환
+    
+    운영 시간 (ET 기준):
+    - 프리마켓: 04:00-09:30
+    - 정규장: 09:30-12:00
+    - 수면 모드: 12:00-04:00 (다음날)
+    
+    Returns: 'premarket', 'regular', 'closed'
     """
     try:
         tz = timezone(trading_timezone)
         now = datetime.now(tz).time()
+        
+        # 기획서 2.2: 운영 시간 정의
+        premarket_start = dtime(4, 0)     # 04:00 ET (한국 17:00)
+        regular_start = dtime(9, 30)      # 09:30 ET (한국 22:30)
+        system_end = dtime(12, 0)         # 12:00 ET (한국 01:00)
+        
+        if premarket_start <= now < regular_start:
+            return 'premarket'
+        elif regular_start <= now < system_end:
+            return 'regular'
+        else:
+            return 'closed'  # 수면 모드
+    except Exception as e:
+        logger.warning(f"⚠️ 시간 판별 오류: {e}")
+        return 'unknown'
+
+
+def is_extended_hours(trading_timezone='US/Eastern'):
+    """
+    기획서 2.3: 프리마켓 시간인지 판별
+    정규장(09:30-12:00 ET) 외 시간이면 True 반환
+    
+    Returns:
+        bool: 프리마켓 시간이면 True
+    """
+    try:
+        tz = timezone(trading_timezone)
+        now = datetime.now(tz).time()
+        
         regular_start = dtime(9, 30)
-        regular_end = dtime(16, 0)
-        return not (regular_start <= now <= regular_end)
+        system_end = dtime(12, 0)
+        
+        # 정규장이 아니면 True (프리마켓 또는 종료)
+        return not (regular_start <= now < system_end)
     except Exception as e:
         logger.warning(f"⚠️ 시간 판별 오류: {e}, 기본값(정규장) 사용")
         return False
 
 
-def is_market_hours(trading_timezone='US/Eastern'):
+def should_system_run(trading_timezone='US/Eastern'):
     """
-    시장 시간 상태 반환
-    Returns: 'premarket', 'regular', 'aftermarket', 'closed'
+    기획서 2.2: 시스템 운영 여부 확인
+    
+    Returns:
+        bool: ET 04:00-12:00 사이면 True
     """
     try:
         tz = timezone(trading_timezone)
         now = datetime.now(tz).time()
         
-        premarket_start = dtime(4, 0)    # 04:00 ET
-        regular_start = dtime(9, 30)     # 09:30 ET
-        regular_end = dtime(16, 0)       # 16:00 ET
-        aftermarket_end = dtime(20, 0)   # 20:00 ET
+        start_time = dtime(4, 0)   # 04:00 ET
+        end_time = dtime(12, 0)    # 12:00 ET
         
-        if premarket_start <= now < regular_start:
-            return 'premarket'
-        elif regular_start <= now < regular_end:
-            return 'regular'
-        elif regular_end <= now < aftermarket_end:
-            return 'aftermarket'
-        else:
-            return 'closed'
+        return start_time <= now < end_time
     except Exception as e:
-        logger.warning(f"⚠️ 시간 판별 오류: {e}")
-        return 'unknown'
+        logger.error(f"❌ 시스템 운영 시간 체크 오류: {e}")
+        return False
 
 
 # ============================================================================
@@ -116,7 +146,7 @@ def get_hash_key(config, token_manager, order_data):
 
 def place_sell_order(config, token_manager, execution_data, telegram_bot=None):
     """
-    자동 매도 주문 실행 함수 (한국투자증권 공식 API 완전 반영)
+    기획서 4장: 자동 매도 주문 실행 함수
     
     Args:
         config: 설정 딕셔너리
@@ -126,19 +156,29 @@ def place_sell_order(config, token_manager, execution_data, telegram_bot=None):
     
     Returns:
         bool: 매도 주문 성공 여부
+        
+    매도 실패 처리 (기획서 4.4):
+        - "주문수량이 가능수량보다 큽니다" 오류 → 즉시 포기
+        - 재시도 없음
+        - 텔레그램 알림만
     """
     try:
-        # 1단계: 매도가 계산
+        # 기획서 4.1: 매도가 계산 (수익률 3% 고정)
         buy_price = execution_data['price']
-        profit_margin = config['trading']['profit_margin']
+        
+        # 기획서 4.2: config에서 수익률 가져오기
+        # order_settings.target_profit_rate: 3.0 (%)
+        target_profit_rate = config.get('order_settings', {}).get('target_profit_rate', 3.0)
+        profit_margin = target_profit_rate / 100  # 3.0 → 0.03
+        
         sell_price = round(buy_price * (1 + profit_margin), 2)
         
         logger.info(f"🎯 매도 주문 준비: {execution_data['ticker']} "
                    f"{execution_data['quantity']}주 @ ${sell_price} "
-                   f"(매수가: ${buy_price}, 목표 수익: +{profit_margin*100}%)")
+                   f"(매수가: ${buy_price}, 목표 수익: +{target_profit_rate}%)")
         
-        # 2단계: 거래소 코드 결정 (config에서 가져오거나 자동 판별)
-        exchange_code = config.get('trading', {}).get('exchange_code', 'NASD')
+        # 거래소 코드 결정
+        exchange_code = config.get('order_settings', {}).get('exchange_code', 'NASD')
         
         # 티커로 거래소 자동 판별 (선택적)
         ticker = execution_data['ticker']
@@ -147,33 +187,38 @@ def place_sell_order(config, token_manager, execution_data, telegram_bot=None):
         
         logger.debug(f"📊 거래소 코드: {exchange_code}")
         
-        # 3단계: 주문 데이터 생성 (한국투자증권 공식 파라미터)        
+        # 주문 데이터 생성 (한국투자증권 공식 파라미터)
         order_data = {
             "CANO": config['cano'],
-            "ACNT_PRDT_CD": config['acnt_prdt_cd'], 
+            "ACNT_PRDT_CD": config['acnt_prdt_cd'],
             "OVRS_EXCG_CD": exchange_code,
             "PDNO": ticker,
             "ORD_QTY": str(execution_data['quantity']),
             "OVRS_ORD_UNPR": str(sell_price),
-            "CTAC_TLNO": "",              # ✅ 추가 (빈 문자열)
-            "MGCO_APTM_ODNO": "",         # ✅ 추가 (빈 문자열)
-            "SLL_TYPE": "00",  # ✅ 추가: 매도 유형 (00: 지정가)
-            "ORD_SVR_DVSN_CD": "0",  # 변경 없음
+            "CTAC_TLNO": "",
+            "MGCO_APTM_ODNO": "",
+            "SLL_TYPE": "00",         # 매도 유형 (00: 지정가)
+            "ORD_SVR_DVSN_CD": "0",
             "ORD_DVSN": "00"
         }
 
+        safe_order_data = order_data.copy()
+        if 'CANO' in safe_order_data:
+            cano = safe_order_data['CANO']
+            safe_order_data['CANO'] = cano[:4] + '****'  # 앞 4자리만 표시
+
         logger.debug(f"📤 주문 데이터: {json.dumps(order_data, ensure_ascii=False)}")
         
-        # 4단계: HashKey 생성 (필수!)
+        # HashKey 생성 (필수!)
         hashkey = get_hash_key(config, token_manager, order_data)
 
         if not hashkey:
             logger.error("❌ HashKey 생성 실패, 주문 중단")
             if telegram_bot:
                 telegram_bot.send_error_notification("매도 주문 실패: HashKey 생성 불가")
-            return False  # ✅ 주문 실패로 처리
+            return False
         
-        # 5단계: 액세스 토큰 확인
+        # 액세스 토큰 확인
         token = token_manager.get_access_token()
         if not token:
             logger.error("❌ 유효한 토큰을 가져올 수 없습니다.")
@@ -181,7 +226,7 @@ def place_sell_order(config, token_manager, execution_data, telegram_bot=None):
                 telegram_bot.send_error_notification("매도 주문 실패: 토큰 없음")
             return False
         
-        # 6단계: API 요청 헤더 설정
+        # API 요청 헤더 설정
         headers = {
             "Content-Type": "application/json; charset=utf-8",
             "authorization": f"Bearer {token}",
@@ -189,19 +234,19 @@ def place_sell_order(config, token_manager, execution_data, telegram_bot=None):
             "appsecret": config['api_secret'],
             "tr_id": "TTTT1006U",    # 해외주식 매도주문 (실전)
             "custtype": "P",          # 개인: P, 법인: B
-            "hashkey": hashkey        # HashKey 추가
+            "hashkey": hashkey
         }
         
         logger.debug(f"📤 요청 헤더: {headers}")
         
-        # 7단계: API 호출
+        # API 호출
         url = f"{config['api']['base_url']}/uapi/overseas-stock/v1/trading/order"
         
         logger.info(f"📡 매도 주문 API 호출: {url}")
         
         response = requests.post(url, headers=headers, json=order_data, timeout=15)
         
-        # 8단계: 응답 처리
+        # 응답 처리
         logger.debug(f"📥 응답 상태 코드: {response.status_code}")
         logger.debug(f"📥 응답 본문: {response.text}")
         
@@ -213,7 +258,7 @@ def place_sell_order(config, token_manager, execution_data, telegram_bot=None):
                 )
             return False
         
-        # 9단계: JSON 응답 파싱
+        # JSON 응답 파싱
         try:
             data = response.json()
         except json.JSONDecodeError as e:
@@ -221,7 +266,7 @@ def place_sell_order(config, token_manager, execution_data, telegram_bot=None):
             logger.error(f"원본 응답: {response.text}")
             return False
         
-        # 10단계: 성공 여부 확인
+        # 성공 여부 확인
         rt_cd = data.get("rt_cd", "")
         msg_cd = data.get("msg_cd", "")
         msg1 = data.get("msg1", "Unknown error")
@@ -243,7 +288,7 @@ def place_sell_order(config, token_manager, execution_data, telegram_bot=None):
                 f"   ⏰ 주문시간: {order_time}"
             )
             
-            # 텔레그램 알림
+            # 기획서 6.1: 텔레그램 알림
             if telegram_bot:
                 profit_rate = (sell_price - buy_price) / buy_price * 100
                 telegram_bot.send_sell_order_notification(
@@ -259,6 +304,19 @@ def place_sell_order(config, token_manager, execution_data, telegram_bot=None):
         else:
             # 실패
             error_msg = msg1 if msg1 else f"오류 코드: {msg_cd}"
+            
+            # 기획서 4.4: "주문수량이 가능수량보다 큽니다" 오류 처리
+            if "가능수량" in error_msg or "수량" in error_msg:
+                logger.warning(f"⚠️ 이미 매도된 주식: {error_msg}")
+                logger.info("🔄 매도 실패 즉시 포기 (기획서 4.4)")
+                # 텔레그램 알림은 보내지만 재시도하지 않음
+                if telegram_bot:
+                    telegram_bot.send_info_notification(
+                        f"매도 대상 없음: {ticker} (이미 매도됨)"
+                    )
+                return False
+            
+            # 기타 오류
             logger.error(f"❌ 매도 주문 API 오류: {error_msg}")
             logger.error(f"📄 전체 응답: {json.dumps(data, ensure_ascii=False)}")
             
@@ -294,11 +352,17 @@ def place_sell_order(config, token_manager, execution_data, telegram_bot=None):
 
 
 # ============================================================================
-# OrderMonitor 클래스 (프리마켓/애프터마켓용)
+# OrderMonitor 클래스 (기획서 3장: 프리마켓용 REST 폴링)
 # ============================================================================
 
 class OrderMonitor:
-    """프리마켓/애프터마켓용 주문 체결 모니터링 시스템"""
+    """
+    기획서 3장: 프리마켓용 주문 체결 모니터링 시스템
+    
+    - 프리마켓(ET 04:00-09:30)에서 REST 폴링으로 매수 체결 감지
+    - 정규장(ET 09:30-12:00)에서는 WebSocket 사용
+    - 기획서 3.3: 스마트 폴링으로 API 비용 절감 (58%)
+    """
 
     def __init__(self, config, token_manager, telegram_bot=None):
         self.config = config
@@ -324,11 +388,17 @@ class OrderMonitor:
 
     def check_order_status(self, order_no):
         """
-        해외주식 주문/체결내역 조회
-        주문번호를 기준으로 REST API를 통해 체결 상태를 확인합니다.
+        기획서 3장: 해외주식 주문/체결내역 조회 (REST 폴링)
+        
+        한국투자증권 공식 API:
+        - TR_ID: TTTS3035R (실전투자)
+        - 엔드포인트: /uapi/overseas-stock/v1/trading/inquire-ccnl
+        
+        Returns:
+            dict: 체결 정보 또는 None
         """
         try:
-           # ✅ 올바른 API 엔드포인트로 변경!
+            # 🆘 한국투자증권 공식 API 엔드포인트
             url = f"{self.config['api']['base_url']}/uapi/overseas-stock/v1/trading/inquire-ccnl"
         
             # 액세스 토큰 확인
@@ -343,14 +413,14 @@ class OrderMonitor:
                 "authorization": f"Bearer {token}",
                 "appkey": self.config["api_key"],
                 "appsecret": self.config["api_secret"],
-                "tr_id": "TTTS3035R",
+                "tr_id": "TTTS3035R",  # 실전투자용
                 "custtype": "P"
             }
         
             # 파라미터 설정
             today = datetime.now().strftime("%Y%m%d")
         
-            # ✅ 올바른 파라미터로 변경!
+            # 🆘 한국투자증권 공식 파라미터 (GitHub 확인 완료)
             params = {
                 "CANO": self.config["cano"],
                 "ACNT_PRDT_CD": self.config["acnt_prdt_cd"],
@@ -364,8 +434,8 @@ class OrderMonitor:
                 "ORD_DT": "",
                 "ORD_GNO_BRNO": "",
                 "ODNO": "",
-                "CTX_AREA_NK200": "",          # ✅ 변경!
-                "CTX_AREA_FK200": ""           # ✅ 변경!
+                "CTX_AREA_NK200": "",
+                "CTX_AREA_FK200": ""
             }
         
             # GET 요청
@@ -391,14 +461,14 @@ class OrderMonitor:
             # 주문번호로 매칭
             for order in orders:
                 if order.get("odno") == order_no:
-                # ✅ 필드명 변경!
-                    ccld_qty = order.get("ft_ccld_qty", "0")
-                    ccld_unpr = order.get("ft_ccld_unpr3", "0")
+                    # 🆘 한국투자증권 공식 필드명 (GitHub 확인 완료)
+                    ccld_qty = order.get("ft_ccld_qty", "0")       # FT체결수량
+                    ccld_unpr = order.get("ft_ccld_unpr3", "0")   # FT체결단가3
                 
                     logger.debug(f"🔍 주문 발견: {order_no} - 체결량: {ccld_qty}")
                 
                     return {
-                       'status': '02',  # 체결완료
+                        'status': '02',  # 체결완료
                         'filled_qty': int(ccld_qty) if ccld_qty else 0,
                         'filled_price': float(ccld_unpr) if ccld_unpr else 0.0,
                         'order_data': order
@@ -411,7 +481,7 @@ class OrderMonitor:
             return None
             
     def execute_auto_sell(self, order_info, filled_price):
-        """자동 매도 주문 실행"""
+        """기획서 4장: 자동 매도 주문 실행"""
         try:
             execution_data = {
                 'ticker': order_info['ticker'],
@@ -436,11 +506,17 @@ class OrderMonitor:
             return False
 
     def monitor_orders(self):
-        """주문 모니터링 메인 루프"""
-        logger.info("🔍 주문 모니터링 시작")
+        """주문 모니터링 메인 루프 (기획서 3장: 스마트 폴링)"""
+        logger.info("🔍 주문 모니터링 시작 (프리마켓 REST 폴링)")
         
         while self.is_running:
             try:
+                # 기획서 2.2: 시스템 운영 시간 체크
+                if not should_system_run():
+                    logger.info("🌙 시스템 운영 시간 종료 (ET 12:00), 모니터링 중지")
+                    self.stop()
+                    break
+                
                 orders_to_check = dict(self.monitoring_orders)
                 completed_orders = []
                 
@@ -465,7 +541,8 @@ class OrderMonitor:
                     if status_info['filled_qty'] > 0 and status_info['filled_price'] > 0:
                         logger.info(
                             f"🎉 체결 완료: {order_no} "
-                            f"(체결가: ${status_info['filled_price']}, 체결량: {status_info['filled_qty']})"
+                            f"(체결가: ${status_info['filled_price']}, "
+                            f"체결량: {status_info['filled_qty']})"
                         )
                         
                         # 자동 매도 실행
@@ -476,7 +553,7 @@ class OrderMonitor:
                 for order_no in completed_orders:
                     self.monitoring_orders.pop(order_no, None)
                 
-                # 5초 대기
+                # 기획서 3.2: 스마트 폴링 간격 (5초 기본)
                 if self.is_running:
                     time.sleep(5)
             
@@ -495,7 +572,7 @@ class OrderMonitor:
         self.is_running = True
         self.monitor_thread = threading.Thread(target=self.monitor_orders, daemon=True)
         self.monitor_thread.start()
-        logger.info("🚀 주문 모니터링 시작됨")
+        logger.info("🚀 주문 모니터링 시작됨 (프리마켓 REST 폴링)")
 
     def stop(self):
         """모니터링 중지"""
