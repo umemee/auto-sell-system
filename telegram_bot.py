@@ -313,6 +313,15 @@ class TelegramBot:
 """
         return self.send_message(message.strip(), alert_type=f"error_{level}")
 
+    def send_info_notification(self, message):
+            """
+            ℹ️ 정보성 알림 전송
+        
+            Parameters:
+                message: 전송할 메시지
+            """
+            return self.send_error_notification(message, level="info")
+
     def send_daily_summary(self):
         """
         ✅ 추가: 일일 통계 요약 (기획서 6.1절)
