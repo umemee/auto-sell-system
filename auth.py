@@ -214,11 +214,18 @@ class TokenManager:
             self._send_telegram_alert("Approval Key 발급 불가\nAccess Token 없음", "critical")
             return None
 
+        # ✅ 공식 GitHub 코드 기준 헤더
         headers = {
             "Content-Type": "application/json",
-            "authorization": f"Bearer {token}",
+            "Accept": "text/plain",
+            "charset": "UTF-8"
+        }
+        
+        # ✅ Body 데이터 (GitHub 공식 스펙)
+        data = {
+            "grant_type": "client_credentials",
             "appkey": self.config['api_key'],
-            "appsecret": self.config['api_secret']
+            "secretkey": self.config['api_secret']
         }
         
         # ✅ Rate Limit 보호
@@ -228,7 +235,7 @@ class TokenManager:
         for attempt in range(self.max_retries):
             try:
                 logger.info(f"🔐 Approval Key 요청 중... (시도 {attempt + 1}/{self.max_retries})")
-                resp = requests.post(url, headers=headers, timeout=10)
+                resp = requests.post(url, data=json.dumps(data), headers=headers, timeout=10)
                 self.last_approval_request_time = time.time()
                 
                 # ✅ Rate Limit 오류 처리
@@ -245,7 +252,6 @@ class TokenManager:
                     # Access Token 갱신 후 재시도
                     token = self.get_access_token(force_refresh=True)
                     if token:
-                        headers["authorization"] = f"Bearer {token}"
                         continue
                     else:
                         self._send_telegram_alert(f"Approval Key 인증 실패\nHTTP {resp.status_code}", "critical")
