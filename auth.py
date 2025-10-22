@@ -228,7 +228,6 @@ class TokenManager:
         for attempt in range(self.max_retries):
             try:
                 logger.info(f"🔐 Approval Key 요청 중... (시도 {attempt + 1}/{self.max_retries})")
-                
                 resp = requests.post(url, headers=headers, timeout=10)
                 self.last_approval_request_time = time.time()
                 
