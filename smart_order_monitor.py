@@ -886,6 +886,7 @@ class SmartOrderMonitor:
                     # Execute auto-sell with order number
                     success = self.execute_auto_sell(order_info, ccld_price, order_no)
                     
+                    # ✅ --- 수정 위치 2 ---
                     if success:
                         logger.info(f"✅ [POLL] Auto-sell immediate success: {ticker}")
                         
@@ -900,8 +901,26 @@ class SmartOrderMonitor:
                             )
                             self.telegram_bot.send_message(message)
                     else:
-                        logger.error(f"❌ [POLL] Auto-sell failed: {ticker}. Adding to polling list.")
-                        self.add_order_to_monitor(order_no, ticker, ccld_qty, ccld_price)
+                        # ✅ "이미 매도됨" 오류는 monitoring에 추가하지 않음
+                        logger.error(f"❌ [POLL] Auto-sell failed: {ticker}. Not adding to monitoring (already sold).")
+                        
+                        # 실패 기록만 (monitoring에 추가하지 않음)
+                        self.failed_orders[order_no] = (datetime.now(), 'Already sold')
+                        self.processed_orders.add(order_no)  # 재처리 방지
+                        
+                        # 텔레그램 알림
+                        if self.telegram_bot:
+                            if hasattr(self.telegram_bot, 'send_info_notification'):
+                                self.telegram_bot.send_info_notification(
+                                    f"매도 대상 없음: {ticker} (이미 매도됨)"
+                                )
+                            else:
+                                self.telegram_bot.send_message(
+                                    f"ℹ️ 시스템 정보\n매도 대상 없음: {ticker} (이미 매도됨)"
+                                )
+                        
+                        logger.info(f"🗑️ Order {order_no} not added to monitoring (already sold)")
+                    # ✅ --- 수정 완료 2 ---
         
         except Exception as e:
             logger.error(f"❌ Buy detection scan error: {e}")
@@ -1013,11 +1032,36 @@ class SmartOrderMonitor:
                         # Execute auto-sell with order number
                         success = self.execute_auto_sell(order_info, status_info['filled_price'], order_no)
                         
+                        # ✅ --- 수정 위치 1 ---
                         if success:
                             self.monitoring_orders.pop(order_no, None)
                             self.save_state()
                         else:
-                            logger.warning(f"⚠️ [POLL] Fill detected but sell failed: {order_no}. Will retry next scan.")
+                            # ✅ "이미 매도됨" 오류는 재시도하지 않고 제거
+                            logger.warning(f"⚠️ [POLL] Fill detected but sell failed: {order_no}. Removing from monitoring.")
+                            
+                            # monitoring_orders에서 완전히 제거
+                            self.monitoring_orders.pop(order_no, None)
+                            
+                            # 재처리 방지
+                            self.processed_orders.add(order_no)
+                            
+                            # 상태 저장
+                            self.save_state()
+                            
+                            # 텔레그램 알림
+                            if self.telegram_bot:
+                                if hasattr(self.telegram_bot, 'send_info_notification'):
+                                    self.telegram_bot.send_info_notification(
+                                        f"매도 대상 없음: {order_info['ticker']} (이미 매도됨)"
+                                    )
+                                else:
+                                    self.telegram_bot.send_message(
+                                        f"ℹ️ 시스템 정보\n매도 대상 없음: {order_info['ticker']} (이미 매도됨)"
+                                    )
+                            
+                            logger.info(f"🗑️ Order {order_no} removed from monitoring (already sold)")
+                        # ✅ --- 수정 완료 1 ---
                     
                     # Rate limit: Wait between checks
                     time.sleep(max(1, self.rate_config.get('min_request_interval', 0.07)))
