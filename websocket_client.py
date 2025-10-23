@@ -89,7 +89,7 @@ class WebSocketClient:
             return None
     
         ticker = symbol or self.default_symbol
-        tr_key = ticker
+        tr_key = f"DNAS{ticker}"  # 기본적으로 나스닥으로 설정
 
         subscribe_message = {
             "header": {
@@ -100,7 +100,7 @@ class WebSocketClient:
             },
             "body": {
                 "input": {
-                    "tr_id": "H0STCNI0",
+                    "tr_id": "HDFSCNT0",
                     "tr_key": tr_key,
                     "pdno": ticker  
                 }
@@ -109,7 +109,7 @@ class WebSocketClient:
 
         logger.info("=" * 60)
         logger.info("📋 WebSocket 구독 메시지 생성")
-        logger.info(f"  - TR_ID: H0STCNI0")
+        logger.info(f"  - TR_ID: HDFSCNT0")
         logger.info(f"  - TR_KEY: {tr_key}")
         logger.info(f"  - PDNO: {ticker}")
         logger.info(f"  - Approval Key: {approval_key[:20]}...")
@@ -222,7 +222,7 @@ class WebSocketClient:
             # 정상 데이터 처리
             header = data.get("header", {})
             tr_id = header.get("tr_id", "")
-            if tr_id == "H0STCNI0":
+            if tr_id == "HDFSCNT0":
                 self._handle_execution_message(body)
                 
         except json.JSONDecodeError as e:
