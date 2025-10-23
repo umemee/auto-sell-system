@@ -91,6 +91,7 @@ class WebSocketClient:
         ticker = symbol or self.default_symbol
         tr_key = f"DNAS{ticker}"  # 기본적으로 나스닥으로 설정
 
+        # ✅ --- 수정 3: `pdno` 제거 ---
         subscribe_message = {
             "header": {
                 "approval_key": approval_key,
@@ -101,11 +102,12 @@ class WebSocketClient:
             "body": {
                 "input": {
                     "tr_id": "HDFSCNT0",
-                    "tr_key": tr_key,
-                    "pdno": ticker  
+                    "tr_key": tr_key
+                    # ✅ pdno 제거 (필요 없을 수 있음)
                 }
             }
         }
+        # ✅ --- 수정 3 완료 ---
 
         logger.info("=" * 60)
         logger.info("📋 WebSocket 구독 메시지 생성")
@@ -164,79 +166,99 @@ class WebSocketClient:
         # 자동 구독
         self.subscribe(self.default_symbol)
         
+        # ✅ --- 수정 2: 구독 확인 타이머 연장 ---
         # 구독 확인 후 재시도 로직
         def check_subscription():
-            time.sleep(5)  # 5초 대기 후 구독 상태 확인
+            time.sleep(10)  # ✅ 변경: 5초 → 10초 (서버 응답 대기)
             if not self.subscribed and self.connected:
-                logger.warning("⚠️ 구독 미확인 상태, 재시도 중...")
+                logger.warning("⚠️ 10초 경과, 구독 미확인 상태 - 재시도 중...")
                 self.subscribe(self.default_symbol)
-                
-                # 추가 재시도 (10초 후 한 번 더)
-                time.sleep(10)
+                                
+                # 추가 재시도 (20초 후 한 번 더)
+                time.sleep(20)  # ✅ 변경: 10초 → 20초
                 if not self.subscribed and self.connected:
-                    logger.warning("⚠️ 구독 재시도 2차 시도")
+                    logger.warning("⚠️ 30초 경과, 구독 재시도 2차 시도")
                     self.subscribe(self.default_symbol)
+                                        
+                    # 최종 확인 (30초 후)
+                    time.sleep(30)
+                    if not self.subscribed and self.connected:
+                        logger.error("❌ 60초 경과, 구독 실패 - 서버 응답 없음")
+        # ✅ --- 수정 2 완료 ---
         
         threading.Thread(target=check_subscription, daemon=True).start()
 
-    # ✅ --- 수정 1: on_message() 함수 전체 교체 ---
+    # ✅ --- 수정 1: on_message() 함수 전체 교체 (구독 승인 로직 추가) ---
     def on_message(self, ws, message):
+        # ⚠️ 디버깅: 모든 메시지 출력
         print(f"🔥🔥🔥 RAW MESSAGE: {message}")
         logger.info(f"🔥🔥🔥 RAW MESSAGE: {message}")
+                
         try:
-            # 모든 메시지 로깅 (디버그용)
             logger.info(f"📥 WebSocket 수신 원본: {message[:500]}")
             # PING/PONG 처리
             if "PINGPONG" in message or "PONG" in message:
                 logger.debug(f"▶ WebSocket PING/PONG: {message}")
                 return
-
             # JSON 파싱 시도
             try:
                 data = json.loads(message)
             except json.JSONDecodeError:
-                # JSON이 아닌 메시지는 무시 (PING 등)
                 logger.debug(f"Non-JSON 메시지: {message}")
                 return
-
             # 헤더 확인
             header = data.get("header", {})
             tr_id = header.get("tr_id", "")
-
+            tr_key = header.get("tr_key", "")
+                        
             # 바디 확인
             body = data.get("body", {})
-
-            # 오류 응답 처리
+                        
+            # ✅ 추가: 구독 승인 응답 처리
+            # 서버가 보내는 응답 코드 확인
             rt_cd = body.get("rt_cd", "")
-            if rt_cd != "" and rt_cd != "0":  # 오류 코드
-                msg1 = body.get("msg1", "알 수 없는 오류")
-                logger.warning(f"⚠️ WebSocket 서버 오류 (rt_cd={rt_cd}): {msg1}")
-                # 승인키 오류
-                if "approval" in msg1.lower():
-                    logger.warning("🔑 승인키 관련 오류, 갱신 시도")
-                    self._refresh_approval_key_if_needed()
-                    time.sleep(2)
-                    self.subscribe(self.default_symbol)
-                # tr_key 오류
-                elif "tr_key" in msg1.lower() or "tr_id" in msg1.lower():
-                    logger.info("🔄 tr_key/tr_id 오류로 인한 구독 재시도")
-                    time.sleep(2)
-                    self.subscribe(self.default_symbol)
-                return
-
+                        
+            # 구독 승인 응답 (rt_cd가 있고 tr_id가 우리가 요청한 것과 같음)
+            if rt_cd != "":
+                if rt_cd == "0":  # 성공
+                    logger.info(f"✅ WebSocket 구독 승인 성공! (tr_id={tr_id}, tr_key={tr_key})")
+                    if not self.subscribed:
+                        self.subscribed = True
+                        logger.info("✅ WebSocket 구독 상태 확인 완료")
+                else:  # 오류
+                    msg1 = body.get("msg1", "알 수 없는 오류")
+                    msg_cd = body.get("msg_cd", "")
+                    logger.error(f"❌ WebSocket 구독 거부! rt_cd={rt_cd}, msg_cd={msg_cd}, msg={msg1}")
+                    logger.error(f"❌ 전체 응답: {data}")
+                                        
+                    # 승인키 오류
+                    if "approval" in msg1.lower():
+                        logger.warning("🔑 승인키 관련 오류, 갱신 시도")
+                        self._refresh_approval_key_if_needed()
+                        time.sleep(2)
+                        self.subscribe(self.default_symbol)
+                                        
+                    # tr_key 오류
+                    elif "tr_key" in msg1.lower() or "tr_id" in msg1.lower():
+                        logger.info("🔄 tr_key/tr_id 오류로 인한 구독 재시도")
+                        time.sleep(2)
+                        self.subscribe(self.default_symbol)
+                                
+                return  # 응답 처리 완료
+            
             # HDFSCNT0 실시간지연체결가 데이터 처리
             if tr_id == "HDFSCNT0":
-                # 첫 데이터 수신 = 구독 성공
+                # 첫 데이터 수신 = 구독 성공 (응답이 없을 경우 대비)
                 if not self.subscribed:
                     logger.info("✅ WebSocket 구독 성공 (첫 데이터 수신)")
                     self.subscribed = True
+                                
                 self._handle_realtime_price_message(body)
-
+                        
         except Exception as e:
             logger.error(f"❌ on_message 처리 중 예외: {e}", exc_info=True)
     # ✅ --- 수정 1 완료 ---
 
-    # ✅ --- 수정 2: _handle_execution_message() 삭제 후 _handle_realtime_price_message() 추가 ---
     def _handle_realtime_price_message(self, body):
         """
         실시간지연체결가(HDFSCNT0) 데이터 처리
@@ -297,7 +319,6 @@ class WebSocketClient:
 
         except Exception as e:
             logger.error(f"❌ _handle_realtime_price_message 오류: {e}", exc_info=True)
-    # ✅ --- 수정 2 완료 ---
 
     def on_error(self, ws, error):
         logger.error(f"❌ WebSocket 오류: {error}")
