@@ -179,94 +179,123 @@ class WebSocketClient:
         
         threading.Thread(target=check_subscription, daemon=True).start()
 
+    # ✅ --- 수정 1: on_message() 함수 전체 교체 ---
     def on_message(self, ws, message):
         try:
-            logger.debug(f"📥 WebSocket 수신: {message[:500]}")
-
-            # 구독 성공 확인 메시지
-            if "SUBSCRIBE SUCCESS" in message or "SUBSCRIBED" in message:
-                logger.info("✅ WebSocket 구독 성공")
-                self.subscribed = True
-                return
-
+            # 모든 메시지 로깅 (디버그용)
+            logger.info(f"📥 WebSocket 수신 원본: {message[:500]}")
             # PING/PONG 처리
             if "PINGPONG" in message or "PONG" in message:
                 logger.debug(f"▶ WebSocket PING/PONG: {message}")
                 return
 
-            # 승인키 관련 오류 감지 시 자동 갱신
-            if "approval" in message.lower() and "error" in message.lower():
-                logger.warning("⚠️ 승인키 관련 오류 감지, 자동 갱신 시도")
-                self._refresh_approval_key_if_needed()
+            # JSON 파싱 시도
+            try:
+                data = json.loads(message)
+            except json.JSONDecodeError:
+                # JSON이 아닌 메시지는 무시 (PING 등)
+                logger.debug(f"Non-JSON 메시지: {message}")
                 return
 
-            # 본문 처리
-            logger.debug(f"📡 WebSocket 수신 원본 메시지: {message}")
-            data = json.loads(message)
-            logger.debug(f"🔓 WebSocket 파싱 데이터: {data}")
+            # 헤더 확인
+            header = data.get("header", {})
+            tr_id = header.get("tr_id", "")
+
+            # 바디 확인
+            body = data.get("body", {})
 
             # 오류 응답 처리
-            body = data.get("body", {})
             rt_cd = body.get("rt_cd", "")
-            if rt_cd == "9":  # 오류 코드
-                msg1 = body.get("msg1", "")
-                logger.warning(f"⚠️ WebSocket 서버 오류: {msg1}")
-                
-                # tr_key 오류면 구독 재시도
-                if "tr_key" in msg1.lower():
-                    logger.info("🔄 tr_key 오류로 인한 구독 재시도")
+            if rt_cd != "" and rt_cd != "0":  # 오류 코드
+                msg1 = body.get("msg1", "알 수 없는 오류")
+                logger.warning(f"⚠️ WebSocket 서버 오류 (rt_cd={rt_cd}): {msg1}")
+                # 승인키 오류
+                if "approval" in msg1.lower():
+                    logger.warning("🔑 승인키 관련 오류, 갱신 시도")
+                    self._refresh_approval_key_if_needed()
+                    time.sleep(2)
+                    self.subscribe(self.default_symbol)
+                # tr_key 오류
+                elif "tr_key" in msg1.lower() or "tr_id" in msg1.lower():
+                    logger.info("🔄 tr_key/tr_id 오류로 인한 구독 재시도")
                     time.sleep(2)
                     self.subscribe(self.default_symbol)
                 return
 
-            # 정상 데이터 처리
-            header = data.get("header", {})
-            tr_id = header.get("tr_id", "")
+            # HDFSCNT0 실시간지연체결가 데이터 처리
             if tr_id == "HDFSCNT0":
-                self._handle_execution_message(body)
-                
-        except json.JSONDecodeError as e:
-            logger.error(f"❌ JSON 파싱 오류: {e}, 원본 메시지: {message}")
+                # 첫 데이터 수신 = 구독 성공
+                if not self.subscribed:
+                    logger.info("✅ WebSocket 구독 성공 (첫 데이터 수신)")
+                    self.subscribed = True
+                self._handle_realtime_price_message(body)
+
         except Exception as e:
             logger.error(f"❌ on_message 처리 중 예외: {e}", exc_info=True)
+    # ✅ --- 수정 1 완료 ---
 
-    def _handle_execution_message(self, body):
+    # ✅ --- 수정 2: _handle_execution_message() 삭제 후 _handle_realtime_price_message() 추가 ---
+    def _handle_realtime_price_message(self, body):
+        """
+        실시간지연체결가(HDFSCNT0) 데이터 처리
+
+        응답 필드:
+        - SYMB: 종목코드
+        - LAST: 현재가
+        - EVOL: 체결량
+        - TVOL: 거래량
+        등 25개 필드
+        """
         try:
             output = body.get("output", {})
-            order_type = output.get("sll_buy_dvsn_cd")
-            if order_type != "02":  # 매수 주문만 처리
+
+            # 종목코드
+            ticker = output.get("SYMB", "").strip()
+            if not ticker:
+                logger.debug("종목코드 없음, 스킵")
                 return
 
-            ticker = output.get("pdno", "").strip()
-            qty_str = output.get("ccld_qty") or output.get("ord_qty") or "0"
-            price_str = output.get("ccld_unpr") or output.get("ord_unpr") or "0"
-
+            # 현재가
+            current_price_str = output.get("LAST", "0")
             try:
-                quantity = int(qty_str)
-                price = float(price_str)
-            except (ValueError, AttributeError):
-                logger.warning(f"수량/단가 파싱 실패: qty={qty_str}, price={price_str}")
+                current_price = float(current_price_str)
+            except (ValueError, TypeError):
+                logger.debug(f"현재가 파싱 실패: {current_price_str}")
                 return
 
-            if quantity <= 0 or price <= 0:
-                logger.warning(f"유효하지 않은 체결 정보: {ticker} qty={quantity}, price={price}")
-                return
+            # 체결량 (실시간 변동)
+            exec_volume_str = output.get("EVOL", "0")
+            try:
+                exec_volume = int(exec_volume_str) if exec_volume_str else 0
+            except (ValueError, TypeError):
+                exec_volume = 0
 
-            execution_data = {
-                'ticker': ticker,
-                'quantity': quantity,
-                'price': price,
-                'ordertype': 'buy',
-                'timestamp': datetime.now(),
-                'source': 'websocket'
-            }
+            # 거래량 (누적)
+            total_volume_str = output.get("TVOL", "0")
+            try:
+                total_volume = int(total_volume_str) if total_volume_str else 0
+            except (ValueError, TypeError):
+                total_volume = 0
 
-            logger.info(f"📈 WebSocket 체결 감지: {ticker} {quantity}주 @ ${price:.2f}")
+            # 시세 데이터 로깅
+            logger.info(f"📊 실시간시세: {ticker} ${current_price:.2f} | 체결량: {exec_volume} | 거래량: {total_volume:,}")
+
+            # 메시지 핸들러로 전달 (자동매도 로직에서 사용)
             if self.message_handler:
-                self.message_handler(execution_data)
-                
+                price_data = {
+                    'ticker': ticker,
+                    'price': current_price,
+                    'exec_volume': exec_volume,
+                    'total_volume': total_volume,
+                    'timestamp': datetime.now(),
+                    'source': 'websocket',
+                    'raw_output': output  # 전체 데이터
+                }
+                self.message_handler(price_data)
+
         except Exception as e:
-            logger.error(f"❌ handle_execution_message 오류: {e}", exc_info=True)
+            logger.error(f"❌ _handle_realtime_price_message 오류: {e}", exc_info=True)
+    # ✅ --- 수정 2 완료 ---
 
     def on_error(self, ws, error):
         logger.error(f"❌ WebSocket 오류: {error}")
