@@ -181,6 +181,8 @@ class WebSocketClient:
 
     # ✅ --- 수정 1: on_message() 함수 전체 교체 ---
     def on_message(self, ws, message):
+        print(f"🔥🔥🔥 RAW MESSAGE: {message}")
+        logger.info(f"🔥🔥🔥 RAW MESSAGE: {message}")
         try:
             # 모든 메시지 로깅 (디버그용)
             logger.info(f"📥 WebSocket 수신 원본: {message[:500]}")
