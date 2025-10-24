@@ -1,4 +1,4 @@
-# auth.py - 한국투자증권 API 인증/토큰 관리 (기획서 v1.0 완전 준수 버전)
+# auth.py - 한국투자증권 API 인증/토큰 관리 (기획서 v1.1 완전 준수 버전)
 
 import requests
 import json
@@ -31,12 +31,13 @@ class NetworkError(KISAPIError):
 
 class TokenManager:
     """
-    한국투자증권 API용 TokenManager (기획서 v1.0 완전 준수)
+    한국투자증권 API용 TokenManager (기획서 v1.1 완전 준수)
     
     주요 기능:
     - REST 액세스 토큰 자동 갱신
     - WebSocket Approval Key 자동 갱신
     - Rate Limit 고려한 재시도 로직 (기획서 5.1절)
+      * REST: 50건/초 (2025년 11월 1일부터)
     - 오류 유형별 처리 (기획서 8.1절)
     - 텔레그램 알림 (기획서 6.1절)
     """
@@ -363,7 +364,7 @@ if __name__ == "__main__":
     from config import load_config
 
     print("=" * 80)
-    print("🧪 TokenManager 테스트 (기획서 v1.0 준수 버전)")
+    print("🧪 TokenManager 테스트 (기획서 v1.1 준수 버전)")
     print("=" * 80)
     
     cfg = load_config('production')

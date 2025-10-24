@@ -1,4 +1,4 @@
-# main.py - 기획서 v1.0 완전 준수 버전
+# main.py - 기획서 v1.1 완전 준수 버전
 
 import logging
 import time
@@ -45,7 +45,7 @@ def setup_logging(debug=False):
 
 def emergency_stop(reason):
     """
-    ✅ 추가: 비상 정지 함수 (기획서 5.2절)
+    비상 정지 함수 (기획서 5.2절)
     
     정규장에서 WebSocket 3회 연결 실패 시 시스템을 안전하게 종료합니다.
     """
@@ -119,6 +119,54 @@ def signal_handler(signum, frame):
     
     sys.exit(0)
 
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# 🔴 [v1.1 신규] 보유 종목 조회 함수
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+def get_holdings_symbols(config, token_manager):
+    """
+    보유 종목 코드 리스트 조회 (기획서 5.1절)
+    
+    Returns:
+        list: 보유 종목 코드 리스트 (예: ['AAPL', 'TSLA', 'NVDA'])
+    """
+    try:
+        from order import get_holdings  # order.py에 있다고 가정
+        
+        holdings = get_holdings(config, token_manager)
+        if not holdings:
+            logging.warning("⚠️ 보유 종목이 없습니다")
+            return []
+        
+        # 종목 코드 추출 (다양한 필드명 지원)
+        symbols = []
+        for h in holdings:
+            symbol = h.get('ticker') or h.get('pdno') or h.get('symbol') or h.get('stock_code')
+            if symbol:
+                symbols.append(symbol)
+        
+        # 중복 제거
+        symbols = list(set(symbols))
+        
+        logging.info(f"📋 보유 종목: {len(symbols)}개")
+        if symbols:
+            preview = ', '.join(symbols[:5])
+            if len(symbols) > 5:
+                preview += f" 외 {len(symbols)-5}개"
+            logging.info(f"📋 종목 목록: {preview}")
+        
+        return symbols
+        
+    except ImportError:
+        logging.error("❌ order.py에 get_holdings 함수가 없습니다")
+        logging.error("💡 order.py에 get_holdings() 함수를 구현해주세요")
+        return []
+    except Exception as e:
+        logging.error(f"❌ 보유 종목 조회 실패: {e}")
+        import traceback
+        traceback.print_exc()
+        return []
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
 def handle_websocket_execution(execution_data, config, token_manager, telegram_bot, smart_monitor):
     """WebSocket 체결 데이터 처리 (정규장)"""
     try:
@@ -137,14 +185,14 @@ def start_websocket_for_regular_hours(config, token_manager, telegram_bot, smart
     """
     정규장 전용 WebSocket 시작
     
-    ✅ 수정: emergency_stop_callback 전달 추가 (기획서 5.2절)
+    ✅ [v1.1 수정] 다중 종목 구독 지원 추가 (기획서 5.1절)
     """
     global ws_client
     
     def message_handler(execution_data):
         handle_websocket_execution(execution_data, config, token_manager, telegram_bot, smart_monitor)
     
-    # ✅ 추가: emergency_stop_callback 전달
+    # WebSocket 클라이언트 생성
     ws_client = WebSocketClient(
         config, 
         token_manager, 
@@ -152,8 +200,8 @@ def start_websocket_for_regular_hours(config, token_manager, telegram_bot, smart
         emergency_stop_callback=emergency_stop  # 기획서 5.2절
     )
     
-    # ✅ 수정: 재연결 횟수 3회로 고정 (기획서 5.2절)
-    max_attempts = 3  # 기획서 5.2절: WebSocket 3회 재시도 후 실패 시 종지
+    # 재연결 횟수 3회로 고정 (기획서 5.2절)
+    max_attempts = 3
     attempt = 0
     
     while not shutdown_requested and attempt < max_attempts:
@@ -169,19 +217,118 @@ def start_websocket_for_regular_hours(config, token_manager, telegram_bot, smart
             logging.info(f"🔌 [정규장] WebSocket 연결 시도 ({attempt}/{max_attempts})")
             ws_client.start()
             
-            # WebSocket이 정상 실행되면 루프 종료
+            # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+            # 🔴 [v1.1 신규] 연결 성공 후 다중 종목 구독
+            # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+            # 연결이 성공할 때까지 대기 (최대 30초)
+            logging.info("⏳ WebSocket 연결 확인 중...")
+            for i in range(30):
+                if ws_client and hasattr(ws_client, 'is_connected') and ws_client.is_connected():
+                    logging.info("✅ WebSocket 연결 확인됨")
+                    break
+                time.sleep(1)
+            else:
+                logging.warning("⚠️ WebSocket 연결 상태 확인 실패 (30초 타임아웃)")
+                continue
+            
+            # 보유 종목 조회
+            holdings_symbols = get_holdings_symbols(config, token_manager)
+            
+            if holdings_symbols:
+                # 기획서 5.1: 다중 종목 구독 (최대 20건)
+                logging.info(f"📡 보유 종목 {len(holdings_symbols)}개 구독 시도...")
+                try:
+                    result = ws_client.subscribe_multiple(holdings_symbols)
+    
+                    # ✅ 추가: result 검증
+                    if not result or not isinstance(result, dict):
+                        logging.error("❌ WebSocket 구독 결과가 올바르지 않습니다")
+                        continue
+    
+                    subscribed = result.get('subscribed', [])
+                    pending = result.get('pending', [])
+                    skipped = result.get('skipped', [])
+                    subscribed_count = len(subscribed)
+                    pending_count = len(pending)
+                    skipped_count = len(skipped)
+    
+                    logging.info(f"✅ WebSocket 구독 완료: {subscribed_count}개")
+    
+                    # ✅ 추가: 구독 실패 처리
+                    if skipped_count > 0:
+                        logging.error(f"❌ 구독 실패: {skipped_count}개 (subscription_limit_exceeded)")
+                        skipped_preview = ', '.join(skipped[:5])
+                        if len(skipped) > 5:
+                            skipped_preview += f" 외 {len(skipped)-5}개"
+                        logging.error(f"📋 실패 종목: {skipped_preview}")
+    
+                    if pending_count > 0:
+                        logging.warning(f"⏳ 구독 대기: {pending_count}개 (기획서 5.1: 20건 제한)")
+                        pending_preview = ', '.join(pending[:5])
+                        if len(pending) > 5:
+                            pending_preview += f" 외 {len(pending)-5}개"
+                        logging.warning(f"📋 대기 종목: {pending_preview}")
+        
+                        # 텔레그램 알림
+                        if telegram_bot and hasattr(telegram_bot, 'send_message'):
+                            warning_msg = f"""⚠️ WebSocket 구독 제한
+
+                📊 구독 성공: {subscribed_count}개
+                ⏳ 대기 중: {pending_count}개
+
+                기획서 5.1: 2025년 11월 1일부터 WebSocket 구독 20건 제한
+                대기 중인 종목은 REST 폴링으로 모니터링됩니다."""
+                            telegram_bot.send_message(warning_msg)
+                    
+                    # 구독 성공 알림
+                    if telegram_bot and hasattr(telegram_bot, 'send_message'):
+                        subscribed_preview = ', '.join(subscribed[:5])
+                        if len(subscribed) > 5:
+                            subscribed_preview += f" 외 {len(subscribed)-5}개"
+                        
+                        success_msg = f"""✅ WebSocket 구독 시작
+
+📡 구독 종목: {subscribed_count}개
+📋 {subscribed_preview}
+🔔 실시간 모니터링 활성화"""
+                        telegram_bot.send_message(success_msg)
+                        
+                except Exception as e:
+                    logging.error(f"❌ 다중 종목 구독 실패: {e}")
+                    import traceback
+                    traceback.print_exc()
+                    # 실패해도 기본 종목은 이미 구독됨 (start() 시 자동 구독)
+
+            else:
+                logging.info("📋 보유 종목 없음 - 기본 종목만 구독")
+                # ✅ 추가: 기본 종목은 이미 on_open()에서 자동 구독됨
+                # WebSocketClient.__init__()에서 self.default_symbol 설정
+                # on_open() → self.subscribe(self.default_symbol) 호출
+                default_symbol = config.get('trading', {}).get('default_symbol', 'AAPL')
+                logging.info(f"📡 기본 종목 구독: {default_symbol} (자동)")
+    
+                # 텔레그램 알림
+                if telegram_bot and hasattr(telegram_bot, 'send_message'):
+                    info_msg = f"""ℹ️ WebSocket 구독 시작
+
+            📡 기본 종목: {default_symbol}
+            💡 보유 종목이 없어 기본 종목만 모니터링합니다."""
+                    telegram_bot.send_message(info_msg)
+
             break
             
         except Exception as e:
             logging.error(f"WebSocket 연결 실패 ({attempt}/{max_attempts}): {e}")
+            import traceback
+            traceback.print_exc()
+            
             if attempt < max_attempts and not shutdown_requested:
-                # ✅ 수정: 재연결 지연을 config에서 가져오되, 없으면 기본값 5초
                 base_delay = config.get('system', {}).get('base_reconnect_delay', 5)
                 delay = min(base_delay * (2 ** (attempt - 1)), 60)
                 logging.info(f"🔄 {delay}초 후 재시도합니다...")
                 time.sleep(delay)
     
-    # ✅ 추가: 3회 재시도 후 실패 시 경고 (WebSocketClient 내부에서 emergency_stop 호출됨)
+    # 3회 재시도 후 실패 시 경고
     if attempt >= max_attempts and not shutdown_requested:
         market_status = is_market_hours(config['trading']['timezone'])
         if market_status == 'regular':
@@ -206,66 +353,48 @@ def start_telegram_bot(config):
     """텔레그램 봇 시작"""
     global telegram_bot
     
-    telegram_bot_token = config.get('telegram_bot_token')
-    telegram_chat_id = config.get('telegram_chat_id')
-    
-    if telegram_bot_token and telegram_chat_id:
-        telegram_bot = TelegramBot(telegram_bot_token, telegram_chat_id, config)
-        
-        # start 메서드가 있는지 확인
+    try:
+        telegram_bot = TelegramBot(config)
         if hasattr(telegram_bot, 'start'):
             telegram_bot.start()
-        elif hasattr(telegram_bot, 'start_polling'):
-            # start 메서드가 없다면 직접 폴링 시작
-            polling_thread = threading.Thread(target=telegram_bot.start_polling, daemon=True)
-            polling_thread.start()
-        else:
-            logging.warning("⚠️ 텔레그램 봇의 시작 메서드를 찾을 수 없습니다.")
-            
-        logging.info("📱 텔레그램 봇이 시작되었습니다.")
+        logging.info("✅ 텔레그램 봇 초기화 완료")
         return telegram_bot
-    else:
-        logging.warning("⚠️ 텔레그램 설정이 없어 알림 서비스를 시작하지 않습니다.")
+    except Exception as e:
+        logging.warning(f"⚠️ 텔레그램 봇 초기화 실패 (선택사항): {e}")
         return None
 
 def adaptive_market_monitor(config, token_manager, telegram_bot):
     """
-    적응형 시장 모니터 - 시장 상태에 따른 서비스 자동 전환
+    적응형 시장 모니터 - 시장 상태에 따라 WebSocket/스마트폴링 자동 전환
     
-    ✅ 기획서 2.3절 준수: 시간대별 동작 모드
+    ✅ 기획서 2.3절 준수: 정규장 WebSocket, 프리마켓/애프터마켓 스마트폴링
     """
-    global ws_client, smart_monitor
+    global ws_client, smart_monitor, shutdown_requested
     
     last_status = None
-    websocket_thread = None
     websocket_running = False
+    websocket_thread = None
     
     while not shutdown_requested:
         try:
             current_status = is_market_hours(config['trading']['timezone'])
             
             if current_status != last_status:
-                logging.info(f"🕐 시장 상태 변경: {last_status} → {current_status}")
+                logging.info(f"🔄 시장 상태 변경: {last_status} → {current_status}")
                 
                 if current_status == 'regular':
-                    # ✅ 정규장 시작: WebSocket 활성화, 스마트 폴링 중지 (기획서 2.3절)
+                    # ✅ 정규장: WebSocket 활성화 (기획서 2.3절)
                     logging.info("🔄 정규장 시작 - WebSocket 모드로 전환")
                     
+                    # 스마트 모니터 중지
                     if smart_monitor and hasattr(smart_monitor, 'is_running') and smart_monitor.is_running:
                         if hasattr(smart_monitor, 'stop'):
                             smart_monitor.stop()
                         logging.info("⏸️ 스마트 폴링 중지됨")
-
-                    # WebSocket 중복 방지
+                    
+                    # WebSocket 시작
                     if not websocket_running:
-                        # 기존 WebSocket 정리
-                        if ws_client:
-                            try:
-                                if hasattr(ws_client, 'stop'):
-                                    ws_client.stop()
-                                logging.info("🔄 기존 WebSocket 정리")
-                            except Exception as e:
-                                logging.warning(f"⚠️ 기존 WebSocket 정리 중 오류: {e}")
+                        logging.info("🔌 WebSocket 스레드 생성 중...")
                         
                         # 새 WebSocket 시작
                         websocket_thread = threading.Thread(
@@ -351,8 +480,9 @@ def main():
     try:
         # 시스템 초기화
         logging.info(f"🚀 스마트 하이브리드 자동매매 시스템 시작 ({args.mode} 모드)")
-        logging.info("💡 기획서 v1.0 완전 준수 버전")
+        logging.info("💡 기획서 v1.1 완전 준수 버전")
         logging.info("✅ Rate Limit 안전 모드, 적응형 폴링, WebSocket 자동 전환")
+        logging.info("✅ WebSocket 구독 20건 제한 (2025년 11월 1일부터)")
         logging.info("✅ 정규장 WebSocket 3회 실패 시 시스템 종지 (기획서 5.2절)")
         
         config = load_config(args.mode)
@@ -372,7 +502,8 @@ def main():
 🕐 시장상태: {market_status}
 🧠 Rate Limit 안전모드
 ⚡ 적응형 폴링 활성화
-✅ 기획서 v1.0 준수
+✅ 기획서 v1.1 준수
+🔴 WebSocket 구독 20건 제한
 ⚠️ 정규장 WebSocket 3회 실패 시 시스템 종지"""
             if hasattr(telegram_bot, 'send_message'):
                 telegram_bot.send_message(message)
@@ -415,7 +546,32 @@ def main():
             try:
                 if status_count % 12 == 0:  # 1분마다 상태 출력
                     market_status = is_market_hours(config['trading']['timezone'])
-                    ws_status = "연결됨" if ws_client and hasattr(ws_client, 'is_connected') and ws_client.is_connected() else "대기 중"
+                    
+                    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+                    # 🔴 [v1.1 신규] WebSocket 구독 상태 확인
+                    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+                    ws_status = "대기 중"
+                    ws_subscribed_count = 0
+                    
+                    if ws_client and hasattr(ws_client, 'get_status'):
+                        try:
+                            ws_full_status = ws_client.get_status()
+                            ws_connected = ws_full_status.get('connected', False)
+                            ws_subscribed = ws_full_status.get('subscribed', False)
+                            ws_subscribed_count = ws_full_status.get('subscribed_count', 0)
+                            ws_max_subs = ws_full_status.get('max_subscriptions', 20)
+                            
+                            if ws_connected and ws_subscribed:
+                                ws_status = f"연결됨 ({ws_subscribed_count}/{ws_max_subs} 구독)"
+                            elif ws_connected:
+                                ws_status = "연결됨 (구독 대기)"
+                            else:
+                                ws_status = "대기 중"
+                        except Exception as e:
+                            logging.debug(f"WebSocket 상태 조회 오류: {e}")
+                            ws_status = "연결됨" if ws_client and hasattr(ws_client, 'is_connected') and ws_client.is_connected() else "대기 중"
+                    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+                    
                     monitor_count = smart_monitor.get_monitoring_count() if smart_monitor and hasattr(smart_monitor, 'get_monitoring_count') else 0
                     
                     # 스마트 모니터 통계
@@ -423,13 +579,31 @@ def main():
                         stats = smart_monitor.get_detailed_stats()
                         api_usage = stats.get('utilization_pct', 0)
                         total_requests = stats.get('total_requests', 0)
-                        logging.info(f"📊 상태: {market_status} | WS: {ws_status} | 모니터링: {monitor_count}건 | API: {api_usage} | 이요청: {total_requests}")
+                        logging.info(f"📊 상태: {market_status} | WS: {ws_status} | 모니터링: {monitor_count}건 | API: {api_usage} | 총요청: {total_requests}")
                         
                         # 10분마다 상세 통계 리포트
                         if status_count - last_stats_report >= 120:  # 10분
                             successful_detections = stats.get('successful_detections', 0)
                             rate_limit_errors = stats.get('rate_limit_errors', 0)
                             logging.info(f"📈 상세통계 - 성공감지: {successful_detections}회, Rate Limit 오류: {rate_limit_errors}회")
+                            
+                            # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+                            # 🔴 [v1.1 신규] WebSocket 구독 상세 정보
+                            # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+                            if ws_client and hasattr(ws_client, 'get_status'):
+                                try:
+                                    ws_detail = ws_client.get_status()
+                                    subscribed_symbols = ws_detail.get('subscribed_symbols', [])
+                                    pending_symbols = ws_detail.get('pending_symbols', [])
+                                    
+                                    if subscribed_symbols:
+                                        logging.info(f"📡 구독 중: {len(subscribed_symbols)}개 종목")
+                                    if pending_symbols:
+                                        logging.warning(f"⏳ 대기 중: {len(pending_symbols)}개 종목")
+                                except Exception as e:
+                                    logging.debug(f"WebSocket 상세 상태 조회 오류: {e}")
+                            # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+                            
                             last_stats_report = status_count
                     else:
                         logging.info(f"📊 상태: {market_status} | WS: {ws_status} | 모니터링: {monitor_count}건")
@@ -457,7 +631,7 @@ def main():
                 final_stats = smart_monitor.get_detailed_stats()
                 total_requests = final_stats.get('total_requests', 0)
                 successful_detections = final_stats.get('successful_detections', 0)
-                logging.info(f"📊 최종통계 - 이요청: {total_requests}, 성공감지: {successful_detections}")
+                logging.info(f"📊 최종통계 - 총요청: {total_requests}, 성공감지: {successful_detections}")
                 
             if smart_monitor and hasattr(smart_monitor, 'stop'):
                 smart_monitor.stop()

@@ -1,4 +1,4 @@
-# config.py - 한국투자증권 API 자동매매 시스템 환경설정 (기획서 v1.0 완전 준수)
+# config.py - 한국투자증권 API 자동매매 시스템 환경설정 (기획서 v1.1 완전 준수)
 
 import os
 import yaml
@@ -7,7 +7,7 @@ from dotenv import load_dotenv
 
 def load_config(mode='development'):
     """
-    환경 설정 로드 및 검증 (기획서 v1.0 완전 준수)
+    환경 설정 로드 및 검증 (기획서 v1.1 완전 준수)
     
     Parameters:
         mode (str): 'development' 또는 'production'
@@ -142,7 +142,7 @@ def load_config(mode='development'):
             raise ValueError("❌ config.yaml에 api.base_url이 정의되지 않았습니다.")
         
         # ✅ 11단계: 기획서 준수 검증
-        logging.info("🔍 기획서 v1.0 준수 여부 검증 시작...")
+        logging.info("🔍 기획서 v1.1 준수 여부 검증 시작...")
         if not validate_config(config):
             raise ValueError("❌ 설정 검증 실패")
 
@@ -175,7 +175,7 @@ def load_config(mode='development'):
 
 def apply_spec_defaults(config):
     """
-    ✅ 추가: 기획서 v1.0 기본값 적용
+    ✅ 추가: 기획서 v1.1 기본값 적용
     
     누락된 설정에 대해 기획서 기본값을 적용합니다.
     """
@@ -183,12 +183,14 @@ def apply_spec_defaults(config):
     if 'rate_limit' not in config:
         config['rate_limit'] = {}
     
+    # --- 수정 1 ---
     rate_limit_defaults = {
-        'requests_per_second': 20,      # 기획서: 초당 20회
+        'requests_per_second': 50,      # 기획서 v1.1: 초당 50회 (2025년 11월 1일부터)
         'daily_limit': 5000,             # 기획서: 일일 5,000회
         'hourly_limit': 500,             # 안전 마진 (시간당 약 500회)
         'minute_limit': 100              # 안전 마진 (분당 약 100회)
     }
+    # --- 수정 1 완료 ---
     
     for key, default_value in rate_limit_defaults.items():
         if key not in config['rate_limit']:
@@ -265,6 +267,23 @@ def apply_spec_defaults(config):
         }
         logging.info("💡 WebSocket 시간 범위 기본값 적용")
     
+    # --- 수정 2: WebSocket 구독 제한 설정 추가 ---
+    # ✅ 6-1. WebSocket 구독 제한 설정 (기획서 v1.1 - 5.1절)
+    if 'websocket' not in config:
+        config['websocket'] = {}
+
+    websocket_defaults = {
+        'max_subscriptions': 20,         # 기획서 v1.1: 최대 20건 구독 (2025년 11월 1일부터)
+        'fallback_to_rest': True,        # 20건 초과 시 REST 폴링 병행
+        'use_free_realtime': True        # 무료 실시간 시세 사용 (약 1초 지연)
+    }
+
+    for key, default_value in websocket_defaults.items():
+        if key not in config['websocket']:
+            config['websocket'][key] = default_value
+            logging.info(f"💡 WebSocket 설정 기본값 적용: {key}={default_value}")
+    # --- 수정 2 완료 ---
+
     # ✅ 7. 로깅 설정 (기획서 6.2절)
     if 'logging' not in config:
         config['logging'] = {
@@ -280,7 +299,7 @@ def apply_spec_defaults(config):
 
 def validate_config(config):
     """
-    설정 검증 함수 (기획서 v1.0 준수 여부 확인)
+    설정 검증 함수 (기획서 v1.1 준수 여부 확인)
     
     Parameters:
         config (dict): load_config()로 로드된 설정
@@ -346,11 +365,13 @@ def validate_config(config):
         # ✅ 7. Rate Limit 검증 (기획서 5.1절)
         rate_limit = config.get('rate_limit', {})
         
-        # 실제 제한 (공식)
+        # --- 수정 3 ---
+        # 실제 제한 (공식) - 기획서 v1.1 반영
         official_limits = {
-            'requests_per_second': 20,
+            'requests_per_second': 50,  # 2025년 11월 1일부터 20 → 50으로 증가
             'daily_limit': 5000
         }
+        # --- 수정 3 완료 ---
         
         # 초당 요청 제한 확인
         rps = rate_limit.get('requests_per_second', 0)
@@ -388,11 +409,29 @@ def validate_config(config):
             if 'interval_seconds' not in config['polling']:
                 logging.warning("⚠️ 폴링 주기(interval_seconds)가 설정되지 않았습니다.")
         
+        # --- 수정 4: WebSocket 구독 제한 검증 추가 ---
+        # ✅ 10-1. WebSocket 구독 제한 검증 (기획서 v1.1 - 5.1절)
+        if 'websocket' in config:
+            max_subs = config['websocket'].get('max_subscriptions')
+            if max_subs and max_subs > 20:
+                logging.warning(
+                    f"⚠️ WebSocket 구독 제한 초과: {max_subs}건\n"
+                    f"💡 기획서 v1.1: 최대 20건 (2025년 11월 1일부터)"
+                )
+            
+            use_free = config['websocket'].get('use_free_realtime', True)
+            if not use_free:
+                logging.warning(
+                    "⚠️ 유료 실시간 시세는 2025년 6월 19일부터 중단됨\n"
+                    "💡 기획서 v1.1: 무료 시세만 제공 (약 1초 지연)"
+                )
+        # --- 수정 4 완료 ---
+        
         # ✅ 10. 로깅 설정 검증 (기획서 6.2절)
         if 'logging' not in config:
             logging.warning("⚠️ 로깅 설정이 없습니다. 기본값 사용.")
         
-        logging.info("✅ 기획서 v1.0 준수 검증 완료")
+        logging.info("✅ 기획서 v1.1 준수 검증 완료")
         return True
     
     except Exception as e:

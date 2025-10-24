@@ -12,34 +12,61 @@ logger = logging.getLogger(__name__)
 
 class WebSocketClient:
     """
-    한국투자증권 WebSocket 클라이언트 - 기획서 v1.0 완전 준수 버전
+    한국투자증권 WebSocket 클라이언트 - 기획서 v1.1 완전 준수 버전
     
-    주요 변경사항:
+    주요 변경사항 (v1.1):
     1. 정규장 시간: ET 09:30-12:00 (기획서 2.2절)
     2. 재연결 횟수: 최대 3회 (기획서 5.2절 비상 증지 조건)
     3. WebSocket 실패 시 시스템 종지 로직 추가 (기획서 5.2절)
-    4. 비상 정지 콜백 메커니즘 추가
+    4. ✅ [v1.1 신규] WebSocket 구독 20건 제한 (기획서 5.1절)
+    5. ✅ [v1.1 신규] 우선순위 기반 구독 전략 (기획서 2.3절)
+    6. ✅ [v1.1 확인] 무료 실시간 시세 사용 (DNAS, 기획서 5.3절)
     """
 
     def __init__(self, config, token_manager, message_handler, emergency_stop_callback=None):
         self.config = config
         self.token_manager = token_manager
         self.message_handler = message_handler
-        self.emergency_stop_callback = emergency_stop_callback  # ✅ 추가: 시스템 종지 콜백
+        self.emergency_stop_callback = emergency_stop_callback
 
         # WebSocket 연결 상태
         self.ws = None
         self.connected = False
         self.subscribed = False
         self.reconnect_count = 0
-        self.max_reconnects = 3  # ✅ 변경: 10 → 3 (기획서 5.2절)
+        self.max_reconnects = 3  # 기획서 5.2절
         self.is_running = False
+
+        # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+        # 🔴 [v1.1 신규] WebSocket 구독 제한 설정
+        # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+        # 기획서 5.1: 2025년 11월 1일부터 WebSocket 구독 20건 제한
+        ws_config = self.config.get('polling', {}).get('regular', {}).get('websocket', {})
+        self.max_subscriptions = ws_config.get('max_subscriptions', 20)  # 기본값 20
+        self.subscription_strategy = ws_config.get('subscription_strategy', 'priority')  # priority/all
+        self.fallback_to_rest = ws_config.get('fallback_to_rest_polling', False)
+        
+        # 구독 중인 종목 리스트
+        self.subscribed_symbols = []  # 현재 구독 중인 종목들
+        self.pending_symbols = []     # 구독 대기 중인 종목들
+        
+        logger.info(f"🔧 WebSocket 구독 설정: 최대 {self.max_subscriptions}건, 전략: {self.subscription_strategy}")
+        # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
         # 설정값
         self.ws_url = self._fix_websocket_url(self.config['api'].get('websocket_url'))
         self.custtype = self.config.get('custtype', 'P')
         self.tr_type = self.config.get('trtype', '1')
         self.default_symbol = self.config.get('trading', {}).get('default_symbol', 'AAPL')
+
+        # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+        # 🔴 [v1.1 신규] 실시간 시세 타입 설정
+        # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+        # 기획서 5.3: 무료 시세만 제공 (약 1초 지연)
+        quote_config = self.config.get('polling', {}).get('regular', {}).get('realtime_quote', {})
+        self.quote_prefix = quote_config.get('websocket_prefix', 'D')  # D=무료, R=유료(중단)
+        logger.info(f"🔧 실시간 시세 타입: {self.quote_prefix}NAS (D=무료/약1초지연, R=유료/중단)")
+        # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
         # 자동 갱신 타이머
         self.last_approval_key_refresh = time.time()
@@ -56,7 +83,7 @@ class WebSocketClient:
         """
         미국 정규장 시간인지 확인 (ET 09:30-12:00)
         
-        ✅ 수정: 기획서 2.2절에 따라 ET 16:00 → 12:00으로 변경
+        ✅ 기획서 2.2절: ET 09:30-12:00 (기존 16:00에서 변경)
         
         Returns: bool - 정규장이면 True
         """
@@ -65,7 +92,7 @@ class WebSocketClient:
             et_now = datetime.now(et_tz).time()
             
             regular_start = dtime(9, 30)   # 09:30 ET
-            regular_end = dtime(12, 0)     # ✅ 변경: 16:00 → 12:00 (기획서 2.2절)
+            regular_end = dtime(12, 0)     # 12:00 ET (기획서 2.2절)
             
             is_regular = regular_start <= et_now <= regular_end
             
@@ -78,10 +105,112 @@ class WebSocketClient:
             logger.warning(f"시간 판별 오류: {e}, 기본값(정규장) 사용")
             return True  # 오류 시 연결 허용
 
+    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    # 🔴 [v1.1 신규] 다중 종목 구독 메서드
+    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    def subscribe_multiple(self, symbols):
+        """
+        여러 종목을 구독합니다 (기획서 5.1: 최대 20건)
+        
+        Parameters:
+            symbols (list): 구독할 종목 코드 리스트 (예: ['AAPL', 'TSLA', 'NVDA'])
+        
+        Returns:
+            dict: 구독 결과 정보
+        """
+        if not symbols:
+            logger.warning("⚠️ 구독할 종목이 없습니다")
+            return {
+                'success': False,
+                'subscribed': [],
+                'pending': [],
+                'skipped': []
+            }
+        
+        total_symbols = len(symbols)
+        logger.info(f"📋 구독 요청: {total_symbols}개 종목")
+        
+        # 기획서 5.1: 20건 제한 체크
+        if total_symbols > self.max_subscriptions:
+            logger.warning(f"⚠️ 구독 요청 {total_symbols}개 > 제한 {self.max_subscriptions}개")
+            
+            if self.subscription_strategy == 'priority':
+                # 우선순위 전략: 앞에서 20개만 구독
+                symbols_to_subscribe = symbols[:self.max_subscriptions]
+                pending_symbols = symbols[self.max_subscriptions:]
+                
+                logger.warning(f"📊 우선순위 전략: {len(symbols_to_subscribe)}개 구독, "
+                             f"{len(pending_symbols)}개 대기")
+                
+                # 기획서 5.2: 구독 부족 시 경고
+                if self.emergency_stop_callback and not self.fallback_to_rest:
+                    logger.critical(f"🚨 WebSocket 구독 부족: {total_symbols}개 요청 > {self.max_subscriptions}개 제한")
+                    # 경고만 하고 계속 진행 (사용자 판단 필요)
+                
+            elif self.subscription_strategy == 'all':
+                # 전체 구독 시도 전략: 20개 제한 초과 시 경고
+                logger.error(f"❌ 구독 불가: {total_symbols}개 > {self.max_subscriptions}개 (전략: all)")
+                
+                # 기획서 5.2: 비상 종지 조건
+                if self.emergency_stop_callback:
+                    logger.critical(f"🛑 WebSocket 구독 한도 초과 - 시스템 종지 필요 (기획서 5.2절)")
+                    self.emergency_stop_callback(f"WebSocket 구독 한도 초과 ({total_symbols} > {self.max_subscriptions})")
+                
+                return {
+                    'success': False,
+                    'subscribed': [],
+                    'pending': [],
+                    'skipped': symbols,
+                    'error': 'subscription_limit_exceeded'
+                }
+        else:
+            symbols_to_subscribe = symbols
+            pending_symbols = []
+        
+        # 구독 실행
+        subscribed = []
+        failed = []  # ✅ 추가: 실패 종목 추적
+        for symbol in symbols_to_subscribe:
+            try:
+                if self.subscribe(symbol):
+                    subscribed.append(symbol)
+                    logger.debug(f"✅ 구독 성공: {symbol}")
+                else:
+                    failed.append(symbol)
+                    logger.warning(f"⚠️ 구독 실패: {symbol}")
+            except Exception as e:
+                failed.append(symbol)
+                logger.error(f"❌ 구독 오류: {symbol} - {e}")
+        
+            time.sleep(0.1) # API 부하 방지
+        
+        self.subscribed_symbols = subscribed
+        self.pending_symbols = pending_symbols
+      
+        if failed:
+            logger.warning(f"⚠️ {len(failed)}개 종목 구독 실패: {', '.join(failed[:5])}")
+
+        logger.info(f"✅ 구독 완료: {len(subscribed)}개 종목")
+        if pending_symbols:
+            logger.warning(f"⏳ 대기 중: {len(pending_symbols)}개 종목 (REST 폴링 권장)")
+        
+        return {
+            'success': True,
+            'subscribed': subscribed,
+            'pending': pending_symbols,
+            'failed': failed,  # ✅ 추가
+            'skipped': []
+        }
+    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
     def _create_subscribe_message(self, symbol=None):
         """
         한국투자증권 WebSocket 실시간 체결 구독 요청 메시지 생성
-        symbol : 구독할 종목 코드 (예: 'AAPL')
+        
+        ✅ [v1.1 확인] 무료 시세 사용: DNAS{ticker} (기획서 5.3절)
+        
+        Parameters:
+            symbol (str): 구독할 종목 코드 (예: 'AAPL')
         """
         approval_key = self.token_manager.get_approval_key()
         if not approval_key:
@@ -89,9 +218,15 @@ class WebSocketClient:
             return None
     
         ticker = symbol or self.default_symbol
-        tr_key = f"DNAS{ticker}"  # 기본적으로 나스닥으로 설정
+        
+        # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+        # 🔴 [v1.1 수정] config.yaml에서 시세 타입 읽기
+        # 기획서 5.3: 무료 시세만 제공 (DNAS, 약 1초 지연)
+        # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+        tr_key = f"{self.quote_prefix}NAS{ticker}"  # DNAS{ticker} (무료)
+        logger.info(f"📡 구독 TR_KEY: {tr_key} (prefix={self.quote_prefix}, ticker={ticker})")
+        # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-        # ✅ --- 수정 3: `pdno` 제거 ---
         subscribe_message = {
             "header": {
                 "approval_key": approval_key,
@@ -103,17 +238,15 @@ class WebSocketClient:
                 "input": {
                     "tr_id": "HDFSCNT0",
                     "tr_key": tr_key
-                    # ✅ pdno 제거 (필요 없을 수 있음)
                 }
             }
         }
-        # ✅ --- 수정 3 완료 ---
 
         logger.info("=" * 60)
         logger.info("📋 WebSocket 구독 메시지 생성")
         logger.info(f"  - TR_ID: HDFSCNT0")
         logger.info(f"  - TR_KEY: {tr_key}")
-        logger.info(f"  - PDNO: {ticker}")
+        logger.info(f"  - TICKER: {ticker}")
         logger.info(f"  - Approval Key: {approval_key[:20]}...")
         logger.info("=" * 60)
         logger.debug(f"전체 메시지:\n{json.dumps(subscribe_message, indent=2)}")
@@ -143,39 +276,52 @@ class WebSocketClient:
     def subscribe(self, symbol=None):
         """
         구독 요청 전송 메서드
+        
+        Parameters:
+            symbol (str): 구독할 종목 코드
+        
+        Returns:
+            bool: 구독 성공 여부
         """
         if not self.ws or not self.connected:
             logger.error("❌ WS 연결이 없거나 연결 상태가 아닙니다. 구독 전송 불가")
-            return
+            return False
+
+        # 기획서 5.1: 구독 건수 제한 체크
+        if len(self.subscribed_symbols) >= self.max_subscriptions:
+            logger.warning(f"⚠️ 구독 한도 도달: {len(self.subscribed_symbols)}/{self.max_subscriptions}")
+            return False
 
         msg = self._create_subscribe_message(symbol)
         if msg:
             try:
                 self.ws.send(msg)
-                logger.info(f"▶ WebSocket 구독 메시지 전송 (raw): {msg}")
+                logger.info(f"▶ WebSocket 구독 메시지 전송 ({symbol}): {msg[:100]}...")
+                return True
             except Exception as e:
                 logger.error(f"❌ 구독 메시지 전송 오류: {e}", exc_info=True)
+                return False
         else:
             logger.error("❌ 구독 메시지 생성 실패")
+            return False
 
     def on_open(self, ws):
         logger.info("🚀 WebSocket 연결 성공")
         self.connected = True
         self.reconnect_count = 0
         
-        # 자동 구독
+        # 자동 구독 (단일 종목)
         self.subscribe(self.default_symbol)
         
-        # ✅ --- 수정 2: 구독 확인 타이머 연장 ---
-        # 구독 확인 후 재시도 로직
+        # 구독 확인 타이머
         def check_subscription():
-            time.sleep(10)  # ✅ 변경: 5초 → 10초 (서버 응답 대기)
+            time.sleep(10)  # 10초 대기
             if not self.subscribed and self.connected:
                 logger.warning("⚠️ 10초 경과, 구독 미확인 상태 - 재시도 중...")
                 self.subscribe(self.default_symbol)
                                 
-                # 추가 재시도 (20초 후 한 번 더)
-                time.sleep(20)  # ✅ 변경: 10초 → 20초
+                # 추가 재시도 (20초 후)
+                time.sleep(20)
                 if not self.subscribed and self.connected:
                     logger.warning("⚠️ 30초 경과, 구독 재시도 2차 시도")
                     self.subscribe(self.default_symbol)
@@ -184,28 +330,34 @@ class WebSocketClient:
                     time.sleep(30)
                     if not self.subscribed and self.connected:
                         logger.error("❌ 60초 경과, 구독 실패 - 서버 응답 없음")
-        # ✅ --- 수정 2 완료 ---
         
         threading.Thread(target=check_subscription, daemon=True).start()
 
-    # ✅ --- 수정 1: on_message() 함수 전체 교체 (구독 승인 로직 추가) ---
     def on_message(self, ws, message):
-        # ⚠️ 디버깅: 모든 메시지 출력
+        """
+        WebSocket 메시지 수신 처리
+        
+        ✅ [v1.1 확인] 무료 시세 데이터 처리 (HDFSCNT0)
+        """
+        # 디버깅: 모든 메시지 출력
         print(f"🔥🔥🔥 RAW MESSAGE: {message}")
         logger.info(f"🔥🔥🔥 RAW MESSAGE: {message}")
                 
         try:
             logger.info(f"📥 WebSocket 수신 원본: {message[:500]}")
+            
             # PING/PONG 처리
             if "PINGPONG" in message or "PONG" in message:
                 logger.debug(f"▶ WebSocket PING/PONG: {message}")
                 return
+            
             # JSON 파싱 시도
             try:
                 data = json.loads(message)
             except json.JSONDecodeError:
                 logger.debug(f"Non-JSON 메시지: {message}")
                 return
+            
             # 헤더 확인
             header = data.get("header", {})
             tr_id = header.get("tr_id", "")
@@ -214,33 +366,26 @@ class WebSocketClient:
             # 바디 확인
             body = data.get("body", {})
                         
-            # ✅ 추가: 구독 승인 응답 처리
-            # 서버가 보내는 응답 코드 확인
+            # 구독 승인 응답 처리
             rt_cd = body.get("rt_cd", "")
                         
-            # 구독 승인 응답 (rt_cd가 있고 tr_id가 우리가 요청한 것과 같음)
             if rt_cd != "":
-                if rt_cd == "0":  # 성공
-                    logger.info(f"✅ WebSocket 구독 승인 성공! (tr_id={tr_id}, tr_key={tr_key})")
-                    if not self.subscribed:
-                        self.subscribed = True
-                        logger.info("✅ WebSocket 구독 상태 확인 완료")
-                else:  # 오류
-                    msg1 = body.get("msg1", "알 수 없는 오류")
-                    msg_cd = body.get("msg_cd", "")
-                    logger.error(f"❌ WebSocket 구독 거부! rt_cd={rt_cd}, msg_cd={msg_cd}, msg={msg1}")
-                    logger.error(f"❌ 전체 응답: {data}")
-                                        
-                    # 승인키 오류
-                    if "approval" in msg1.lower():
-                        logger.warning("🔑 승인키 관련 오류, 갱신 시도")
-                        self._refresh_approval_key_if_needed()
-                        time.sleep(2)
-                        self.subscribe(self.default_symbol)
-                                        
-                    # tr_key 오류
-                    elif "tr_key" in msg1.lower() or "tr_id" in msg1.lower():
-                        logger.info("🔄 tr_key/tr_id 오류로 인한 구독 재시도")
+                # 구독 승인/거부 응답
+                msg1 = body.get("msg1", "")
+                
+                if rt_cd == "0":
+                    # 구독 성공
+                    logger.info(f"✅ WebSocket 구독 승인: {tr_id} / {tr_key}")
+                    logger.info(f"📝 서버 메시지: {msg1}")
+                    self.subscribed = True
+                else:
+                    # 구독 실패
+                    logger.error(f"❌ WebSocket 구독 거부: {rt_cd}")
+                    logger.error(f"📝 서버 오류 메시지: {msg1}")
+                    
+                    # 승인키 문제일 가능성
+                    if "approval" in msg1.lower() or "인증" in msg1:
+                        logger.warning("🔑 승인키 관련 오류 - 2초 후 재구독 시도")
                         time.sleep(2)
                         self.subscribe(self.default_symbol)
                                 
@@ -248,7 +393,7 @@ class WebSocketClient:
             
             # HDFSCNT0 실시간지연체결가 데이터 처리
             if tr_id == "HDFSCNT0":
-                # 첫 데이터 수신 = 구독 성공 (응답이 없을 경우 대비)
+                # 첫 데이터 수신 = 구독 성공
                 if not self.subscribed:
                     logger.info("✅ WebSocket 구독 성공 (첫 데이터 수신)")
                     self.subscribed = True
@@ -257,12 +402,13 @@ class WebSocketClient:
                         
         except Exception as e:
             logger.error(f"❌ on_message 처리 중 예외: {e}", exc_info=True)
-    # ✅ --- 수정 1 완료 ---
 
     def _handle_realtime_price_message(self, body):
         """
         실시간지연체결가(HDFSCNT0) 데이터 처리
-
+        
+        ✅ [v1.1 확인] 무료 시세 데이터 (약 1초 지연)
+        
         응답 필드:
         - SYMB: 종목코드
         - LAST: 현재가
@@ -333,7 +479,7 @@ class WebSocketClient:
             1008: "정책 위반으로 인한 종료",
             4000: "인증 실패 또는 승인키 오류",
             4001: "잘못된 요청 형식",
-            4002: "구독 한도 초과"
+            4002: "구독 한도 초과"  # ✅ [v1.1] WebSocket 20건 제한 관련
         }
         
         reason = reason_map.get(close_status_code, f"알 수 없는 종료 사유 (코드: {close_status_code})")
@@ -341,6 +487,18 @@ class WebSocketClient:
         
         if close_msg:
             logger.warning(f"📝 서버 메시지: {close_msg}")
+        
+        # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+        # 🔴 [v1.1 신규] 구독 한도 초과 오류 처리
+        # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+        if close_status_code == 4002:
+            logger.critical(f"🚨 WebSocket 구독 한도 초과 (코드 4002)")
+            logger.critical(f"📊 현재 구독: {len(self.subscribed_symbols)}개, 제한: {self.max_subscriptions}개")
+            
+            # 기획서 5.2: 비상 종지 조건
+            if self.emergency_stop_callback:
+                self.emergency_stop_callback("WebSocket 구독 한도 초과 (코드 4002)")
+        # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
             
         # 승인키 관련 오류 시 갱신 시도
         if close_status_code in [4000, 4001]:
@@ -355,7 +513,7 @@ class WebSocketClient:
             logger.warning("WebSocket 이미 실행 중")
             return
 
-        # ✅ 정규장 시간 체크 (기획서 2.3절)
+        # 기획서 2.3: 정규장 시간 체크
         if not self._is_regular_market():
             logger.info("🌙 현재는 정규장이 아닙니다. WebSocket 대신 REST 폴링 모드 사용 권장.")
             return
@@ -409,7 +567,7 @@ class WebSocketClient:
     
                         time.sleep(delay)
             
-            # ✅ 추가: 정규장에서 재연결 횟수 초과 시 시스템 종지 (기획서 5.2절)
+            # 기획서 5.2: 정규장에서 재연결 횟수 초과 시 시스템 종지
             if self.reconnect_count >= self.max_reconnects:
                 if self._is_regular_market():
                     logger.critical(f"🛑 정규장에서 WebSocket {self.max_reconnects}회 연결 실패 - 시스템 종지 (기획서 5.2절)")
@@ -438,6 +596,9 @@ class WebSocketClient:
         """연결 및 구독 상태 확인"""
         return self.connected and self.subscribed
 
+    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    # 🔴 [v1.1 신규] 상태 정보에 구독 정보 추가
+    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
     def get_status(self):
         """상세 상태 정보 반환"""
         return {
@@ -448,8 +609,16 @@ class WebSocketClient:
             'url': self.ws_url,
             'symbol': self.default_symbol,
             'last_approval_refresh': datetime.fromtimestamp(self.last_approval_key_refresh).strftime('%Y-%m-%d %H:%M:%S'),
-            'is_regular_market': self._is_regular_market()
+            'is_regular_market': self._is_regular_market(),
+            # ✅ [v1.1 신규] 구독 정보
+            'subscribed_symbols': self.subscribed_symbols,
+            'subscribed_count': len(self.subscribed_symbols),
+            'max_subscriptions': self.max_subscriptions,
+            'pending_symbols': self.pending_symbols,
+            'subscription_strategy': self.subscription_strategy,
+            'quote_type': f"{self.quote_prefix}NAS (무료)" if self.quote_prefix == 'D' else f"{self.quote_prefix}NAS (유료)"
         }
+    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
     def force_reconnect(self):
         """강제 재연결"""

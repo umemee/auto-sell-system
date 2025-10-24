@@ -1,4 +1,4 @@
-# telegram_bot.py - 기획서 v1.0 완전 준수 버전
+# telegram_bot.py - 기획서 v1.1 완전 준수 버전 (WebSocket 구독 제한 알림 추가)
 
 import requests
 import logging
@@ -12,7 +12,7 @@ from collections import defaultdict
 
 class TelegramBot:
     """
-    텔레그램 봇 (기획서 v1.0 완전 준수)
+    텔레그램 봇 (기획서 v1.1 완전 준수)
     
     주요 기능:
     - 시스템 시작/종료 알림 (기획서 6.1절)
@@ -21,6 +21,7 @@ class TelegramBot:
     - 오류 알림 (기획서 6.1절)
     - 일일 통계 요약 (기획서 6.1절)
     - 알림 중복 방지
+    - [v1.1] WebSocket 구독 제한 알림
     """
     
     def __init__(self, bot_token, chat_id, config=None):
@@ -117,8 +118,10 @@ class TelegramBot:
 • 수익률 목표: +3% (기획서 4.1절)
 • 폴링 간격: {self.polling_interval}초
 
-<b>기획서 v1.0 준수 시스템</b>
-✅ Rate Limit 안전 모드
+📋 기획서 v1.1 준수 시스템
+✅ REST API: 50건/초 → 37건/초 (75% 안전 마진)
+✅ WebSocket 구독: 최대 20건 (2025.11.1~)
+✅ 무료 실시간 시세 (DNAS)
 ✅ 적응형 폴링
 ✅ WebSocket 자동 전환
 
@@ -261,6 +264,7 @@ class TelegramBot:
 ⚠️ 시스템이 곧 자동 종지됩니다
 """
             return self.send_message(message.strip(), force=True)
+
         else:
             message = f"""
 ⚠️ <b>WebSocket 재연결 시도</b>
@@ -271,6 +275,42 @@ class TelegramBot:
 연결을 복구하려고 시도하고 있습니다.
 """
             return self.send_message(message.strip(), alert_type="websocket_reconnect")
+
+    # --- 신규 함수 추가 ---
+    def send_websocket_subscription_limit_alert(self, subscribed_count, pending_count, total_count):
+        """
+        ✅ [v1.1 신규] WebSocket 구독 제한 알림 (기획서 v1.1, 5.1절)
+        20건 제한으로 일부 종목이 구독되지 못할 경우
+        
+        Parameters:
+            subscribed_count (int): 구독 성공 종목 수
+            pending_count (int): 구독 대기 종목 수
+            total_count (int): 전체 보유 종목 수
+        """
+        # 대기 중인 종목이 없으면 알림하지 않음
+        if pending_count == 0:
+            return False
+        
+        message = f"""
+⚠️ <b>WebSocket 구독 제한</b>
+
+📊 구독 현황:
+• 구독 성공: {subscribed_count}개
+• 구독 대기: {pending_count}개
+• 전체 보유: {total_count}개
+
+📋 기획서 v1.1 (5.1절):
+2025년 11월 1일부터 WebSocket 구독 20건 제한
+
+✅ 대응 방안:
+• 우선순위 높은 {subscribed_count}개 실시간 감시
+• 나머지 {pending_count}개는 REST 폴링 (선택적)
+
+ℹ️ 시스템은 정상 작동하고 있습니다.
+시간: {datetime.now().strftime('%H:%M:%S')}
+"""
+        return self.send_message(message.strip(), alert_type="ws_subscription_limit")
+    # --- 신규 함수 추가 완료 ---
 
     def send_account_query_failure_alert(self, error_message):
         """✅ 추가: 계좌 정보 조회 실패 알림 (기획서 5.2절, 6.1절)"""
@@ -384,7 +424,7 @@ class TelegramBot:
 🚨 <b>긴급 시스템 종지</b>
 
 • 종지 사유: <b>{reason}</b>
-• 시각: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
+• 시각: {datetime.now().strftime('%H:%M:%S')}
 
 <b>기획서 5.2절: 비상 증지 조건 충족</b>
 
@@ -518,25 +558,32 @@ class TelegramBot:
 
             elif command == '/help':
                 message = f"""
-📚 <b>도움말</b>
+📚 도움말
 
-<b>명령어 목록:</b>
+명령어 목록:
 • /start - 봇 시작 및 소개
 • /status - 현재 시스템 상태 확인
 • /stats - 실시간 거래 통계
 • /stop - 시스템 안전 종료
 • /help - 이 도움말 보기
 
-<b>기능:</b>
+기능:
 • 미국 주식 매수 체결 실시간 감시
 • 자동 +3% 매도 주문 실행
 • 실시간 알림 서비스
 
-<b>기획서 v1.0 준수:</b>
-• Rate Limit 안전 모드
+📋 기획서 v1.1 준수 (2025-10-24):
+• REST API: 50건/초 (75% 마진으로 37건/초)
+• WebSocket 구독: 최대 20건 (2025.11.1~)
+• 무료 실시간 시세 (DNAS)
 • 적응형 폴링
 • WebSocket 자동 전환
 • 비상 정지 메커니즘
+
+운영 시간 (ET 기준):
+• 프리마켓: 04:00-09:30 (REST 폴링)
+• 정규장: 09:30-12:00 (WebSocket)
+• 수면: 12:00-04:00 (시스템 종료)
 
 문의사항이 있으시면 관리자에게 연락하세요.
 """

@@ -31,18 +31,20 @@ except ImportError:
 
 class SmartOrderMonitor:
     """
-    Smart Order Monitor System (Specification v1.0)
+    Smart Order Monitor System (기획서 v1.1 완전 준수)
     
     Operating Hours (ET):
     - Pre-market: 04:00-09:30 (REST Polling with Smart Intervals)
     - Regular Hours: 09:30-12:00 (WebSocket Real-time)
     - Sleep Mode: 12:00-04:00 (System Off)
     
-    Key Features:
+    Key Features (기획서 v1.1):
     - Spec 3.1: Smart polling (3s/10s intervals)
-    - Spec 5.1: Rate limit protection (15 req/sec)
+    - Spec 5.1: Rate limit protection (50 req/sec → 37 req/sec with 75% margin)
+    - Spec 5.1: WebSocket 구독 20건 제한 (2025년 11월 1일부터)
     - Spec 2.3: WebSocket failure → System stop
     - Spec 4.4: Sell failure → Immediate abandon
+    - Spec 5.3: 무료 실시간 시세 사용 (DNAS)
     """
 
     def __init__(self, config, token_manager, telegram_bot=None):
