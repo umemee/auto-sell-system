@@ -6,8 +6,9 @@ import signal
 import sys
 import argparse
 import threading
+import os
 from logging.handlers import RotatingFileHandler
-
+from dotenv import load_dotenv
 from config import load_config
 from auth import TokenManager
 from websocket_client import WebSocketClient
@@ -350,17 +351,35 @@ def start_smart_monitor(config, token_manager, telegram_bot):
         logging.info(f"⏸️ [정규장] 스마트 폴링 대기 중...")
 
 def start_telegram_bot(config):
-    """텔레그램 봇 시작"""
+    """✅ 텔레그램 봇 초기화 및 시작 (기획서 6.1절)"""
     global telegram_bot
-    
     try:
-        telegram_bot = TelegramBot(config)
+        # ✅ 수정: config에서 bot_token과 chat_id 추출
+        telegram_config = config.get('telegram', {})
+        bot_token = telegram_config.get('bot_token') or os.getenv('TELEGRAM_BOT_TOKEN')
+        chat_id = telegram_config.get('chat_id') or os.getenv('TELEGRAM_CHAT_ID')
+        
+        # bot_token과 chat_id 검증
+        if not bot_token or not chat_id:
+            logging.warning("⚠️ 텔레그램 설정 누락 (TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID)")
+            return None
+        
+        # ✅ 수정: 개별 파라미터로 전달
+        telegram_bot = TelegramBot(
+            bot_token=bot_token,
+            chat_id=chat_id,
+            config=config
+        )
+        
         if hasattr(telegram_bot, 'start'):
             telegram_bot.start()
-        logging.info("✅ 텔레그램 봇 초기화 완료")
+            logging.info("✅ 텔레그램 봇이 시작되었습니다.")
+        
         return telegram_bot
     except Exception as e:
         logging.warning(f"⚠️ 텔레그램 봇 초기화 실패 (선택사항): {e}")
+        import traceback
+        traceback.print_exc()
         return None
 
 def adaptive_market_monitor(config, token_manager, telegram_bot):
