@@ -246,7 +246,9 @@ class SmartOrderMonitor:
             if new_mode == 'closed':
                 self.handle_sleep_mode()
             elif new_mode == 'regular':
-                self.start_websocket_mode()
+                # [수정] WebSocket 대신 REST 폴링 사용
+                self.stop_websocket_mode() # 혹시 모르니 중지
+                logger.info("🧠 정규장 REST 폴링 모드 활성화")
             elif new_mode == 'premarket':
                 self.stop_websocket_mode()
             
@@ -323,54 +325,67 @@ class SmartOrderMonitor:
         Spec 3.2: Calculate smart polling interval
         
         Pre-market intervals:
-        - High activity (04:00-05:00, 08:00-09:30): 3 seconds
-        - Low activity (05:00-08:00): 10 seconds
-        """
-        if self.current_mode == 'regular':
-            return 3600  # WebSocket mode - no polling needed
+        - 05:00-09:30: 6 seconds (uniform)
         
+        Regular hours intervals (REST polling):
+        - High activity (09:30-09:40): 3 seconds
+        - Low activity (09:40-12:00): 10 seconds
+        """
         if self.current_mode == 'closed':
             return 3600  # Sleep mode
         
-        if self.current_mode == 'premarket':
-            # Spec 3.2: Determine high/low activity period
+        # ✅ 정규장 REST 폴링 주기 (기획서 수정)
+        if self.current_mode == 'regular':
             try:
                 trading_tz = self.config.get('order_settings', {}).get('timezone', 'US/Eastern')
                 tz = timezone(trading_tz)
                 now_time = datetime.now(tz).time()
                 
-                # High activity periods (Spec 3.2)
-                high_activity_periods = [
-                    (dtime(4, 0), dtime(5, 0)),    # 04:00-05:00
-                    (dtime(8, 0), dtime(9, 30))    # 08:00-09:30
-                ]
+                # Spec 3.2: 정규장 시간대별 폴링 주기
+                # 09:30-09:40: 3초 (high_activity)
+                high_start = dtime(9, 30)
+                high_end = dtime(9, 40)
                 
-                for start, end in high_activity_periods:
-                    if start <= now_time < end:
-                        return self.premarket_config.get('interval_seconds', {}).get('high_activity', 3)
+                if high_start <= now_time < high_end:
+                    interval = self.config['polling']['regular']['interval_seconds'].get('high_activity', 3)
+                    logger.debug(f"정규장 고활성 구간: {interval}초")
+                    return interval
                 
-                # Low activity period (05:00-08:00)
-                return self.premarket_config.get('interval_seconds', {}).get('low_activity', 10)
-                
+                # 09:40-12:00: 10초 (low_activity)
+                interval = self.config['polling']['regular']['interval_seconds'].get('low_activity', 10)
+                logger.debug(f"정규장 저활성 구간: {interval}초")
+                return interval
+            
             except Exception as e:
-                logger.error(f"Polling interval calculation error: {e}")
-                return 5  # Safe default
+                logger.error(f"정규장 폴링 주기 계산 오류: {e}")
+                return 5  # 안전 기본값
         
-        return 5  # Safe default
+        if self.current_mode == 'premarket':
+            # 프리마켓: uniform 6초
+            try:
+                interval = self.premarket_config.get('interval_seconds', {}).get('uniform', 6)
+                logger.debug(f"프리마켓: {interval}초")
+                return interval
+            except Exception as e:
+                logger.error(f"프리마켓 폴링 주기 계산 오류: {e}")
+                return 6  # 안전 기본값
+        
+        return 5  # 안전 기본값
 
     def can_make_request(self):
         """
         Spec 5.1: Check if API request can be made
         
         Rate limits:
-        - 15 requests/second (75% of official 20/sec limit)
+        - 37 requests/second (75% of official 50/sec limit)
         - 500 requests/hour
         - 5000 requests/day
         """
         self.reset_counters_if_needed()
         
-        # Spec 2.3: No REST API requests in regular or closed mode
-        if self.current_mode in ['regular', 'closed']:
+        # ✅ 정규장에서도 REST API 허용 (기획서 수정)
+        # Spec 2.3: No REST API requests in closed mode only
+        if self.current_mode == 'closed':
             return False
         
         # Spec 5.1: Minimum interval check (0.07 seconds = 1/15)
@@ -974,13 +989,13 @@ class SmartOrderMonitor:
                         time.sleep(300)  # 5 min wait in sleep mode
                         continue
                 
-                # Spec 2.3: In regular hours (WebSocket), skip REST polling
-                if self.current_mode == 'regular':
-                    logger.debug("⚡ WebSocket mode active... No REST polling")
-                    time.sleep(5)  # Prevent CPU spinning
-                    continue
+                # [수정] WebSocket 모드(정규장) 스킵 로직 제거
+                # if self.current_mode == 'regular':
+                #    logger.debug("⚡ WebSocket mode active... No REST polling")
+                #    time.sleep(5)  # Prevent CPU spinning
+                #    continue
                 
-                # ▼ Pre-market REST polling logic ▼
+                # ▼ Pre-market / Regular REST polling logic ▼
                 
                 # Scan for new buy orders every 15 seconds
                 current_time = time.time()
@@ -991,7 +1006,9 @@ class SmartOrderMonitor:
                 
                 # If no orders to monitor, wait
                 if not self.monitoring_orders:
-                    time.sleep(30)
+                    # [수정] 모드별 대기 시간
+                    sleep_time = 30 if self.current_mode == 'premarket' else 10
+                    time.sleep(sleep_time)
                     continue
                 
                 # Clean up expired orders
@@ -1069,10 +1086,9 @@ class SmartOrderMonitor:
                     time.sleep(max(1, self.rate_config.get('min_request_interval', 0.07)))
                 
                 # Mode-specific wait times
-                if self.current_mode == 'premarket':
-                    time.sleep(2)
-                else:
-                    time.sleep(60)
+                # [수정] 모드별 대기 시간
+                sleep_interval = 2 if self.current_mode == 'premarket' else 1
+                time.sleep(sleep_interval)
                 
                 # Periodic state save
                 if processed_count > 0 and processed_count % 20 == 0:
@@ -1103,9 +1119,9 @@ class SmartOrderMonitor:
         self.current_mode = self.get_current_trading_mode()
         self.is_running = True
         
-        # Start WebSocket if in regular hours
-        if self.current_mode == 'regular':
-            self.start_websocket_mode()
+        # [수정] WebSocket 시작 로직 제거 (main.py에서 제어)
+        # if self.current_mode == 'regular':
+        #    self.start_websocket_mode()
         
         # Start monitoring thread
         self.monitor_thread = threading.Thread(target=self.smart_monitor_loop, daemon=True)
