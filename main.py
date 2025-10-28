@@ -384,9 +384,10 @@ def start_telegram_bot(config):
 
 def adaptive_market_monitor(config, token_manager, telegram_bot):
     """
-    적응형 시장 모니터 - 시장 상태에 따라 WebSocket/스마트폴링 자동 전환
+    적응형 시장 모니터 - 시장 상태에 따라 스마트폴링 자동 전환
     
-    ✅ 기획서 2.3절 준수: 정규장 WebSocket, 프리마켓/애프터마켓 스마트폴링
+    ✅ 기획서 2.3절 수정: 정규장/프리마켓 모두 REST 폴링 사용
+    ⚠️ WebSocket 포기 (구독 문제로 인한 기획서 변경)
     """
     global ws_client, smart_monitor, shutdown_requested
     
@@ -402,31 +403,25 @@ def adaptive_market_monitor(config, token_manager, telegram_bot):
                 logging.info(f"🔄 시장 상태 변경: {last_status} → {current_status}")
                 
                 if current_status == 'regular':
-                    # ✅ 정규장: WebSocket 활성화 (기획서 2.3절)
-                    logging.info("🔄 정규장 시작 - WebSocket 모드로 전환")
+                    # ✅ 정규장: REST 폴링 활성화 (기획서 2.3절 수정)
+                    logging.info("🔄 정규장 시작 - REST 폴링 모드로 전환")
+                    logging.warning("⚠️ WebSocket 비활성화 (구독 문제로 인한 기획서 변경)")
                     
-                    # 스마트 모니터 중지
-                    if smart_monitor and hasattr(smart_monitor, 'is_running') and smart_monitor.is_running:
-                        if hasattr(smart_monitor, 'stop'):
-                            smart_monitor.stop()
-                        logging.info("⏸️ 스마트 폴링 중지됨")
+                    # WebSocket 중지 (혹시 실행 중이면)
+                    if websocket_running:
+                        if ws_client and hasattr(ws_client, 'stop'):
+                            try:
+                                ws_client.stop()
+                                logging.info("🛑 WebSocket 중지됨")
+                            except Exception as e:
+                                logging.warning(f"⚠️ WebSocket 중지 중 오류: {e}")
+                        websocket_running = False
                     
-                    # WebSocket 시작
-                    if not websocket_running:
-                        logging.info("🔌 WebSocket 스레드 생성 중...")
-                        
-                        # 새 WebSocket 시작
-                        websocket_thread = threading.Thread(
-                            target=start_websocket_for_regular_hours,
-                            args=(config, token_manager, telegram_bot, smart_monitor),
-                            daemon=True,
-                            name="WebSocketThread"
-                        )
-                        websocket_thread.start()
-                        websocket_running = True
-                        logging.info("✅ WebSocket 스레드 시작됨")
-                    else:
-                        logging.info("ℹ️ WebSocket 이미 실행 중, 건너뜀")
+                    # 스마트 모니터 시작 (정규장에서도 REST 폴링 사용)
+                    if smart_monitor and hasattr(smart_monitor, 'is_running') and not smart_monitor.is_running:
+                        if hasattr(smart_monitor, 'start'):
+                            smart_monitor.start()
+                        logging.info("🧠 정규장 스마트 폴링 활성화됨 (3초/10초 적응형)")
                 
                 elif current_status in ['premarket', 'aftermarket']:
                     # ✅ 프리마켓/애프터마켓: 스마트 폴링 활성화 (기획서 2.3절)
@@ -520,23 +515,20 @@ def main():
             message = f"""🚀 스마트 자동매매 시작!
 🕐 시장상태: {market_status}
 🧠 Rate Limit 안전모드
-⚡ 적응형 폴링 활성화
-✅ 기획서 v1.1 준수
-🔴 WebSocket 구독 20건 제한
-⚠️ 정규장 WebSocket 3회 실패 시 시스템 종지"""
+⚡ 적응형 폴링 활성화 (정규장 3초/10초)
+✅ 기획서 v1.1 수정판 준수
+⚠️ WebSocket 비활성화 (REST 폴링 전용)
+📊 일일 API 호출: ~5,120회 (안전 마진 내)"""
             if hasattr(telegram_bot, 'send_message'):
                 telegram_bot.send_message(message)
         
         # 현재 시장 상태에 따른 초기 서비스 시작
         if market_status == 'regular':
-            # 정규장: WebSocket 시작
-            logging.info("🔌 정규장 감지 - WebSocket 모드로 시작")
-            ws_thread = threading.Thread(
-                target=start_websocket_for_regular_hours,
-                args=(config, token_manager, telegram_bot, smart_monitor),
-                daemon=True
-            )
-            ws_thread.start()
+            # 정규장: REST 폴링 시작 (기획서 수정)
+            logging.info("🧠 정규장 감지 - REST 폴링 모드로 시작")
+            logging.warning("⚠️ WebSocket 비활성화 (구독 문제로 인한 기획서 변경)")
+            if hasattr(smart_monitor, 'start'):
+                smart_monitor.start()
             
         elif market_status in ['premarket', 'aftermarket']:
             # 장외: 스마트 폴링 시작
@@ -569,7 +561,7 @@ def main():
                     # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
                     # 🔴 [v1.1 신규] WebSocket 구독 상태 확인
                     # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-                    ws_status = "대기 중"
+                    ws_status = "비활성화" # WebSocket 포기로 상태 변경
                     ws_subscribed_count = 0
                     
                     if ws_client and hasattr(ws_client, 'get_status'):
