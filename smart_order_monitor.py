@@ -1,10 +1,10 @@
 # smart_order_monitor.py - Korea Investment Securities Smart Order Monitor
 # Specification v1.1 Compliant
-# Pre-market REST Polling + Regular Hours WebSocket Monitoring System
 #
-# ✅ v1.2 수정 사항:
-# 1. (1순위) processed_orders 상태 저장/복원 기능 추가 (재시작 시 중복 매도 방지)
-# 2. (2순위) DailyTradeCounter (일일 매매 횟수 6회 제한) 기능 추가
+# ✅ v1.3 수정 사항:
+# 1. (문제 1) processed_orders 리셋 기준을 ET 시간으로 통일 (reset_counters_if_needed)
+# 2. (문제 2) execute_auto_sell 내부에 방어적 매매 한도 체크 추가
+# 3. (문제 3) scan_for_new_buy_orders 내부 중복 로그 제거
 
 import requests
 import json
@@ -137,7 +137,8 @@ class SmartOrderMonitor:
         # Spec 5.1: Rate limit protection
         self.rate_config = config['rate_limit']
         self.daily_api_count = 0
-        self.last_reset_date = datetime.now().date()
+        # 🔴 [v1.3 수정] last_reset_date는 reset_counters_if_needed에서 ET 기준으로 초기화됨
+        self.last_reset_date = None 
         self.hourly_api_count = 0
         self.last_hour_reset = datetime.now().hour
         self.last_request_time = 0
@@ -179,6 +180,9 @@ class SmartOrderMonitor:
         
         # 🔴 [v1.2 신규] 일일 매매 카운터 초기화 (2순위)
         self.trade_counter = DailyTradeCounter(self.telegram_bot)
+        
+        # 🔴 [v1.3 신규] last_reset_date 초기화 (ET 기준)
+        self.reset_counters_if_needed()
 
     def load_persisted_state(self):
         """Spec 7.1: Load persisted state from file"""
@@ -507,32 +511,41 @@ class SmartOrderMonitor:
         return True
 
     def reset_counters_if_needed(self):
-        """Reset API counters daily/hourly"""
-        now = datetime.now()
+        """Reset API counters daily/hourly (ET 기준)"""
+        # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+        # 🔴 [v1.3 수정] ET 시간대로 통일 (문제 1)
+        # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+        try:
+            trading_tz = self.config.get('order_settings', {}).get('timezone', 'US/Eastern')
+            tz = timezone(trading_tz)
+            now = datetime.now(tz)  # ← ET 시간
+        except Exception:
+            logger.warning("pytz.timezone('US/Eastern') 로드 실패. 로컬 시간대로 Fallback.")
+            now = datetime.now()  # Fallback
         
-        # Daily reset
-        if now.date() != self.last_reset_date:
+        # Daily reset (ET 기준)
+        if self.last_reset_date is None or now.date() != self.last_reset_date:
             logger.info(
-                f"📊 Daily reset - API: {self.daily_api_count}, "
+                f"📊 Daily reset (ET 기준: {now.date()}) - API: {self.daily_api_count}, "
                 f"Success: {self.stats['successful_detections']}, "
                 f"WS: {self.stats['ws_detections']}"
             )
             
             self.daily_api_count = 0
-            self.last_reset_date = now.date()
+            self.last_reset_date = now.date() # ET 기준 날짜로 업데이트
             self.stats['successful_detections'] = 0
             self.stats['ws_detections'] = 0
             self.stats['premarket_calls'] = 0
             self.stats['rate_limit_violations'] = 0
             self.stats['api_errors'] = {}
             
-            # Spec 4.4: Clear processed orders tracking
+            # Spec 4.4: Clear processed orders tracking (ET 기준)
             self.processed_orders.clear()
             self.processed_ws_orders.clear()
             self.failed_orders.clear()
-            logger.info("🔄 Processed orders list cleared")
+            logger.info("🔄 Processed orders list cleared (ET 기준)")
             
-            # 🔴 [v1.2 수정] 매매 카운터는 DailyTradeCounter가 스스로 리셋함
+            # 매매 카운터는 DailyTradeCounter가 스스로 리셋함
         
         # Hourly reset
         if now.hour != self.last_hour_reset:
@@ -741,6 +754,17 @@ class SmartOrderMonitor:
             bool: Success status
         """
         try:
+            # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+            # 🔴 [v1.3 신규] 방어적 체크 (문제 2)
+            # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+            if not self.trade_counter.can_trade():
+                logger.warning(f"⚠️ [SELL] 매매 한도 도달 (방어적 체크). {order_info['ticker']} ({order_no}) 매도 주문을 실행하지 않습니다.")
+                # 처리는 완료된 것으로 간주 (중복 방지)
+                if order_no:
+                    self.processed_orders.add(order_no)
+                return False # 매도 실패(안함)
+            # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
             from order import place_sell_order
             
             current_mode = self.get_current_trading_mode()
@@ -865,6 +889,8 @@ class SmartOrderMonitor:
                         # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
                         # 🔴 [v1.2 수정] 매매 한도 확인 (2순위)
                         # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+                        # execute_auto_sell에서 방어적 체크(v1.3)를 하므로
+                        # 여기서 미리 체크하고 로그를 남기는 것이 더 효율적임.
                         if not self.trade_counter.can_trade():
                             logger.warning(f"⚠️ [WS] 매매 한도 도달. {ticker} ({order_no}) 매도 주문을 실행하지 않습니다.")
                             # 매도는 안하지만, 처리는 된 것으로 간주 (중복 방지)
@@ -907,10 +933,11 @@ class SmartOrderMonitor:
         try:
             # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
             # 🔴 [v1.2 수정] 매매 한도 확인 (2순위)
+            # 🔴 [v1.3 수정] 로그 중복 제거 (문제 3)
             # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
             if not self.trade_counter.can_trade():
-                logger.debug("⏸️ 일일 매매 한도 도달. 새로운 매수 신호 탐색을 중단합니다.")
-                return
+                # logger.debug("⏸️ 일일 매매 한도 도달. 새로운 매수 신호 탐색을 중단합니다.") # <-- 로그 중복 제거
+                return # 체크는 유지, 로그만 제거
             # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
             if not self.can_make_request():
@@ -1004,6 +1031,7 @@ class SmartOrderMonitor:
                 if ccld_qty > 0 and ccld_price > 0:
                     
                     # 🔴 [v1.2 수정] 매매 한도 재확인 (루프 진입 후)
+                    # 🔴 [v1.3 수정] execute_auto_sell에서 방어적 체크를 하므로 이 코드는 유지.
                     if not self.trade_counter.can_trade():
                         logger.warning(f"⚠️ [POLL] 매매 한도 도달. {ticker} ({order_no}) 매도 주문을 실행하지 않습니다.")
                         self.processed_orders.add(order_no) # 1순위
@@ -1121,7 +1149,7 @@ class SmartOrderMonitor:
                         logger.debug("🔍 Scanning for new buy orders...")
                         self.scan_for_new_buy_orders()
                     else:
-                        logger.debug("⏸️ 매매 한도 도달. 신규 매수 탐색 스킵.")
+                        logger.debug("⏸️ 매매 한도 도달. 신규 매수 탐색 스킵.") # 🔴 [v1.3] 이 로그는 유지 (문제 3)
                         
                     self.last_buy_scan = current_time
                 
@@ -1165,6 +1193,8 @@ class SmartOrderMonitor:
                         status_info['filled_qty'] > 0):
                         
                         # 🔴 [v1.2 수정] 매매 한도 확인 (2순위)
+                        # 🔴 [v1.3 수정] execute_auto_sell에서 방어적 체크를 하므로
+                        # 여기서 미리 체크하고 로그를 남기는 것이 더 효율적임.
                         if not self.trade_counter.can_trade():
                             logger.warning(f"⚠️ [POLL] 매매 한도 도달. {order_info['ticker']} ({order_no}) 매도 주문을 실행하지 않습니다.")
                             # 매도는 안하지만, 모니터링 중지 (중복 방지)
@@ -1282,7 +1312,7 @@ class SmartOrderMonitor:
         logger.info(
             f"🛑 Monitor stopped - Final stats: "
             f"Requests: {self.stats['total_requests']}, "
-            f"Success: {self.stats['successful_deteCTIONS']}, "
+            f"Success: {self.stats['successful_detections']}, "
             f"WS: {self.stats['ws_detections']}"
         )
 
