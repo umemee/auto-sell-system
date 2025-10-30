@@ -1,6 +1,10 @@
 # smart_order_monitor.py - Korea Investment Securities Smart Order Monitor
-# Specification v1.0 Compliant
+# Specification v1.1 Compliant
 # Pre-market REST Polling + Regular Hours WebSocket Monitoring System
+#
+# ✅ v1.2 수정 사항:
+# 1. (1순위) processed_orders 상태 저장/복원 기능 추가 (재시작 시 중복 매도 방지)
+# 2. (2순위) DailyTradeCounter (일일 매매 횟수 6회 제한) 기능 추가
 
 import requests
 import json
@@ -27,6 +31,71 @@ except ImportError:
             pass
         def stop(self):
             pass
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# 🔴 [v1.2 신규] 일일 매매 횟수 제한 (2순위)
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+class DailyTradeCounter:
+    """
+    일일 매매 횟수 카운터 (미국 동부 시간 기준)
+    요청사항 2순위: 하루 총 6회 (시간대 구분 없음)
+    """
+    def __init__(self, telegram_bot=None):
+        self.telegram_bot = telegram_bot
+        self.date = None
+        self.count = 0
+        self.MAX_TRADES = 6  # 하루 최대 매매 횟수
+        try:
+            # 타임존 설정 (기본: US/Eastern)
+            self.tz = timezone('US/Eastern')
+        except Exception:
+            logger.error("pytz 라이브러리가 필요합니다. 'pip install pytz'")
+            self.tz = None
+        
+        self.reset_if_new_day()
+
+    def reset_if_new_day(self):
+        """날짜가 바뀌면 카운터 리셋"""
+        if not self.tz:
+            today = datetime.now().date() # Fallback
+        else:
+            today = datetime.now(self.tz).date()
+        
+        if self.date != today:
+            self.date = today
+            self.count = 0
+            logger.info(f"📅 새로운 날: {today} (ET). 매매 카운터 리셋 (최대 {self.MAX_TRADES}회).")
+
+    def can_trade(self):
+        """매매 가능 여부 확인"""
+        self.reset_if_new_day()
+        
+        if self.count >= self.MAX_TRADES:
+            logger.warning(f"⚠️ 오늘 매매 {self.count}/{self.MAX_TRADES}회 도달. 더 이상 매매하지 않습니다.")
+            return False
+        return True
+
+    def increment(self):
+        """매매 횟수 증가"""
+        self.reset_if_new_day() # 날짜 변경 보장
+        
+        if self.count < self.MAX_TRADES:
+            self.count += 1
+            logger.info(f"✅ 매매 완료: {self.count}/{self.MAX_TRADES}회")
+            
+            # 텔레그램 알림 (선택)
+            if self.count >= self.MAX_TRADES:
+                if self.telegram_bot and hasattr(self.telegram_bot, 'send_message'):
+                    try:
+                        self.telegram_bot.send_message(
+                            f"🚫 오늘 매매 한도 도달 ({self.MAX_TRADES}회)\n"
+                            f"내일 (ET 기준)까지 매매를 중단합니다."
+                        )
+                    except Exception as e:
+                        logger.error(f"매매 한도 도달 알림 실패: {e}")
+        else:
+            logger.warning(f"이미 매매 한도({self.MAX_TRADES}회) 도달. 카운트: {self.count}")
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 
 class SmartOrderMonitor:
@@ -76,6 +145,13 @@ class SmartOrderMonitor:
         
         # State persistence (Spec 7.1)
         self.state_file = config['system'].get('state_file', '/tmp/auto-sell-order-state.json')
+
+        # Spec 4.4: Order tracking (prevent duplicates)
+        self.processed_orders = set()      # Successfully sold (✅ 1순위)
+        self.failed_orders = {}           # Failed orders: {order_no: (timestamp, reason)}
+        self.processed_ws_orders = set()  # Processed via WebSocket
+        
+        # 🔴 [v1.2 수정] 상태 복원 먼저 실행
         self.load_persisted_state()
         
         # Statistics
@@ -90,11 +166,6 @@ class SmartOrderMonitor:
             'consecutive_api_errors': 0
         }
         
-        # Spec 4.4: Order tracking (prevent duplicates)
-        self.processed_orders = set()      # Successfully sold
-        self.failed_orders = {}           # Failed orders: {order_no: (timestamp, reason)}
-        self.processed_ws_orders = set()  # Processed via WebSocket
-        
         # WebSocket client initialization
         self.ws_client = None
         self.ws_failure_count = 0
@@ -105,6 +176,9 @@ class SmartOrderMonitor:
 
         # ✅ 스레드 안전을 위한 Lock 추가
         self._counter_lock = threading.Lock()
+        
+        # 🔴 [v1.2 신규] 일일 매매 카운터 초기화 (2순위)
+        self.trade_counter = DailyTradeCounter(self.telegram_bot)
 
     def load_persisted_state(self):
         """Spec 7.1: Load persisted state from file"""
@@ -124,7 +198,13 @@ class SmartOrderMonitor:
                             order_data['last_checked'] = datetime.fromisoformat(order_data['last_checked'])
                         self.monitoring_orders[order_no] = order_data
                 
-                logger.info(f"💾 State restored: {len(self.monitoring_orders)} orders")
+                # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+                # 🔴 [v1.2 수정] 처리된 주문 목록 복원 (1순위)
+                # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+                # 재시작 시 중복 매도 방지를 위해 오늘 처리된 주문은 모두 복원
+                self.processed_orders = set(state.get('processed_orders', []))
+                
+                logger.info(f"💾 State restored: {len(self.monitoring_orders)} orders, {len(self.processed_orders)} processed orders")
         except Exception as e:
             logger.warning(f"State restoration failed: {e}")
 
@@ -134,7 +214,11 @@ class SmartOrderMonitor:
             state = {
                 'timestamp': datetime.now().isoformat(),
                 'last_check': datetime.now().isoformat(),
-                'orders': {}
+                'orders': {},
+                # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+                # 🔴 [v1.2 수정] 처리된 주문 목록 저장 (1순위)
+                # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+                'processed_orders': list(self.processed_orders)
             }
             
             for order_no, order_data in self.monitoring_orders.items():
@@ -447,6 +531,8 @@ class SmartOrderMonitor:
             self.processed_ws_orders.clear()
             self.failed_orders.clear()
             logger.info("🔄 Processed orders list cleared")
+            
+            # 🔴 [v1.2 수정] 매매 카운터는 DailyTradeCounter가 스스로 리셋함
         
         # Hourly reset
         if now.hour != self.last_hour_reset:
@@ -694,10 +780,15 @@ class SmartOrderMonitor:
                     self.stats['successful_detections'] += 1
                     total_detected = self.stats['successful_detections']
                 
-                # Spec 4.4: Record successful order
+                # Spec 4.4: Record successful order (✅ 1순위)
                 if order_no:
                     self.processed_orders.add(order_no)
                     logger.info(f"✅ Order {order_no} marked as processed")
+                
+                # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+                # 🔴 [v1.2 수정] 매매 횟수 증가 (2순위)
+                # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+                self.trade_counter.increment()
                 
                 logger.info(f"✅ Auto-sell success: {execution_data['ticker']} (Total: {total_detected})")
                 
@@ -709,7 +800,8 @@ class SmartOrderMonitor:
                         f"🏷️ {execution_data['ticker']}\n"
                         f"💰 ${filled_price} → ${sell_price}\n"
                         f"📈 +{target_profit_rate}%\n"
-                        f"📊 Total {current_mode} detections: {total_detected}"
+                        f"📊 Total {current_mode} detections: {total_detected}\n"
+                        f"📈 Daily Trades: {self.trade_counter.count}/{self.trade_counter.MAX_TRADES}" # 2순위
                     )
                     self.telegram_bot.send_message(message)
             else:
@@ -754,7 +846,7 @@ class SmartOrderMonitor:
                     if not order_no:
                         continue
                     
-                    # Spec 4.4: Prevent duplicate processing
+                    # Spec 4.4: Prevent duplicate processing (✅ 1순위)
                     if (order_no in self.processed_ws_orders or 
                         order_no in self.processed_orders):
                         logger.debug(f"Already processed WS fill: {order_no}")
@@ -769,6 +861,18 @@ class SmartOrderMonitor:
                         continue
                     
                     if ccld_qty > 0 and ccld_price > 0:
+                        
+                        # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+                        # 🔴 [v1.2 수정] 매매 한도 확인 (2순위)
+                        # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+                        if not self.trade_counter.can_trade():
+                            logger.warning(f"⚠️ [WS] 매매 한도 도달. {ticker} ({order_no}) 매도 주문을 실행하지 않습니다.")
+                            # 매도는 안하지만, 처리는 된 것으로 간주 (중복 방지)
+                            self.processed_ws_orders.add(order_no)
+                            self.processed_orders.add(order_no) # 1순위
+                            continue
+                        # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
                         logger.info(f"🎉 [WS] New buy fill! {order_no}: {ticker} {ccld_qty} @ ${ccld_price}")
                         
                         order_info = {
@@ -784,6 +888,7 @@ class SmartOrderMonitor:
                         if success:
                             logger.info(f"✅ [WS] Auto-sell immediate success: {ticker}")
                             self.processed_ws_orders.add(order_no)
+                            # execute_auto_sell이 processed_orders에도 추가하고 카운트도 증가시킴
                         else:
                             logger.error(f"❌ [WS] Auto-sell failed: {ticker}. Switching to REST polling.")
                             # On failure, add to REST polling monitoring
@@ -800,6 +905,14 @@ class SmartOrderMonitor:
         Prevents duplicate processing
         """
         try:
+            # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+            # 🔴 [v1.2 수정] 매매 한도 확인 (2순위)
+            # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+            if not self.trade_counter.can_trade():
+                logger.debug("⏸️ 일일 매매 한도 도달. 새로운 매수 신호 탐색을 중단합니다.")
+                return
+            # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
             if not self.can_make_request():
                 return
             
@@ -859,7 +972,8 @@ class SmartOrderMonitor:
             for order in data.get("output", []):
                 order_no = order.get("odno", "")
                 
-                # Spec 4.4: Enhanced duplicate prevention
+                # Spec 4.4: Enhanced duplicate prevention (✅ 1순위 로직)
+                # 이 로직은 이미 v1.1 파일에 올바르게 구현되어 있었습니다.
                 if order_no in self.monitoring_orders:
                     continue  # Already monitoring
                 if order_no in self.processed_ws_orders:
@@ -888,6 +1002,13 @@ class SmartOrderMonitor:
                     continue
                 
                 if ccld_qty > 0 and ccld_price > 0:
+                    
+                    # 🔴 [v1.2 수정] 매매 한도 재확인 (루프 진입 후)
+                    if not self.trade_counter.can_trade():
+                        logger.warning(f"⚠️ [POLL] 매매 한도 도달. {ticker} ({order_no}) 매도 주문을 실행하지 않습니다.")
+                        self.processed_orders.add(order_no) # 1순위
+                        break # 루프 중단 (더 이상 오늘 매매 안함)
+                        
                     logger.info(f"🎉 [POLL] New buy fill detected! {order_no}: {ticker} {ccld_qty} @ ${ccld_price}")
                     
                     order_info = {
@@ -901,29 +1022,23 @@ class SmartOrderMonitor:
                     }
                     
                     # Execute auto-sell with order number
+                    # execute_auto_sell이 성공 시 카운터 증가 및 processed_orders 추가
                     success = self.execute_auto_sell(order_info, ccld_price, order_no)
                     
                     # ✅ --- 수정 위치 2 ---
                     if success:
                         logger.info(f"✅ [POLL] Auto-sell immediate success: {ticker}")
                         
-                        # Spec 6.1: Telegram notification
-                        if self.telegram_bot:
-                            target_profit_rate = self.config.get('order_settings', {}).get('target_profit_rate', 3.0)
-                            message = (
-                                f"🎉 [POLL] Auto-detection & Sell Success!\n"
-                                f"🏷️ {ticker} {ccld_qty} shares\n"
-                                f"💰 Buy: ${ccld_price}\n"
-                                f"📈 Target profit: +{target_profit_rate}%"
-                            )
-                            self.telegram_bot.send_message(message)
+                        # Spec 6.1: Telegram notification (execute_auto_sell에서 이미 보냄)
+                        
                     else:
                         # ✅ "이미 매도됨" 오류는 monitoring에 추가하지 않음
+                        # 이 로직은 이미 v1.1 파일에 올바르게 구현되어 있었습니다.
                         logger.error(f"❌ [POLL] Auto-sell failed: {ticker}. Not adding to monitoring (already sold).")
                         
                         # 실패 기록만 (monitoring에 추가하지 않음)
                         self.failed_orders[order_no] = (datetime.now(), 'Already sold')
-                        self.processed_orders.add(order_no)  # 재처리 방지
+                        self.processed_orders.add(order_no)  # 재처리 방지 (✅ 1순위)
                         
                         # 텔레그램 알림
                         if self.telegram_bot:
@@ -1000,8 +1115,14 @@ class SmartOrderMonitor:
                 # Scan for new buy orders every 15 seconds
                 current_time = time.time()
                 if current_time - self.last_buy_scan > 15:
-                    logger.debug("🔍 Scanning for new buy orders...")
-                    self.scan_for_new_buy_orders()
+                    
+                    # 🔴 [v1.2 수정] 매매 한도 확인 후 스캔 (2순위)
+                    if self.trade_counter.can_trade():
+                        logger.debug("🔍 Scanning for new buy orders...")
+                        self.scan_for_new_buy_orders()
+                    else:
+                        logger.debug("⏸️ 매매 한도 도달. 신규 매수 탐색 스킵.")
+                        
                     self.last_buy_scan = current_time
                 
                 # If no orders to monitor, wait
@@ -1043,12 +1164,22 @@ class SmartOrderMonitor:
                     if (status_info['status'] in ['02', 'Filled', 'Complete'] and 
                         status_info['filled_qty'] > 0):
                         
+                        # 🔴 [v1.2 수정] 매매 한도 확인 (2순위)
+                        if not self.trade_counter.can_trade():
+                            logger.warning(f"⚠️ [POLL] 매매 한도 도달. {order_info['ticker']} ({order_no}) 매도 주문을 실행하지 않습니다.")
+                            # 매도는 안하지만, 모니터링 중지 (중복 방지)
+                            self.monitoring_orders.pop(order_no, None)
+                            self.processed_orders.add(order_no) # 1순위
+                            self.save_state()
+                            continue
+                        
                         logger.info(
                             f"🎉 [POLL] Fill complete: {order_no} "
                             f"(Mode: {self.current_mode}, Checks: {order_info['check_count']})"
                         )
                         
                         # Execute auto-sell with order number
+                        # execute_auto_sell이 성공 시 카운터 증가 및 processed_orders 추가
                         success = self.execute_auto_sell(order_info, status_info['filled_price'], order_no)
                         
                         # ✅ --- 수정 위치 1 ---
@@ -1057,12 +1188,13 @@ class SmartOrderMonitor:
                             self.save_state()
                         else:
                             # ✅ "이미 매도됨" 오류는 재시도하지 않고 제거
+                            # 이 로직은 이미 v1.1 파일에 올바르게 구현되어 있었습니다.
                             logger.warning(f"⚠️ [POLL] Fill detected but sell failed: {order_no}. Removing from monitoring.")
                             
                             # monitoring_orders에서 완전히 제거
                             self.monitoring_orders.pop(order_no, None)
                             
-                            # 재처리 방지
+                            # 재처리 방지 (✅ 1순위)
                             self.processed_orders.add(order_no)
                             
                             # 상태 저장
@@ -1150,7 +1282,7 @@ class SmartOrderMonitor:
         logger.info(
             f"🛑 Monitor stopped - Final stats: "
             f"Requests: {self.stats['total_requests']}, "
-            f"Success: {self.stats['successful_detections']}, "
+            f"Success: {self.stats['successful_deteCTIONS']}, "
             f"WS: {self.stats['ws_detections']}"
         )
 
