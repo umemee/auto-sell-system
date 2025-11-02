@@ -1,4 +1,9 @@
 # main.py - 기획서 v1.1 완전 준수 버전
+#
+# ✅ v1.2 수정 사항:
+# 1. (문제 1) adaptive_market_monitor 함수 수정:
+#    - SmartOrderMonitor와 중복되던 모드 전환 로직 제거
+#    - 시장 상태 변경 로깅만 하도록 단순화
 
 import logging
 import time
@@ -382,95 +387,34 @@ def start_telegram_bot(config):
         traceback.print_exc()
         return None
 
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# 🔴 [v1.2 수정] adaptive_market_monitor 함수
+# SmartOrderMonitor가 모드 전환을 전담하도록
+# 이 함수는 로깅만 수행하도록 단순화
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 def adaptive_market_monitor(config, token_manager, telegram_bot):
     """
-    적응형 시장 모니터 - 시장 상태에 따라 스마트폴링 자동 전환
-    
-    ✅ 기획서 2.3절 수정: 정규장/프리마켓 모두 REST 폴링 사용
-    ⚠️ WebSocket 포기 (구독 문제로 인한 기획서 변경)
+    적응형 시장 모니터 - 시장 상태 감시만 수행
+
+    ✅ 변경사항: 모드 전환은 SmartOrderMonitor가 전담
+    ⚠️ 이 함수는 시장 상태 로깅만 수행
     """
-    global ws_client, smart_monitor, shutdown_requested
-    
+    global smart_monitor, shutdown_requested
+
     last_status = None
-    websocket_running = False
-    websocket_thread = None
-    
+
     while not shutdown_requested:
         try:
             current_status = is_market_hours(config['trading']['timezone'])
-            
+
+            # 상태 변경 시 로그만 출력 (SmartOrderMonitor가 알아서 처리)
             if current_status != last_status:
-                logging.info(f"🔄 시장 상태 변경: {last_status} → {current_status}")
-                
-                if current_status == 'regular':
-                    # ✅ 정규장: REST 폴링 활성화 (기획서 2.3절 수정)
-                    logging.info("🔄 정규장 시작 - REST 폴링 모드로 전환")
-                    logging.warning("⚠️ WebSocket 비활성화 (구독 문제로 인한 기획서 변경)")
-                    
-                    # WebSocket 중지 (혹시 실행 중이면)
-                    if websocket_running:
-                        if ws_client and hasattr(ws_client, 'stop'):
-                            try:
-                                ws_client.stop()
-                                logging.info("🛑 WebSocket 중지됨")
-                            except Exception as e:
-                                logging.warning(f"⚠️ WebSocket 중지 중 오류: {e}")
-                        websocket_running = False
-                    
-                    # 스마트 모니터 시작 (정규장에서도 REST 폴링 사용)
-                    if smart_monitor and hasattr(smart_monitor, 'is_running') and not smart_monitor.is_running:
-                        if hasattr(smart_monitor, 'start'):
-                            smart_monitor.start()
-                        logging.info("🧠 정규장 스마트 폴링 활성화됨 (3초/10초 적응형)")
-                
-                elif current_status in ['premarket', 'aftermarket']:
-                    # ✅ 프리마켓/애프터마켓: 스마트 폴링 활성화 (기획서 2.3절)
-                    logging.info(f"🔄 {current_status} 시작 - 스마트 폴링 모드로 전환")
-                    
-                    # WebSocket 중지
-                    if websocket_running:
-                        if ws_client and hasattr(ws_client, 'stop'):
-                            try:
-                                ws_client.stop()
-                                logging.info("🛑 WebSocket 중지됨")
-                            except Exception as e:
-                                logging.warning(f"⚠️ WebSocket 중지 중 오류: {e}")
-                        
-                        websocket_running = False
-                        
-                        # WebSocket 스레드 종료 대기
-                        if websocket_thread and websocket_thread.is_alive():
-                            websocket_thread.join(timeout=5)
-                            if websocket_thread.is_alive():
-                                logging.warning("⚠️ WebSocket 스레드가 5초 내에 종료되지 않음")
-                    
-                    # 스마트 모니터 시작
-                    if smart_monitor and hasattr(smart_monitor, 'is_running') and not smart_monitor.is_running:
-                        if hasattr(smart_monitor, 'start'):
-                            smart_monitor.start()
-                        logging.info("🧠 스마트 폴링 활성화됨")
-                
-                elif current_status == 'closed':
-                    # ✅ 장 마감: 모든 서비스 중지 (기획서 2.3절)
-                    logging.info("🔄 장 마감 - 대기 모드")
-                    
-                    # WebSocket 중지
-                    if websocket_running:
-                        if ws_client and hasattr(ws_client, 'stop'):
-                            ws_client.stop()
-                        websocket_running = False
-                    
-                    # 스마트 모니터 중지
-                    if smart_monitor and hasattr(smart_monitor, 'is_running') and smart_monitor.is_running:
-                        if hasattr(smart_monitor, 'stop'):
-                            smart_monitor.stop()
-                        logging.info("⏸️ 스마트 폴링 중지됨")
-                
                 last_status = current_status
-            
+                logging.info(f"🕐 시장 상태: {current_status} (SmartOrderMonitor가 자동 전환)")
+
             # 1분마다 상태 확인
             time.sleep(60)
-            
+
         except Exception as e:
             logging.error(f"시장 모니터 오류: {e}")
             time.sleep(60)
@@ -522,23 +466,23 @@ def main():
             if hasattr(telegram_bot, 'send_message'):
                 telegram_bot.send_message(message)
         
-        # 현재 시장 상태에 따른 초기 서비스 시작
-        if market_status == 'regular':
-            # 정규장: REST 폴링 시작 (기획서 수정)
-            logging.info("🧠 정규장 감지 - REST 폴링 모드로 시작")
-            logging.warning("⚠️ WebSocket 비활성화 (구독 문제로 인한 기획서 변경)")
-            if hasattr(smart_monitor, 'start'):
-                smart_monitor.start()
-            
-        elif market_status in ['premarket', 'aftermarket']:
-            # 장외: 스마트 폴링 시작
-            logging.info(f"🧠 {market_status} 감지 - 스마트 폴링 모드로 시작")
-            if hasattr(smart_monitor, 'start'):
-                smart_monitor.start()
+        # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+        # 🔴 [v1.2 수정] 
+        # SmartOrderMonitor는 시장 상태와 관계없이 항상 시작합니다.
+        # 내부의 smart_monitor_loop가 스스로 상태를 감지하고
+        # should_system_run(), switch_mode_if_needed()를 통해
+        # 동작(폴링) 또는 대기(수면)를 결정합니다.
+        # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+        logging.info("🧠 SmartOrderMonitor 시작...")
+        if hasattr(smart_monitor, 'start'):
+            smart_monitor.start()
         else:
-            logging.info("⏸️ 장 마감 시간 - 대기 모드로 시작")
+            logging.error("❌ SmartOrderMonitor에 start() 메서드가 없습니다. 확인 필요.")
+            return # 심각한 오류
+            
+        logging.info("✅ SmartOrderMonitor가 모든 시장 상태(pre, regular, closed)를 전담합니다.")
         
-        # 적응형 시장 모니터 스레드 시작
+        # 적응형 시장 모니터 스레드 시작 (단순 로깅용)
         market_monitor_thread = threading.Thread(
             target=adaptive_market_monitor,
             args=(config, token_manager, telegram_bot),
@@ -548,7 +492,7 @@ def main():
         
         # 메인 상태 모니터링 루프
         logging.info("✅ 스마트 하이브리드 시스템이 준비되었습니다.")
-        logging.info("💡 시장 시간에 따라 WebSocket/스마트 폴링 모드가 자동 전환됩니다.")
+        logging.info("💡 SmartOrderMonitor가 시장 시간에 따라 자동 전환됩니다.")
         
         status_count = 0
         last_stats_report = 0
@@ -556,7 +500,7 @@ def main():
         while not shutdown_requested:
             try:
                 if status_count % 12 == 0:  # 1분마다 상태 출력
-                    market_status = is_market_hours(config['trading']['timezone'])
+                    # market_status는 adaptive_market_monitor가 로깅
                     
                     # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
                     # 🔴 [v1.1 신규] WebSocket 구독 상태 확인
@@ -583,20 +527,31 @@ def main():
                             ws_status = "연결됨" if ws_client and hasattr(ws_client, 'is_connected') and ws_client.is_connected() else "대기 중"
                     # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
                     
-                    monitor_count = smart_monitor.get_monitoring_count() if smart_monitor and hasattr(smart_monitor, 'get_monitoring_count') else 0
-                    
                     # 스마트 모니터 통계
                     if smart_monitor and hasattr(smart_monitor, 'get_detailed_stats'):
                         stats = smart_monitor.get_detailed_stats()
-                        api_usage = stats.get('utilization_pct', 0)
-                        total_requests = stats.get('total_requests', 0)
-                        logging.info(f"📊 상태: {market_status} | WS: {ws_status} | 모니터링: {monitor_count}건 | API: {api_usage} | 총요청: {total_requests}")
+                        
+                        # [v1.2] smart_monitor에서 직접 상태와 통계를 가져옴
+                        current_mode = stats.get('current_mode', 'N/A')
+                        monitor_count = stats.get('monitoring_count', 0)
+                        daily_calls = stats.get('daily_api_calls', 0)
+                        hourly_calls = stats.get('hourly_api_calls', 0)
+                        
+                        logging.info(
+                            f"📊 상태: {current_mode} | 모니터링: {monitor_count}건 | "
+                            f"API(시간): {hourly_calls} | API(일일): {daily_calls}"
+                        )
                         
                         # 10분마다 상세 통계 리포트
                         if status_count - last_stats_report >= 120:  # 10분
                             successful_detections = stats.get('successful_detections', 0)
-                            rate_limit_errors = stats.get('rate_limit_errors', 0)
-                            logging.info(f"📈 상세통계 - 성공감지: {successful_detections}회, Rate Limit 오류: {rate_limit_errors}회")
+                            ws_detections = stats.get('ws_detections', 0)
+                            rate_limit_errors = stats.get('rate_limit_violations', 0)
+                            logging.info(
+                                f"📈 상세통계 - 성공(REST): {successful_detections}회, "
+                                f"성공(WS): {ws_detections}회, "
+                                f"Rate Limit: {rate_limit_errors}회"
+                            )
                             
                             # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
                             # 🔴 [v1.1 신규] WebSocket 구독 상세 정보
@@ -617,7 +572,7 @@ def main():
                             
                             last_stats_report = status_count
                     else:
-                        logging.info(f"📊 상태: {market_status} | WS: {ws_status} | 모니터링: {monitor_count}건")
+                        logging.info(f"📊 상태: 로딩 중... | WS: {ws_status}")
                 
                 status_count += 1
                 time.sleep(5)

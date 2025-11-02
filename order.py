@@ -1,5 +1,8 @@
 # order.py - 해외주식 자동매도 시스템 (기획서 v1.1 완전 반영)
 # 한국투자증권 공식 API 사용
+#
+# ✅ v1.2 수정 사항:
+# 1. should_system_run 함수에 주말/월요일 새벽 슬립 로직 추가
 
 import requests
 import json
@@ -69,21 +72,55 @@ def is_extended_hours(trading_timezone='US/Eastern'):
         return False
 
 
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# 🔴 [v1.2 수정] should_system_run 함수
+# 주말 및 월요일 새벽 슬립 로직 추가
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 def should_system_run(trading_timezone='US/Eastern'):
     """
     기획서 2.2: 시스템 운영 여부 확인
-    
+
+    ✅ [신규] 주말 자동 슬립 모드
+    - 금요일 ET 12:00 종료 → 월요일 ET 04:00 재시작
+    - 주말(토, 일) 내내 슬립 모드 유지
+
     Returns:
-        bool: ET 04:00-12:00 사이면 True
+        bool: 운영 시간이면 True, 아니면 False
     """
     try:
         tz = timezone(trading_timezone)
-        now = datetime.now(tz).time()
-        
+        now_dt = datetime.now(tz)  # datetime 객체 (날짜+시간)
+        now_time = now_dt.time()   # time 객체 (시간만)
+        weekday = now_dt.weekday()  # 요일 (0=월, 1=화, ..., 4=금, 5=토, 6=일)
+
+        # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+        # 🔴 [신규] 주말 슬립 모드 (토요일, 일요일)
+        # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+        if weekday in [5, 6]:  # 토요일 또는 일요일
+            weekday_names = ['월', '화', '수', '목', '금', '토', '일']
+            logger.debug(f"🌴 주말({weekday_names[weekday]}요일) - 슬립 모드 유지")
+            return False
+
+        # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+        # 🔴 [신규] 월요일 새벽 슬립 모드 (ET 04:00 이전)
+        # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+        if weekday == 0 and now_time < dtime(4, 0):  # 월요일 04:00 이전
+            logger.debug(f"🌙 월요일 새벽 (ET {now_time.strftime('%H:%M')}) - 아직 시작 전")
+            return False
+
+        # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+        # 기존 로직: 운영 시간 체크 (ET 04:00-12:00)
+        # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
         start_time = dtime(4, 0)   # 04:00 ET
         end_time = dtime(12, 0)    # 12:00 ET
-        
-        return start_time <= now < end_time
+
+        is_running = start_time <= now_time < end_time
+
+        if not is_running:
+            logger.debug(f"🌙 운영 시간 외 (현재: ET {now_time.strftime('%H:%M')})")
+
+        return is_running
+    
     except Exception as e:
         logger.error(f"❌ 시스템 운영 시간 체크 오류: {e}")
         return False
