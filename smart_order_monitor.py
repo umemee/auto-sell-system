@@ -44,7 +44,7 @@ class DailyTradeCounter:
         self.telegram_bot = telegram_bot
         self.date = None
         self.count = 0
-        self.MAX_TRADES = 6  # 하루 최대 매매 횟수
+        self.MAX_TRADES = 8  # 하루 최대 매매 횟수
         try:
             # 타임존 설정 (기본: US/Eastern)
             self.tz = timezone('US/Eastern')
@@ -1140,9 +1140,9 @@ class SmartOrderMonitor:
                 
                 # ▼ Pre-market / Regular REST polling logic ▼
                 
-                # Scan for new buy orders every 15 seconds
+                # Scan for new buy orders every 10 seconds
                 current_time = time.time()
-                if current_time - self.last_buy_scan > 15:
+                if current_time - self.last_buy_scan > 10:
                     
                     # 🔴 [v1.2 수정] 매매 한도 확인 후 스캔 (2순위)
                     if self.trade_counter.can_trade():
