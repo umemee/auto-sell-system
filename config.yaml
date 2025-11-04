@@ -58,7 +58,7 @@ polling:
       - {start: "05:00", end: "09:30"}
     
     interval_seconds:
-      uniform: 6   # 6초 폴링
+      uniform: 4   # 4초 폴링
 
   # 기획서 3.1: 정규장 모드 (ET 09:30-12:00) - REST 폴링 전환
   regular:
