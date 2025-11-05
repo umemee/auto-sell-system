@@ -1,8 +1,4 @@
-# order.py - 해외주식 자동매도 시스템 (기획서 v1.1 완전 반영)
-# 한국투자증권 공식 API 사용
-#
-# ✅ v1.2 수정 사항:
-# 1. should_system_run 함수에 주말/월요일 새벽 슬립 로직 추가
+# order.py - 해외주식 자동매도 시스템 
 
 import requests
 import json
@@ -79,7 +75,11 @@ def is_extended_hours(trading_timezone='US/Eastern'):
 def should_system_run(trading_timezone='US/Eastern'):
     """
     기획서 2.2: 시스템 운영 여부 확인
-
+    
+    ✅ 슬립 시간: 한국시간 오전 01:00 고정
+    - 서머타임: ET 12:00 = 한국 01:00
+    - 표준시: ET 11:00 = 한국 01:00 (자동 조정 안 됨, 수동 설정 필요)
+    
     ✅ [신규] 주말 자동 슬립 모드
     - 금요일 ET 12:00 종료 → 월요일 ET 04:00 재시작
     - 주말(토, 일) 내내 슬립 모드 유지
@@ -291,6 +291,133 @@ def get_holdings(config, token_manager, exchange_code='NASD', currency_code='USD
         import traceback
         traceback.print_exc()
         return []
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# 🔴 [v1.3 신규] 주문체결내역 조회 함수
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+def inquire_ccnl(
+        config,
+        token_manager,
+        pdno="",
+        ord_strt_dt="",
+        ord_end_dt="",
+        sll_buy_dvsn="00",
+        ccld_nccs_dvsn="00",
+        ovrs_excg_cd="%",
+        sort_sqn="DS",
+        ord_dt="",
+        ord_gno_brno="",
+        odno=""):
+    """
+    해외주식 주문체결내역 조회 (한국투자증권 공식 API)
+
+    TR_ID: TTTS3035R (실전투자)
+    엔드포인트: /uapi/overseas-stock/v1/trading/inquire-ccnl
+
+    Args:
+        config: 설정 딕셔너리
+        token_manager: TokenManager 인스턴스
+        pdno: 종목코드 ("" = 전종목)
+        ord_strt_dt: 시작일자 (YYYYMMDD)
+        ord_end_dt: 종료일자 (YYYYMMDD)
+        sll_buy_dvsn: 매도매수구분 (00=전체, 01=매도, 02=매수)
+        ccld_nccs_dvsn: 체결미체결구분 (00=전체, 01=체결, 02=미체결)
+        ovrs_excg_cd: 거래소코드 ("%"=전체, "NASD"=미국전체)
+        sort_sqn: 정렬순서 (DS=정순, AS=역순)
+        ord_dt: 주문일자 ("" = 전체)
+        ord_gno_brno: 주문채번지점번호 ("" = 전체)
+        odno: 주문번호 ("" = 전체)
+
+    Returns:
+        pandas.DataFrame: 체결 내역 또는 None
+    """
+    try:
+        # pandas는 이 함수 내에서만 사용되므로 여기서 import
+        import pandas as pd
+        
+        # API 엔드포인트
+        url = f"{config['api']['base_url']}/uapi/overseas-stock/v1/trading/inquire-ccnl"
+
+        # 액세스 토큰 확인
+        token = token_manager.get_access_token()
+        if not token:
+            logger.error("❌ 체결내역 조회: 액세스 토큰 없음")
+            return None
+
+        # 헤더 설정
+        headers = {
+            "Content-Type": "application/json",
+            "authorization": f"Bearer {token}",
+            "appkey": config["api_key"],
+            "appsecret": config["api_secret"],
+            "tr_id": "TTTS3035R",  # 실전투자용
+            "custtype": "P"
+        }
+
+        # 파라미터 설정
+        params = {
+            "CANO": config["cano"],
+            "ACNT_PRDT_CD": config["acnt_prdt_cd"],
+            "PDNO": pdno,
+            "ORD_STRT_DT": ord_strt_dt,
+            "ORD_END_DT": ord_end_dt,
+            "SLL_BUY_DVSN": sll_buy_dvsn,
+            "CCLD_NCCS_DVSN": ccld_nccs_dvsn,
+            "OVRS_EXCG_CD": ovrs_excg_cd,
+            "SORT_SQN": sort_sqn,
+            "ORD_DT": ord_dt,
+            "ORD_GNO_BRNO": ord_gno_brno,
+            "ODNO": odno,
+            "CTX_AREA_NK200": "",
+            "CTX_AREA_FK200": ""
+        }
+
+        logger.info(f"📋 체결내역 조회: {ord_strt_dt} ~ {ord_end_dt}")
+
+        # GET 요청
+        response = requests.get(url, headers=headers, params=params, timeout=15)
+
+        if response.status_code != 200:
+            logger.error(f"❌ 체결내역 조회 HTTP 오류: {response.status_code}")
+            logger.error(f"응답: {response.text}")
+            return None
+
+        # JSON 파싱
+        data = response.json()
+
+        # 정상 응답 확인
+        rt_cd = data.get("rt_cd", "")
+        if rt_cd != "0":
+            msg1 = data.get("msg1", "알 수 없는 오류")
+            logger.warning(f"⚠️ 체결내역 조회 실패: {msg1} (rt_cd={rt_cd})")
+            return None
+
+        # output: 체결 내역 리스트
+        output = data.get("output", [])
+
+        if not output:
+            logger.info("📋 체결 내역 없음")
+            return pd.DataFrame() # 빈 DataFrame 반환
+
+        # DataFrame으로 변환
+        df = pd.DataFrame(output)
+        logger.info(f"✅ 체결내역 조회 완료: {len(df)}건")
+
+        return df
+    except ImportError:
+        logger.error("❌ 'pandas' 라이브러리가 필요합니다. 'pip install pandas'로 설치해주세요.")
+        return None
+    except requests.exceptions.Timeout:
+        logger.error("❌ 체결내역 조회 타임아웃 (15초)")
+        return None
+    except requests.exceptions.RequestException as e:
+        logger.error(f"❌ 체결내역 조회 네트워크 오류: {e}")
+        return None
+    except Exception as e:
+        logger.error(f"❌ 체결내역 조회 오류: {e}")
+        import traceback
+        traceback.print_exc()
+        return None
 
 
 # ============================================================================
@@ -583,6 +710,9 @@ class OrderMonitor:
                 "ORD_DT": "",
                 "ORD_GNO_BRNO": "",
                 "ODNO": "",
+                # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+                # 🔴 [v1.4 수정] 잘못 삽입된 텍스트 오류 제거
+                # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
                 "CTX_AREA_NK200": "",
                 "CTX_AREA_FK200": ""
             }

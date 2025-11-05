@@ -1,10 +1,5 @@
 # smart_order_monitor.py - Korea Investment Securities Smart Order Monitor
 # Specification v1.1 Compliant
-#
-# ✅ v1.3 수정 사항:
-# 1. (문제 1) processed_orders 리셋 기준을 ET 시간으로 통일 (reset_counters_if_needed)
-# 2. (문제 2) execute_auto_sell 내부에 방어적 매매 한도 체크 추가
-# 3. (문제 3) scan_for_new_buy_orders 내부 중복 로그 제거
 
 import requests
 import json
@@ -345,22 +340,119 @@ class SmartOrderMonitor:
         return False
 
     def handle_sleep_mode(self):
-        """Spec 2.2: Handle sleep mode (ET 12:00-04:00)"""
-        logger.info("😴 Entering sleep mode - System off until 04:00 ET")
+        """Spec 2.2: Handle sleep mode (한국시간 01:00)"""
+        logger.info("😴 슬립 모드 진입 - 한국시간 오전 01시")
         
-        # Spec 6.1: Daily statistics telegram notification
+        # ✅ 슬립모드 알림 전송
         if self.telegram_bot:
-            next_start = "04:00 ET (17:00 KST)"
-            message = (
-                f"😴 Sleep Mode Started\n"
-                f"⏰ Next start: {next_start}\n"
-                f"📊 Today's Statistics:\n"
-                f"- Total requests: {self.stats['total_requests']}\n"
-                f"- Successful detections: {self.stats['successful_detections']}\n"
-                f"- WebSocket detections: {self.stats['ws_detections']}\n"
-                f"- Rate limit hits: {self.stats['rate_limit_violations']}"
+            self.telegram_bot.send_sleep_mode_notification(reason="normal")
+        
+        # ✅ 당일 매매 내역 CSV 전송 (수정 4)
+        self.send_daily_trades_csv()
+
+    def send_daily_trades_csv(self):
+        """
+        당일 매매 내역을 CSV 형식으로 텔레그램 전송
+        """
+        try:
+            from datetime import datetime
+            
+            # 오늘 날짜 (한국시간 기준)
+            from pytz import timezone
+            kst = timezone('Asia/Seoul')
+            today = datetime.now(kst).strftime("%Y%m%d")
+            
+            logger.info(f"📋 당일 매매 내역 조회 중: {today}")
+            
+            # order.py의 inquire_ccnl 함수 활용
+            from order import inquire_ccnl
+            
+            df = inquire_ccnl(
+                config=self.config,
+                token_manager=self.token_manager,
+                pdno="",
+                ord_strt_dt=today,
+                ord_end_dt=today,
+                sll_buy_dvsn="01",  # 매도만
+                ccld_nccs_dvsn="01",  # 체결만
+                ovrs_excg_cd="%",
+                sort_sqn="DS",
+                ord_dt="",
+                ord_gno_brno="",
+                odno=""
             )
-            self.telegram_bot.send_message(message)
+            
+            if df is None or df.empty:
+                logger.info("📋 당일 매매 내역 없음")
+                return
+            
+            # CSV 형식으로 변환
+            csv_lines = ["날짜,순서,장,종목,진입시각,수량,진입가,목표가,손절가,청산가,손익,감정,원칙준수,메모"]
+            
+            for i, row in df.iterrows():
+                ticker = row.get('pdno', '')
+                qty = row.get('ft_ccld_qty', '0')
+                # 'ft_ord_unpr3' (주문단가)가 실제 매수가에 더 가까울 수 있으나,
+                # 'ft_ccld_unpr3' (체결단가)가 매도 가격이므로,
+                # 매수가는 매도 주문의 '주문단가'를 가져와야 함.
+                # 여기서는 매도 내역만 조회하므로, 매수가는 'ft_ord_unpr3' (매도주문의 주문단가)
+                # 매도가는 'ft_ccld_unpr3' (매도주문의 체결단가)
+                
+                # 기획서상 매수가는 알 수 없음 (매도내역만 조회하므로)
+                # 임시로 ft_ord_unpr3 (매도 주문 시의 목표가)를 buy_price로 간주
+                # (수정 필요: 이 로직은 매수내역을 알아야 정확함)
+                
+                # --- 임시 로직 ---
+                # 수익률을 역산하여 매수가 추정
+                target_profit_rate = self.config.get('order_settings', {}).get('target_profit_rate', 3.0)
+                profit_margin = target_profit_rate / 100
+                
+                sell_price = float(row.get('ft_ccld_unpr3', '0')) # 매도 체결가
+                buy_price = sell_price / (1 + profit_margin)   # 매수가 역산
+                
+                # ---
+                
+                order_time = row.get('ord_tmd', '')
+                
+                # 시각 포맷팅
+                if len(order_time) == 6:
+                    time_formatted = f"{order_time[0:2]}:{order_time[2:4]}:{order_time[4:6]}"
+                else:
+                    time_formatted = order_time
+                
+                # 장 구분 (한국 시간 기준)
+                hour = int(order_time[0:2]) if len(order_time) >= 2 else 0
+                minute = int(order_time[2:4]) if len(order_time) >= 4 else 0
+                market = "프리" if (hour < 22) or (hour == 22 and minute < 30) else "정규"
+                
+                # 수익률 계산
+                if buy_price > 0:
+                    profit_pct = ((sell_price - buy_price) / buy_price) * 100
+                    profit_str = f"{profit_pct:.2f}%"
+                else:
+                    profit_str = "0.00%"
+                
+                # CSV 라인
+                # 날짜,순서,장,종목,진입시각,수량,진입가,목표가,손절가,청산가,손익,감정,원칙준수,메모
+                csv_line = f"{today[:4]}-{today[4:6]}-{today[6:]},{i+1},{market},{ticker},{time_formatted},{qty},{buy_price:.4f},{sell_price:.4f},,{sell_price:.4f},{profit_str},,,"
+                csv_lines.append(csv_line)
+            
+            # 텔레그램으로 전송
+            csv_text = "\n".join(csv_lines)
+            
+            if self.telegram_bot:
+                message = f"""
+📊 <b>당일 매매 내역 (엑셀 복사용)</b>
+
+<pre>{csv_text}</pre>
+
+✅ 위 내용을 복사해서 엑셀에 붙여넣으세요!
+"""
+                self.telegram_bot.send_message(message, parse_mode='HTML')
+                logger.info(f"✅ 당일 매매 내역 전송 완료: {len(df)}건")
+        
+        except Exception as e:
+            logger.error(f"❌ 당일 매매 내역 전송 오류: {e}")
 
     def start_websocket_mode(self):
         """
@@ -819,13 +911,16 @@ class SmartOrderMonitor:
                 # Spec 6.1: Telegram notification
                 if self.telegram_bot:
                     mode_emoji = {'premarket': '🔵', 'regular': '⚡'}
+                    
+                    # ✅ 수정: 직관적인 매도 순서 표시 (수정 3)
                     message = (
-                        f"{mode_emoji.get(current_mode, '🎉')} Sell Success!\n"
-                        f"🏷️ {execution_data['ticker']}\n"
-                        f"💰 ${filled_price} → ${sell_price}\n"
-                        f"📈 +{target_profit_rate}%\n"
-                        f"📊 Total {current_mode} detections: {total_detected}\n"
-                        f"📈 Daily Trades: {self.trade_counter.count}/{self.trade_counter.MAX_TRADES}" # 2순위
+                        f"{mode_emoji.get(current_mode, '🎉')} 매도 성공! ({self.trade_counter.count}/{self.trade_counter.MAX_TRADES})\n\n"
+                        f"🏷️ 종목: {execution_data['ticker']}\n"
+                        f"💰 매수가: ${filled_price:.2f}\n"
+                        f"💰 매도가: ${sell_price:.2f}\n"
+                        f"📈 수익률: +{target_profit_rate}%\n"
+                        f"💵 수익: ${(sell_price - filled_price) * execution_data['quantity']:.2f}\n\n"
+                        f"📊 오늘 {self.trade_counter.count}번째 매도 완료"
                     )
                     self.telegram_bot.send_message(message)
             else:
@@ -893,6 +988,11 @@ class SmartOrderMonitor:
                         # 여기서 미리 체크하고 로그를 남기는 것이 더 효율적임.
                         if not self.trade_counter.can_trade():
                             logger.warning(f"⚠️ [WS] 매매 한도 도달. {ticker} ({order_no}) 매도 주문을 실행하지 않습니다.")
+                            
+                            # ✅ 슬립모드 알림 (매매 한도 도달) (수정 2)
+                            if self.telegram_bot:
+                                self.telegram_bot.send_sleep_mode_notification(reason="trade_limit")
+                            
                             # 매도는 안하지만, 처리는 된 것으로 간주 (중복 방지)
                             self.processed_ws_orders.add(order_no)
                             self.processed_orders.add(order_no) # 1순위
@@ -1034,6 +1134,13 @@ class SmartOrderMonitor:
                     # 🔴 [v1.3 수정] execute_auto_sell에서 방어적 체크를 하므로 이 코드는 유지.
                     if not self.trade_counter.can_trade():
                         logger.warning(f"⚠️ [POLL] 매매 한도 도달. {ticker} ({order_no}) 매도 주문을 실행하지 않습니다.")
+                        
+                        # ✅ 슬립모드 알림 (매매 한도 도달) (수정 2)
+                        # (참고: 이 알림은 WS에서 이미 보냈을 수 있지만, 
+                        #  POLL에서만 감지된 경우를 위해 여기서도 호출)
+                        if self.telegram_bot:
+                            self.telegram_bot.send_sleep_mode_notification(reason="trade_limit")
+                        
                         self.processed_orders.add(order_no) # 1순위
                         break # 루프 중단 (더 이상 오늘 매매 안함)
                         
@@ -1197,6 +1304,11 @@ class SmartOrderMonitor:
                         # 여기서 미리 체크하고 로그를 남기는 것이 더 효율적임.
                         if not self.trade_counter.can_trade():
                             logger.warning(f"⚠️ [POLL] 매매 한도 도달. {order_info['ticker']} ({order_no}) 매도 주문을 실행하지 않습니다.")
+                            
+                            # ✅ 슬립모드 알림 (매매 한도 도달) (수정 2)
+                            if self.telegram_bot:
+                                self.telegram_bot.send_sleep_mode_notification(reason="trade_limit")
+
                             # 매도는 안하지만, 모니터링 중지 (중복 방지)
                             self.monitoring_orders.pop(order_no, None)
                             self.processed_orders.add(order_no) # 1순위

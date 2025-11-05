@@ -397,6 +397,39 @@ class TelegramBot:
 """
         return self.send_message(message.strip(), force=True)
 
+    # 
+    # ↓↓↓ (수정 1) 요청하신 새 함수가 여기에 추가되었습니다. ↓↓↓
+    #
+    def send_sleep_mode_notification(self, reason="normal"):
+        """
+        슬립모드 진입 알림 (오전 01시 정상 종료 또는 매매 한도 도달)
+        
+        Parameters:
+            reason: "normal" (정상 종료) 또는 "trade_limit" (매매 한도 도달)
+        """
+        if reason == "trade_limit":
+            emoji = "🚫"
+            title = "매매 한도 도달 - 슬립 모드"
+            reason_text = "오늘 설정된 매매 횟수에 도달했습니다."
+        else:
+            emoji = "😴"
+            title = "슬립 모드 진입"
+            reason_text = "정규장 종료 시각 (한국시간 01:00)에 도달했습니다."
+        
+        message = f"""
+{emoji} <b>{title}</b>
+
+• 종료 시각: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
+• 사유: {reason_text}
+• 다음 시작: 오늘 17:00 (프리마켓)
+
+시스템이 슬립 모드로 전환됩니다.
+"""
+        return self.send_message(message.strip(), force=True)
+    #
+    # ↑↑↑ (수정 1) 새 함수 추가 완료 ↑↑↑
+    #
+
     def send_shutdown_notification(self):
         """✅ 시스템 종료 알림 (기획서 6.1절)"""
         # 종료 전 일일 통계 전송
