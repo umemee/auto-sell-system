@@ -502,7 +502,7 @@ def place_sell_order(config, token_manager, execution_data, telegram_bot=None):
         target_profit_rate = config.get('order_settings', {}).get('target_profit_rate', 3.0)
         profit_margin = target_profit_rate / 100  # 3.0 → 0.03
         
-        sell_price = round(buy_price * (1 + profit_margin), 2)
+        sell_price = round(buy_price * (1 + profit_margin), 4)
         
         logger.info(f"🎯 매도 주문 준비: {execution_data['ticker']} "
                    f"{execution_data['quantity']}주 @ ${sell_price} "

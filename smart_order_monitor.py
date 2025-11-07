@@ -866,7 +866,7 @@ class SmartOrderMonitor:
             target_profit_rate = self.config.get('order_settings', {}).get('target_profit_rate', 3.0)
             profit_margin = target_profit_rate / 100
             
-            sell_price = round(filled_price * (1 + profit_margin), 2)
+            sell_price = round(filled_price * (1 + profit_margin), 4)
             
             execution_data = {
                 'ticker': order_info['ticker'],
