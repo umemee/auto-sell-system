@@ -40,9 +40,9 @@ system:
 # 3. 자동 매도 전략 (기획서 4장)
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 order_settings:
-  # 기획서 4.1: 수익률 3% 고정
+  # 기획서 4.1: 수익률 6% 고정
   # ⭐ 수정하려면 여기만 변경하고 시스템 재시작
-  target_profit_rate: 3.0  # 단위: %
+  target_profit_rate: 6.0  # 단위: %
   
   # 기본 설정
   exchange_code: "NASD"
@@ -195,4 +195,5 @@ error_handling:
 # - REST API 50건/초로 증가 (requests_per_second: 15 → 37)
 # - 무료 실시간 시세 정책 반영
 # - 비상 종지 조건 추가 (websocket_subscription_insufficient)
+
 # - 텔레그램 알림 추가 (websocket_subscription_warning)
