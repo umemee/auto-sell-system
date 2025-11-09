@@ -354,56 +354,89 @@ def inquire_ccnl(
             "custtype": "P"
         }
 
-        # 파라미터 설정
-        params = {
-            "CANO": config["cano"],
-            "ACNT_PRDT_CD": config["acnt_prdt_cd"],
-            "PDNO": pdno,
-            "ORD_STRT_DT": ord_strt_dt,
-            "ORD_END_DT": ord_end_dt,
-            "SLL_BUY_DVSN": sll_buy_dvsn,
-            "CCLD_NCCS_DVSN": ccld_nccs_dvsn,
-            "OVRS_EXCG_CD": ovrs_excg_cd,
-            "SORT_SQN": sort_sqn,
-            "ORD_DT": ord_dt,
-            "ORD_GNO_BRNO": ord_gno_brno,
-            "ODNO": odno,
-            "CTX_AREA_NK200": "",
-            "CTX_AREA_FK200": ""
-        }
+        # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+        # 🔴 [수정] 연속 조회 로직 추가 (v1.5)
+        # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+        
+        # [수정] 모든 페이지의 결과를 담을 리스트
+        all_output = []
+        
+        # [수정] 연속 조회를 위한 키 초기화
+        ctx_area_fk200 = ""
+        ctx_area_nk200 = ""
 
-        logger.info(f"📋 체결내역 조회: {ord_strt_dt} ~ {ord_end_dt}")
+        logger.info(f"📋 체결내역 조회 시작: {ord_strt_dt} ~ {ord_end_dt} (연속 조회)")
 
-        # GET 요청
-        response = requests.get(url, headers=headers, params=params, timeout=15)
+        while True:
+            # 파라미터 설정 (매 루프마다 갱신)
+            params = {
+                "CANO": config["cano"],
+                "ACNT_PRDT_CD": config["acnt_prdt_cd"],
+                "PDNO": pdno,
+                "ORD_STRT_DT": ord_strt_dt,
+                "ORD_END_DT": ord_end_dt,
+                "SLL_BUY_DVSN": sll_buy_dvsn,
+                "CCLD_NCCS_DVSN": ccld_nccs_dvsn,
+                "OVRS_EXCG_CD": ovrs_excg_cd,
+                "SORT_SQN": sort_sqn,
+                "ORD_DT": ord_dt,
+                "ORD_GNO_BRNO": ord_gno_brno,
+                "ODNO": odno,
+                "CTX_AREA_NK200": ctx_area_nk200,  # [수정] 연속 조회 키
+                "CTX_AREA_FK200": ctx_area_fk200   # [수정] 연속 조회 키
+            }
 
-        if response.status_code != 200:
-            logger.error(f"❌ 체결내역 조회 HTTP 오류: {response.status_code}")
-            logger.error(f"응답: {response.text}")
-            return None
+            # GET 요청
+            response = requests.get(url, headers=headers, params=params, timeout=15)
 
-        # JSON 파싱
-        data = response.json()
+            if response.status_code != 200:
+                logger.error(f"❌ 체결내역 조회 HTTP 오류: {response.status_code}")
+                logger.error(f"응답: {response.text}")
+                return None
 
-        # 정상 응답 확인
-        rt_cd = data.get("rt_cd", "")
-        if rt_cd != "0":
-            msg1 = data.get("msg1", "알 수 없는 오류")
-            logger.warning(f"⚠️ 체결내역 조회 실패: {msg1} (rt_cd={rt_cd})")
-            return None
+            # JSON 파싱
+            data = response.json()
 
-        # output: 체결 내역 리스트
-        output = data.get("output", [])
+            # 정상 응답 확인
+            rt_cd = data.get("rt_cd", "")
+            if rt_cd != "0":
+                msg1 = data.get("msg1", "알 수 없는 오류")
+                logger.warning(f"⚠️ 체결내역 조회 실패: {msg1} (rt_cd={rt_cd})")
+                return None
 
-        if not output:
+            # [수정] 현재 페이지 결과를 전체 리스트에 추가
+            output_page = data.get("output", [])
+            if output_page:
+                all_output.extend(output_page)
+
+            # [수정] 연속 조회 키 (tr_cont) 및 다음 페이지 키 (FK200, NK200) 갱신
+            tr_cont = data.get("tr_cont", "")
+            ctx_area_fk200 = data.get("ctx_area_fk200", "")
+            ctx_area_nk200 = data.get("ctx_area_nk200", "")
+
+            # [수정] 연속 거래 여부 확인 (F/M: 다음 페이지 있음, D/E: 마지막 페이지)
+            if tr_cont in ["F", "M"]:
+                logger.debug(f"... 체결내역 연속 조회 중 (tr_cont={tr_cont})")
+                time.sleep(0.1)  # API 부하 방지를 위한 짧은 대기
+            else:
+                logger.debug("... 체결내역 연속 조회 완료 (마지막 페이지)")
+                break  # while 루프 종료
+        
+        # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+        # 🔴 [수정] 연속 조회 로직 종료
+        # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+        # [수정] 모든 페이지를 합친 리스트로 결과 처리
+        if not all_output:
             logger.info("📋 체결 내역 없음")
             return pd.DataFrame() # 빈 DataFrame 반환
 
         # DataFrame으로 변환
-        df = pd.DataFrame(output)
-        logger.info(f"✅ 체결내역 조회 완료: {len(df)}건")
+        df = pd.DataFrame(all_output)
+        logger.info(f"✅ 체결내역 조회 완료: 총 {len(df)}건 (연속 조회 포함)")
 
         return df
+    
     except ImportError:
         logger.error("❌ 'pandas' 라이브러리가 필요합니다. 'pip install pandas'로 설치해주세요.")
         return None
