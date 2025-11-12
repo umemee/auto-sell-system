@@ -535,11 +535,26 @@ def place_sell_order(config, token_manager, execution_data, telegram_bot=None):
         target_profit_rate = config.get('order_settings', {}).get('target_profit_rate', 3.0)
         profit_margin = target_profit_rate / 100  # 3.0 → 0.03
         
-        sell_price = round(buy_price * (1 + profit_margin), 4)
+        # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+        # 🔴 [수정] 요청하신 매도가 계산 로직
+        # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
         
+        # 1. 먼저 반올림 없이 원시 매도가 계산
+        raw_sell_price = buy_price * (1 + profit_margin)
+        
+        # 2. $1 기준으로 조건부 반올림 (API 규칙 준수)
+        if raw_sell_price >= 1.0:
+            # $1 이상: API 규칙 (소수점 2자리)
+            sell_price = round(raw_sell_price, 2)
+        else:
+            # $1 미만: 페니 스톡 규칙 (소수점 4자리)
+            sell_price = round(raw_sell_price, 4)
+            
         logger.info(f"🎯 매도 주문 준비: {execution_data['ticker']} "
                    f"{execution_data['quantity']}주 @ ${sell_price} "
                    f"(매수가: ${buy_price}, 목표 수익: +{target_profit_rate}%)")
+        
+        # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
         
         # 거래소 코드 결정
         exchange_code = config.get('order_settings', {}).get('exchange_code', 'NASD')
