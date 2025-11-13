@@ -1,6 +1,7 @@
 # smart_order_monitor.py - v2.0 기획서 Phase 4 (DailyTradeCounter) 적용
 # Specification v1.1 Compliant
 # 🆕 [v2.0] 슬립 모드 텔레그램 주문 취소 로직 추가
+# 🆕 [v2.0] 스레드 교착 상태(deadlock) 수정: smart_monitor_loop 내 self.stop() -> break
 
 import requests
 import json
@@ -1438,8 +1439,16 @@ class SmartOrderMonitor:
                         
                         # 시스템 종료
                         logger.info("🛑 시스템 종료 시작")
-                        self.stop()
-                        break
+                        
+                        # 
+                        # ↓↓↓ (v2.0 Task 1) 스레드 충돌 수정 ↓↓↓
+                        #
+                        # self.stop() # ❌ 수정 전: 이 코드가 오류를 유발
+                        logger.info("smart_monitor_loop: 루프를 종료합니다 (closed)") # ✅ 수정 후
+                        break # ✅ 수정 후
+                        #
+                        # ↑↑↑ (v2.0 Task 1) 수정 완료 ↑↑↑
+                        #
                 
                 # 2단계: 백업 체크 (만약 모드 전환을 놓쳤다면)
                 if not self.should_system_run():
@@ -1450,8 +1459,15 @@ class SmartOrderMonitor:
                         self.current_mode = 'closed'
                         self.handle_sleep_mode()
                     
-                    self.stop()
-                    break
+                    # 
+                    # ↓↓↓ (v2.0 Task 1) 스레드 충돌 수정 ↓↓↓
+                    #
+                    # self.stop() # ❌ 수정 전: 이 코드가 오류를 유발
+                    logger.info("smart_monitor_loop: 루프를 종료합니다 (should_system_run)") # ✅ 수정 후
+                    break # ✅ 수정 후
+                    #
+                    # ↑↑↑ (v2.0 Task 1) 수정 완료 ↑↑↑
+                    #
                 
                 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
                 
