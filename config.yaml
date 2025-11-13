@@ -40,9 +40,9 @@ system:
 # 3. 자동 매도 전략 (기획서 4장)
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 order_settings:
-  # 기획서 4.1: 수익률 6% 고정
+  # 기획서 4.1: 수익률 3% 고정 (v2.0에서는 6.0%를 권장 - 필요시 6.0으로 수정하세요)
   # ⭐ 수정하려면 여기만 변경하고 시스템 재시작
-  target_profit_rate: 6.0  # 단위: %
+  target_profit_rate: 6.0  # 단위: % (v2.0 기획서 4.1 기준 6.0%로 수정)
   
   # 기본 설정
   exchange_code: "NASD"
@@ -123,6 +123,40 @@ telegram:
   error_polling_interval: 30
   timeout: 10
 
+# 
+# ↓↓↓ (v2.0 신규 섹션 추가) ↓↓↓
+#
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# 🆕 [v2.0 추가] 텔레그램 주문 시스템 (기획서 v2.0 섹션 5)
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+telegram_orders:
+  # 기본 설정
+  enabled: true                  # 텔레그램 주문 시스템 활성화
+  max_pending_orders: 6          # 최대 대기 주문 수 (기획서 5.3)
+  
+  # 목표가 감시 (기획서 5.4)
+  monitor_interval: 10           # 목표가 감시 주기 (초)
+  
+  # 자동 매수 실행 (기획서 5.5)
+  retry_attempts: 2              # 매수 재시도 횟수
+  retry_delay: 5                 # 재시도 간격 (초)
+  
+  # 주문 상태 파일 (기획서 8.3)
+  state_file: "telegram_orders.json"
+  
+  # 자금 설정 (기획서 5.2)
+  ratio_based: true              # 비율 기반 주문 (true)
+  # 또는 고정 금액 주문:
+  # fixed_amount: 1000           # USD (ratio_based: false일 때)
+  
+  # 슬립 모드 처리 (기획서 7.4)
+  cancel_on_sleep: true          # 슬립 모드 시 대기 주문 전체 취소
+
+# 
+# ↑↑↑ (v2.0 신규 섹션 추가 완료) ↑↑↑
+#
+
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # 7. 로깅 설정 (기획서 6.2)
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -195,5 +229,4 @@ error_handling:
 # - REST API 50건/초로 증가 (requests_per_second: 15 → 37)
 # - 무료 실시간 시세 정책 반영
 # - 비상 종지 조건 추가 (websocket_subscription_insufficient)
-
 # - 텔레그램 알림 추가 (websocket_subscription_warning)

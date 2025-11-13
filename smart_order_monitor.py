@@ -1,5 +1,6 @@
 # smart_order_monitor.py - v2.0 기획서 Phase 4 (DailyTradeCounter) 적용
 # Specification v1.1 Compliant
+# 🆕 [v2.0] 슬립 모드 텔레그램 주문 취소 로직 추가
 
 import requests
 import json
@@ -343,6 +344,14 @@ class SmartOrderMonitor:
         self.token_manager = token_manager
         self.telegram_bot = telegram_bot
         
+        # 
+        # ↓↓↓ (v2.0 수정 1) telegram_order_manager 참조 추가 ↓↓↓
+        #
+        self.telegram_order_manager = None # main.py에서 주입 예정
+        #
+        # ↑↑↑ (v2.0 수정 1) 완료 ↑↑↑
+        #
+        
         # Monitoring state
         self.monitoring_orders = {}  # {order_no: order_info}
         self.is_running = False
@@ -420,6 +429,17 @@ class SmartOrderMonitor:
         
         # 🔴 [v1.3 신규] last_reset_date 초기화 (ET 기준)
         self.reset_counters_if_needed()
+
+    # 
+    # ↓↓↓ (v2.0 수정 2) set_telegram_order_manager 메서드 추가 ↓↓↓
+    #
+    def set_telegram_order_manager(self, manager):
+        """main.py에서 TelegramOrderManager를 주입받기 위한 세터(setter)"""
+        self.telegram_order_manager = manager
+        logger.info("✅ TelegramOrderManager(B)가 SmartOrderMonitor(A)에 연결되었습니다.")
+    #
+    # ↑↑↑ (v2.0 수정 2) 완료 ↑↑↑
+    #
 
     def load_persisted_state(self):
         """Spec 7.1: Load persisted state from file"""
@@ -612,16 +632,45 @@ class SmartOrderMonitor:
         
         return False
 
+    # 
+    # ↓↓↓ (v2.0 수정 3) handle_sleep_mode: 텔레그램 주문 취소 로직 추가 ↓↓↓
+    #
     def handle_sleep_mode(self):
         """Spec 2.2: Handle sleep mode (한국시간 01:00)"""
         logger.info("😴 슬립 모드 진입 - 한국시간 오전 01시")
+
+        # 🆕 [v2.0] Task: 텔레그램 주문 취소 (기획서 7.4)
+        if hasattr(self, 'telegram_order_manager') and self.telegram_order_manager:
+            try:
+                cancelled_orders = self.telegram_order_manager.cancel_all_pending_orders()
+                if cancelled_orders:
+                    logger.info(f"🌙 [TG] 슬립 모드: {len(cancelled_orders)}개 대기 주문 취소됨.")
+                    
+                    # 알림 메시지 생성
+                    message = f"😴 <b>슬립 모드 진입: {len(cancelled_orders)}개 주문 취소</b>\n\n"
+                    message += "당일 대기 중이던 다음 텔레그램 주문이 자동 취소되었습니다:\n\n"
+                    for order in cancelled_orders[:10]: # 최대 10개 표시
+                        message += f"• {order['ticker']} @ ${order['target_price']:.2f} ({order['quantity']}주)\n"
+                    if len(cancelled_orders) > 10:
+                        message += f"...외 {len(cancelled_orders) - 10}건"
+                    
+                    if self.telegram_bot:
+                        self.telegram_bot.send_message(message, force=True)
+                
+            except Exception as e:
+                logger.error(f"❌ 슬립 모드 중 텔레그램 주문 취소 실패: {e}")
+        else:
+            logger.warning("⚠️ 텔레그램 주문 관리자(telegram_order_manager)가 SmartOrderMonitor에 연결되지 않았습니다.")
         
-        # ✅ 슬립모드 알림 전송
+        # ✅ 슬립모드 알림 전송 (기존)
         if self.telegram_bot:
             self.telegram_bot.send_sleep_mode_notification(reason="normal")
         
-        # ✅ 당일 매매 내역 CSV 전송 (수정 4)
+        # ✅ 당일 매매 내역 CSV 전송 (기존)
         self.send_daily_trades_csv()
+    #
+    # ↑↑↑ (v2.0 수정 3) 완료 ↑↑↑
+    #
 
     def send_daily_trades_csv(self):
         """
@@ -940,7 +989,7 @@ class SmartOrderMonitor:
                 "custtype": "P"
             }
             
-            today = datetime.now().strftime("%Y%m%d")
+            today = datetime.now().strftime("%Ym%d")
             
             # Official API parameters (GitHub verified)
             params = {
@@ -1188,7 +1237,7 @@ class SmartOrderMonitor:
                 "custtype": "P"
             }
             
-            today = datetime.now().strftime("%Y%m%d")
+            today = datetime.now().strftime("%Ym%d")
             
             params = {
                 "CANO": self.config['cano'],
@@ -1524,7 +1573,7 @@ class SmartOrderMonitor:
                                             f"ℹ️ 시스템 정보\n매도 대상 없음: {order_info['ticker']} (이미 매도됨)"
                                         )
                                 
-                                logger.info(f"🗑️ Order {order_no} removed from monitoring (already sold)")
+                                logger.info(f"🗑️ Order {order_no} not added to monitoring (already sold)")
                             
                             self.save_state() # 락 내부에서 호출
                         # ✅ --- 수정 완료 1 ---

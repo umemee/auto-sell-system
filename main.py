@@ -9,6 +9,7 @@
 # 5. 시작 알림 메시지 v2.0으로 업데이트
 # 6. 메인 루프에서 WebSocket 상태 로깅 제거
 # 7. [개선] config.yaml에서 로그 파일 경로를 읽어오도록 수정
+# 8. [보완] A->B 슬립 모드 연동 (주문 취소용)
 
 import logging
 import time
@@ -314,6 +315,20 @@ def main():
         
         # 7. 스마트 모니터 (시스템 A) 스레드 시작
         logging.info("🧠 스마트 오더 모니터 (시스템 A) 시작...")
+
+        # 
+        # ↓↓↓ [v2.0 수정] A-B 시스템 연동 코드 추가 ↓↓↓
+        #
+        # 기획서 7.4 (시나리오 4) 준수를 위해 시스템 A(smart_monitor)가
+        # 시스템 B(telegram_order_manager)의 참조를 갖도록 연결합니다.
+        # (수면 모드 시 주문 자동 취소용)
+        if hasattr(smart_monitor, 'set_telegram_order_manager'):
+            smart_monitor.set_telegram_order_manager(telegram_order_manager)
+            logging.info("✅ [A] -> [B] 수면 모드 연동 완료")
+        #
+        # ↑↑↑ [v2.0 수정] 추가 완료 ↑↑↑
+        #
+
         smart_monitor.start()
         
         logging.info("✅ SmartOrderMonitor가 모든 시장 상태(pre, regular, closed)를 전담합니다.")
