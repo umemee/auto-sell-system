@@ -1,5 +1,5 @@
 # telegram_order_manager.py - 해외주식 자동매도 시스템 v2.0
-# 기획서 v2.0 (섹션 5, 8, 10) 기반
+# 기획서 v2.0 (섹션 5, 8, 10) 기반 (Task 2, 3 적용)
 
 import json
 import logging
@@ -36,6 +36,7 @@ class TelegramOrderManager:
     기획서 v2.0 (섹션 5)
     - Phase 1: 주문 관리 (CRUD, File I/O)
     - Phase 2: 목표가 감시 및 자동 매수
+    - Phase 3: 대화형 핸들러 (v2.0 Task 2)
     """
     
     def __init__(self, config, token_manager, telegram_bot, order_monitor, trade_counter):
@@ -195,6 +196,346 @@ class TelegramOrderManager:
             logger.info(f"🌙 [TG] 슬립 모드: 대기 중인 주문 {len(cancelled_orders)}건 전체 취소")
             return cancelled_orders
 
+    # 
+    # ↓↓↓ (v2.0 Task 2) 신규 메서드 4개 추가 ↓↓↓
+    #
+
+    # -------------------------------------------------------------------------
+    # 🆕 [v2.0] 대화형 명령어 핸들러 - 기획서 5.2
+    # -------------------------------------------------------------------------
+
+    def handle_buy_conversation(self, chat_id, user_input, state):
+        """
+        /buy 명령어 대화 흐름 처리 (기획서 5.2)
+        
+        Args:
+            chat_id: 텔레그램 채팅 ID
+            user_input: 사용자 입력 (None이면 첫 단계)
+            state: 대화 상태 딕셔너리 (telegram_bot.py가 관리)
+        
+        Returns:
+            str: 사용자에게 보낼 응답 메시지 (HTML 형식)
+        """
+        current_step = state.get('step', 'awaiting_ticker')
+        data = state.get('data', {})
+        
+        try:
+            # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+            # 단계 1: 종목 코드 입력
+            # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+            if current_step == 'awaiting_ticker':
+                if user_input is None:
+                    # 첫 시작: 종목 코드 요청
+                    return (
+                        "📝 <b>텔레그램 주문 시작</b>\n\n"
+                        "종목 코드를 입력하세요 (예: AAPL, TSLA)\n"
+                        "'취소'를 입력하면 중단됩니다."
+                    )
+                
+                # 사용자가 종목 입력
+                ticker = user_input.strip().upper()
+                
+                # 검증: 알파벳만
+                if not ticker.isalpha() or len(ticker) > 5:
+                    return (
+                        "⚠️ 잘못된 종목 코드입니다.\n\n"
+                        "올바른 형식: AAPL, TSLA (알파벳만)\n"
+                        "다시 입력하세요:"
+                    )
+                
+                # 현재가 조회
+                current_price = get_current_price(self.config, self.token_manager, ticker)
+                
+                if not current_price or current_price == 0:
+                    return (
+                        f"⚠️ {ticker} 시세를 조회할 수 없습니다.\n\n"
+                        "종목 코드를 다시 확인하고 입력하세요:"
+                    )
+                
+                # 저장 후 다음 단계
+                data['ticker'] = ticker
+                data['current_price'] = current_price
+                state['step'] = 'awaiting_price'
+                
+                return (
+                    f"💵 <b>{ticker} 목표 매수가 입력</b>\n\n"
+                    f"현재가: <b>${current_price:.2f}</b>\n\n"
+                    f"목표 매수가를 입력하세요 (USD):\n"
+                    f"예: 175.00"
+                )
+            
+            # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+            # 단계 2: 목표가 입력
+            # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+            elif current_step == 'awaiting_price':
+                try:
+                    target_price = float(user_input.strip())
+                    
+                    if target_price <= 0:
+                        return "⚠️ 가격은 0보다 커야 합니다.\n다시 입력하세요:"
+                    
+                    # 저장 후 다음 단계
+                    data['target_price'] = target_price
+                    state['step'] = 'awaiting_ratio'
+                    
+                    # 가용 자금 조회
+                    available_funds = get_available_funds(self.config, self.token_manager)
+                    data['available_funds'] = available_funds
+                    
+                    return (
+                        f"📊 <b>투자 비율 입력</b>\n\n"
+                        f"가용 자금: <b>${available_funds:.2f}</b>\n"
+                        f"목표가: ${target_price:.2f}\n\n"
+                        f"몇 %를 사용하시겠습니까? (1-100)\n"
+                        f"예: 20 (20% = ${available_funds * 0.2:.2f})"
+                    )
+                
+                except ValueError:
+                    return "⚠️ 숫자만 입력하세요 (예: 175.00):"
+            
+            # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+            # 단계 3: 투자 비율 입력
+            # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+            elif current_step == 'awaiting_ratio':
+                try:
+                    ratio = float(user_input.strip())
+                    
+                    if ratio <= 0 or ratio > 100:
+                        return "⚠️ 비율은 1~100 사이여야 합니다.\n다시 입력하세요:"
+                    
+                    # 수량 계산
+                    available_funds = data['available_funds']
+                    target_price = data['target_price']
+                    investment = available_funds * (ratio / 100)
+                    quantity = int(investment / target_price)
+                    
+                    if quantity == 0:
+                        return (
+                            f"⚠️ 자금 부족: ${investment:.2f}로는 1주({target_price})도 살 수 없습니다.\n"
+                            f"비율을 높이거나 목표가를 낮추세요:"
+                        )
+                    
+                    # 저장 후 다음 단계
+                    data['ratio'] = ratio
+                    data['quantity'] = quantity
+                    data['estimated_cost'] = quantity * target_price
+                    state['step'] = 'awaiting_confirmation'
+                    
+                    # 목표 매도가 계산
+                    profit_rate = self.config.get('order_settings', {}).get('target_profit_rate', 6.0)
+                    target_sell_price = target_price * (1 + profit_rate / 100)
+                    
+                    return (
+                        f"✅ <b>주문 확인</b>\n\n"
+                        f"종목: <b>{data['ticker']}</b>\n"
+                        f"목표가: ${target_price:.2f}\n"
+                        f"투자 비율: {ratio:.1f}% (${investment:.2f})\n"
+                        f"예상 수량: <b>{quantity}주</b>\n"
+                        f"예상 비용: ${data['estimated_cost']:.2f}\n\n"
+                        f"🎯 목표 매도가: <b>${target_sell_price:.2f}</b> (+{profit_rate}%)\n\n"
+                        f"주문하시려면 <b>'확인'</b>을 입력하세요.\n"
+                        f"취소하려면 '취소'를 입력하세요."
+                    )
+                
+                except ValueError:
+                    return "⚠️ 숫자만 입력하세요 (예: 20):"
+            
+            # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+            # 단계 4: 확인
+            # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+            elif current_step == 'awaiting_confirmation':
+                if user_input.strip() == '확인':
+                    # 주문 추가
+                    result = self.add_pending_order(
+                        ticker=data['ticker'],
+                        target_price=data['target_price'],
+                        ratio=data['ratio']
+                    )
+                    
+                    if result.get('success'):
+                        order_data = result['order_data']
+                        state['step'] = 'done'
+                        
+                        return (
+                            f"🎯 <b>주문 접수 완료!</b>\n\n"
+                            f"주문번호: <code>{order_data['order_id']}</code>\n"
+                            f"종목: <b>{order_data['ticker']}</b>\n"
+                            f"목표가: ${order_data['target_price']:.2f}\n"
+                            f"수량: {order_data['quantity']}주\n\n"
+                            f"목표가에 도달하면 자동으로 매수합니다.\n"
+                            f"/orders 명령으로 확인하세요."
+                        )
+                    else:
+                        error_code = result.get('error', 'UNKNOWN')
+                        error_msg = result.get('message', '알 수 없는 오류')
+                        state['step'] = 'done'
+                        
+                        return (
+                            f"❌ <b>주문 실패</b>\n\n"
+                            f"오류: {error_msg}\n"
+                            f"코드: {error_code}\n\n"
+                            f"다시 시도하려면 /buy 명령을 실행하세요."
+                        )
+                else:
+                    return (
+                        "⚠️ '확인' 또는 '취소'를 입력하세요.\n\n"
+                        f"종목: {data['ticker']}\n"
+                        f"목표가: ${data['target_price']:.2f}\n"
+                        f"수량: {data['quantity']}주"
+                    )
+        
+        except Exception as e:
+            logger.error(f"❌ /buy 대화 처리 오류: {e}")
+            state['step'] = 'done'
+            return (
+                f"❌ 오류가 발생했습니다: {str(e)}\n\n"
+                f"다시 시도하려면 /buy 명령을 실행하세요."
+            )
+
+    def handle_cancel_conversation(self, chat_id, user_input, state):
+        """
+        /cancel 명령어 대화 흐름 처리 (기획서 5.2)
+        
+        Args:
+            chat_id: 텔레그램 채팅 ID
+            user_input: 사용자 입력 (None이면 첫 단계)
+            state: 대화 상태 딕셔너리
+        
+        Returns:
+            str: 사용자에게 보낼 응답 메시지 (HTML 형식)
+        """
+        current_step = state.get('step', 'awaiting_cancel_number')
+        data = state.get('data', {})
+        
+        try:
+            # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+            # 단계 1: 취소할 주문 선택
+            # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+            if current_step == 'awaiting_cancel_number':
+                if user_input is None:
+                    # 첫 시작: 주문 목록 표시
+                    orders = self.get_pending_orders()
+                    
+                    if not orders:
+                        state['step'] = 'done'
+                        return "📋 취소할 주문이 없습니다."
+                    
+                    # 주문 목록 저장
+                    data['orders'] = orders
+                    
+                    message = "🗑️ <b>주문 취소</b>\n\n"
+                    message += "취소할 주문 번호를 입력하세요:\n\n"
+                    
+                    for i, order in enumerate(orders, 1):
+                        ticker = order['ticker']
+                        price = order['target_price']
+                        qty = order['quantity']
+                        
+                        # 현재가 조회
+                        current_price = get_current_price(self.config, self.token_manager, ticker)
+                        diff = ((current_price - price) / price * 100) if current_price else 0
+                        
+                        message += (
+                            f"{i}️⃣ <b>{ticker}</b> @ ${price:.2f} ({qty}주)\n"
+                            f"   현재가: ${current_price:.2f} ({diff:+.1f}%)\n\n"
+                        )
+                    
+                    message += "'취소'를 입력하면 중단됩니다."
+                    return message
+                
+                # 사용자가 번호 입력
+                try:
+                    choice = int(user_input.strip())
+                    orders = data['orders']
+                    
+                    if choice < 1 or choice > len(orders):
+                        return f"⚠️ 1~{len(orders)} 사이의 숫자를 입력하세요:"
+                    
+                    # 선택된 주문 취소
+                    selected_order = orders[choice - 1]
+                    order_id = selected_order['order_id']
+                    
+                    cancelled = self.cancel_order(order_id)
+                    
+                    if cancelled:
+                        state['step'] = 'done'
+                        return (
+                            f"✅ <b>주문이 취소되었습니다</b>\n\n"
+                            f"종목: {cancelled['ticker']}\n"
+                            f"목표가: ${cancelled['target_price']:.2f}\n"
+                            f"수량: {cancelled['quantity']}주\n"
+                            f"취소 시각: {datetime.now().strftime('%H:%M:%S')}"
+                        )
+                    else:
+                        state['step'] = 'done'
+                        return "⚠️ 주문을 찾을 수 없습니다. 이미 취소되었거나 체결되었을 수 있습니다."
+                
+                except ValueError:
+                    return "⚠️ 숫자를 입력하세요:"
+        
+        except Exception as e:
+            logger.error(f"❌ /cancel 대화 처리 오류: {e}")
+            state['step'] = 'done'
+            return f"❌ 오류가 발생했습니다: {str(e)}"
+
+    def get_pending_orders_message(self):
+        """
+        /orders 명령어: 대기 중인 주문 목록 메시지 생성 (기획서 5.2)
+        
+        Returns:
+            str: HTML 형식의 주문 목록 메시지
+        """
+        orders = self.get_pending_orders()
+        
+        if not orders:
+            return "📋 대기 중인 주문이 없습니다.\n\n/buy 명령으로 새 주문을 만드세요."
+        
+        message = f"📋 <b>대기 중인 주문</b> ({len(orders)}개)\n\n"
+        
+        for i, order in enumerate(orders, 1):
+            ticker = order['ticker']
+            target_price = order['target_price']
+            quantity = order['quantity']
+            created_at = order['created_at']
+            
+            # 생성 시각 포맷팅
+            created_dt = datetime.fromisoformat(created_at)
+            created_str = created_dt.strftime('%m-%d %H:%M')
+            
+            # 현재가 조회
+            current_price = get_current_price(self.config, self.token_manager, ticker)
+            
+            if current_price and current_price > 0:
+                diff = ((current_price - target_price) / target_price) * 100
+                status_emoji = "🔽" if diff < 0 else "🔼"
+                
+                message += (
+                    f"{i}️⃣ <b>{ticker}</b> @ ${target_price:.2f} ({quantity}주)\n"
+                    f"   현재가: ${current_price:.2f} {status_emoji} ({diff:+.1f}%)\n"
+                    f"   생성: {created_str}\n"
+                    f"   상태: 대기 중\n\n"
+                )
+            else:
+                message += (
+                    f"{i}️⃣ <b>{ticker}</b> @ ${target_price:.2f} ({quantity}주)\n"
+                    f"   현재가: 조회 실패\n"
+                    f"   생성: {created_str}\n"
+                    f"   상태: 대기 중\n\n"
+                )
+        
+        message += f"\n최대 {self.MAX_PENDING_ORDERS}개까지 등록 가능 ({len(orders)}/{self.MAX_PENDING_ORDERS})\n"
+        message += "\n/cancel 명령으로 주문을 취소할 수 있습니다."
+        
+        return message
+
+    def get_pending_order_count(self):
+        """대기 중인 주문 수 반환 (/status 명령어용)"""
+        return len(self.pending_orders)
+
+    # 
+    # ↑↑↑ (v2.0 Task 2) 신규 메서드 4개 추가 완료 ↑↑↑
+    #
+
     # -------------------------------------------------------------------------
     # Phase 2: 목표가 감시 및 자동 매수 - 기획서 10.2
     # -------------------------------------------------------------------------
@@ -231,8 +572,15 @@ class TelegramOrderManager:
         while self.is_running:
             start_time = time.time()
             try:
+                # 
+                # ↓↓↓ (v2.0 Task 3) 코드 삭제 ↓↓↓
+                #
                 # 🔴 [수정 3] reset_if_new_day()는 반환값 없음 (호출만)
-                self.trade_counter.reset_if_new_day()
+                # self.trade_counter.reset_if_new_day() # <-- 이 줄이 삭제됨
+                
+                # 
+                # ↑↑↑ (v2.0 Task 3) 코드 삭제 완료 ↑↑↑
+                #
                 
                 # 🔴 [수정 2] order.py의 should_system_run() 직접 호출
                 # 주말/운영시간 외에는 감시 중지 (기획서 2.3)

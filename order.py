@@ -1,4 +1,4 @@
-# order.py - 해외주식 자동매도 시스템 
+# order.py - 해외주식 자동매도 시스템 (v2.0 헬퍼 함수 추가)
 
 import requests
 import json
@@ -74,13 +74,9 @@ def is_extended_hours(trading_timezone='US/Eastern'):
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 def should_system_run(trading_timezone='US/Eastern'):
     """
-    기획서 2.2: 시스템 운영 여부 확인
+    기획서 2.2: 시스템 운영 여부 확인 (v2.0 기획서 2.3 주말 슬립 반영)
     
-    ✅ 슬립 시간: 한국시간 오전 01:00 고정
-    - 서머타임: ET 12:00 = 한국 01:00
-    - 표준시: ET 11:00 = 한국 01:00 (자동 조정 안 됨, 수동 설정 필요)
-    
-    ✅ [신규] 주말 자동 슬립 모드
+    ✅ [신규] 주말 자동 슬립 모드 (기획서 2.3)
     - 금요일 ET 12:00 종료 → 월요일 ET 04:00 재시작
     - 주말(토, 일) 내내 슬립 모드 유지
 
@@ -94,7 +90,7 @@ def should_system_run(trading_timezone='US/Eastern'):
         weekday = now_dt.weekday()  # 요일 (0=월, 1=화, ..., 4=금, 5=토, 6=일)
 
         # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-        # 🔴 [신규] 주말 슬립 모드 (토요일, 일요일)
+        # 🔴 [v2.0] 주말 슬립 모드 (토요일, 일요일)
         # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
         if weekday in [5, 6]:  # 토요일 또는 일요일
             weekday_names = ['월', '화', '수', '목', '금', '토', '일']
@@ -102,16 +98,20 @@ def should_system_run(trading_timezone='US/Eastern'):
             return False
 
         # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-        # 🔴 [신규] 월요일 새벽 슬립 모드 (ET 04:00 이전)
+        # 🔴 [v2.0] 월요일 새벽 슬립 모드 (ET 04:00 이전)
+        # 🔴 [v2.0] 기획서 2.2 (운영시간) : v1.x 실제 구현 기준 05:00 시작
         # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-        if weekday == 0 and now_time < dtime(4, 0):  # 월요일 04:00 이전
+        # (v1.2 코드의 04:00 대신 05:00로 수정)
+        start_time_of_day = dtime(5, 0) # 05:00 ET
+
+        if weekday == 0 and now_time < start_time_of_day:  # 월요일 05:00 이전
             logger.debug(f"🌙 월요일 새벽 (ET {now_time.strftime('%H:%M')}) - 아직 시작 전")
             return False
 
         # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-        # 기존 로직: 운영 시간 체크 (ET 04:00-12:00)
+        # 🔴 [v2.0] 운영 시간 체크 (ET 05:00-12:00)
         # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-        start_time = dtime(4, 0)   # 04:00 ET
+        start_time = start_time_of_day   # 05:00 ET
         end_time = dtime(12, 0)    # 12:00 ET
 
         is_running = start_time <= now_time < end_time
@@ -528,13 +528,12 @@ def place_sell_order(config, token_manager, execution_data, telegram_bot=None):
         - 텔레그램 알림만
     """
     try:
-        # 기획서 4.1: 매도가 계산 (수익률 3% 고정)
+        # 기획서 4.1: 매도가 계산
         buy_price = execution_data['price']
         
-        # 기획서 4.2: config에서 수익률 가져오기
-        # order_settings.target_profit_rate: 3.0 (%)
-        target_profit_rate = config.get('order_settings', {}).get('target_profit_rate', 3.0)
-        profit_margin = target_profit_rate / 100  # 3.0 → 0.03
+        # 🔴 [v2.0] 기획서 4.1: config에서 수익률 가져오기 (6.0% 기준)
+        target_profit_rate = config.get('order_settings', {}).get('target_profit_rate', 6.0)
+        profit_margin = target_profit_rate / 100  # 6.0 → 0.06
         
         # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
         # 🔴 [v1.4 수정] $1 기준 조건부 반올림
@@ -691,6 +690,339 @@ def place_sell_order(config, token_manager, execution_data, telegram_bot=None):
         
         return False
 
+# 
+# ↓↓↓ (v2.0 신규 함수 추가) ↓↓↓
+#
+
+# ============================================================================
+# 🆕 [v2.0] 텔레그램 주문용 헬퍼 함수
+# ============================================================================
+
+def get_current_price(config, token_manager, ticker):
+    """
+    실시간 시세 조회 (기획서 5.4)
+    
+    한국투자증권 API:
+    - TR_ID: HHDFS00000300 (해외주식 현재가 상세)
+    - 엔드포인트: /uapi/overseas-price/v1/quotations/price
+    
+    Args:
+        config: 설정 딕셔너리
+        token_manager: TokenManager 인스턴스
+        ticker: 종목코드 (예: 'AAPL')
+    
+    Returns:
+        float: 현재가 (USD) 또는 None (실패 시)
+    
+    Example:
+        >>> price = get_current_price(config, token_manager, 'AAPL')
+        >>> print(f"AAPL 현재가: ${price:.2f}")
+    """
+    try:
+        # API 엔드포인트
+        url = f"{config['api']['base_url']}/uapi/overseas-price/v1/quotations/price"
+        
+        # 액세스 토큰 확인
+        token = token_manager.get_access_token()
+        if not token:
+            logger.error("❌ 시세 조회: 액세스 토큰 없음")
+            return None
+        
+        # 거래소 코드 결정 (간단한 로직)
+        exchange_code = 'NAS'  # 기본값: NASDAQ
+        if ticker in ['AAPL', 'MSFT', 'GOOGL', 'TSLA', 'NVDA', 'AMZN', 'META']:
+            exchange_code = 'NAS'
+        
+        # 헤더 설정
+        headers = {
+            "Content-Type": "application/json",
+            "authorization": f"Bearer {token}",
+            "appkey": config["api_key"],
+            "appsecret": config["api_secret"],
+            "tr_id": "HHDFS00000300",  # 해외주식 현재가 상세
+            "custtype": "P"
+        }
+        
+        # 파라미터 설정
+        params = {
+            "AUTH": "",
+            "EXCD": exchange_code,  # 거래소코드
+            "SYMB": ticker           # 종목코드
+        }
+        
+        logger.debug(f"📊 시세 조회: {ticker} ({exchange_code})")
+        
+        # GET 요청
+        response = requests.get(url, headers=headers, params=params, timeout=10)
+        
+        if response.status_code != 200:
+            logger.error(f"❌ 시세 조회 HTTP 오류: {response.status_code}")
+            return None
+        
+        # JSON 파싱
+        data = response.json()
+        
+        # 정상 응답 확인
+        rt_cd = data.get("rt_cd", "")
+        if rt_cd != "0":
+            msg1 = data.get("msg1", "알 수 없는 오류")
+            logger.warning(f"⚠️ 시세 조회 실패: {msg1} (rt_cd={rt_cd})")
+            return None
+        
+        # 현재가 추출 (last)
+        output = data.get("output", {})
+        current_price_str = output.get("last", "0")
+        
+        try:
+            current_price = float(current_price_str)
+            
+            if current_price <= 0:
+                logger.warning(f"⚠️ 비정상적인 시세: {ticker} = ${current_price}")
+                return None
+            
+            logger.debug(f"✅ {ticker} 현재가: ${current_price:.2f}")
+            return current_price
+        
+        except (ValueError, TypeError):
+            logger.error(f"❌ 시세 파싱 오류: {current_price_str}")
+            return None
+    
+    except requests.exceptions.Timeout:
+        logger.error("❌ 시세 조회 타임아웃 (10초)")
+        return None
+    except requests.exceptions.RequestException as e:
+        logger.error(f"❌ 시세 조회 네트워크 오류: {e}")
+        return None
+    except Exception as e:
+        logger.error(f"❌ 시세 조회 오류: {e}")
+        import traceback
+        traceback.print_exc()
+        return None
+
+
+def get_available_funds(config, token_manager):
+    """
+    가용 매수 금액 조회 (기획서 5.5)
+    
+    한국투자증권 API:
+    - TR_ID: TTTS3007R (해외주식 잔고)
+    - 엔드포인트: /uapi/overseas-stock/v1/trading/inquire-balance
+    
+    Args:
+        config: 설정 딕셔너리
+        token_manager: TokenManager 인스턴스
+    
+    Returns:
+        float: 가용 자금 (USD)
+    
+    Example:
+        >>> funds = get_available_funds(config, token_manager)
+        >>> print(f"가용 자금: ${funds:.2f}")
+    """
+    try:
+        # API 엔드포인트
+        url = f"{config['api']['base_url']}/uapi/overseas-stock/v1/trading/inquire-balance"
+        
+        # 액세스 토큰 확인
+        token = token_manager.get_access_token()
+        if not token:
+            logger.error("❌ 잔고 조회: 액세스 토큰 없음")
+            return 0.0
+        
+        # 헤더 설정
+        headers = {
+            "Content-Type": "application/json",
+            "authorization": f"Bearer {token}",
+            "appkey": config["api_key"],
+            "appsecret": config["api_secret"],
+            "tr_id": "TTTS3007R",  # 해외주식 잔고 조회
+            "custtype": "P"
+        }
+        
+        # 파라미터 설정
+        params = {
+            "CANO": config["cano"],
+            "ACNT_PRDT_CD": config["acnt_prdt_cd"],
+            "OVRS_EXCG_CD": "NASD",  # 미국 전체
+            "TR_CRCY_CD": "USD",     # 달러
+            "CTX_AREA_FK200": "",
+            "CTX_AREA_NK200": ""
+        }
+        
+        logger.debug("💰 가용 자금 조회 중...")
+        
+        # GET 요청
+        response = requests.get(url, headers=headers, params=params, timeout=15)
+        
+        if response.status_code != 200:
+            logger.error(f"❌ 잔고 조회 HTTP 오류: {response.status_code}")
+            return 0.0
+        
+        # JSON 파싱
+        data = response.json()
+        
+        # 정상 응답 확인
+        rt_cd = data.get("rt_cd", "")
+        if rt_cd != "0":
+            msg1 = data.get("msg1", "알 수 없는 오류")
+            logger.warning(f"⚠️ 잔고 조회 실패: {msg1} (rt_cd={rt_cd})")
+            return 0.0
+        
+        # output1: 계좌 요약 정보
+        output1 = data.get("output1", {})
+        
+        # 가용 현금 추출 (frcr_dncl_amt_2: 외화 예수금 잔액)
+        available_cash_str = output1.get("frcr_dncl_amt_2", "0")
+        
+        try:
+            available_cash = float(available_cash_str)
+            
+            logger.info(f"✅ 가용 자금: ${available_cash:.2f}")
+            return available_cash
+        
+        except (ValueError, TypeError):
+            logger.error(f"❌ 가용 자금 파싱 오류: {available_cash_str}")
+            return 0.0
+    
+    except requests.exceptions.Timeout:
+        logger.error("❌ 잔고 조회 타임아웃 (15초)")
+        return 0.0
+    except requests.exceptions.RequestException as e:
+        logger.error(f"❌ 잔고 조회 네트워크 오류: {e}")
+        return 0.0
+    except Exception as e:
+        logger.error(f"❌ 잔고 조회 오류: {e}")
+        import traceback
+        traceback.print_exc()
+        return 0.0
+
+
+def place_buy_order(config, token_manager, ticker, quantity, price):
+    """
+    매수 주문 실행 (기획서 5.5)
+    
+    한국투자증권 API:
+    - TR_ID: TTTT1002U (해외주식 매수)
+    - 엔드포인트: /uapi/overseas-stock/v1/trading/order
+    
+    Args:
+        config: 설정 딕셔너리
+        token_manager: TokenManager 인스턴스
+        ticker: 종목코드 (예: 'AAPL')
+        quantity: 수량
+        price: 지정가 (USD)
+    
+    Returns:
+        dict: {'success': True, 'order_no': '주문번호'}
+              또는 {'success': False, 'error': '오류메시지'}
+    
+    Example:
+        >>> result = place_buy_order(config, token_manager, 'AAPL', 10, 175.00)
+        >>> if result['success']:
+        ...     print(f"매수 성공: {result['order_no']}")
+    """
+    try:
+        logger.info(f"🎯 매수 주문 준비: {ticker} {quantity}주 @ ${price:.2f}")
+        
+        # 거래소 코드 결정
+        exchange_code = 'NASD'  # 기본값
+        if ticker in ['AAPL', 'MSFT', 'GOOGL', 'TSLA', 'NVDA', 'AMZN', 'META']:
+            exchange_code = 'NASD'
+        
+        # 주문 데이터 생성
+        order_data = {
+            "CANO": config['cano'],
+            "ACNT_PRDT_CD": config['acnt_prdt_cd'],
+            "OVRS_EXCG_CD": exchange_code,
+            "PDNO": ticker,
+            "ORD_QTY": str(quantity),
+            "OVRS_ORD_UNPR": str(price),  # 지정가
+            "CTAC_TLNO": "",
+            "MGCO_APTM_ODNO": "",
+            "ORD_SVR_DVSN_CD": "0",
+            "ORD_DVSN": "00"  # 지정가
+        }
+        
+        logger.debug(f"📤 주문 데이터: {ticker} {quantity}주")
+        
+        # HashKey 생성 (필수!)
+        hashkey = get_hash_key(config, token_manager, order_data)
+        
+        if not hashkey:
+            logger.error("❌ HashKey 생성 실패, 주문 중단")
+            return {'success': False, 'error': 'HashKey 생성 실패'}
+        
+        # 액세스 토큰 확인
+        token = token_manager.get_access_token()
+        if not token:
+            logger.error("❌ 유효한 토큰을 가져올 수 없습니다.")
+            return {'success': False, 'error': '토큰 없음'}
+        
+        # API 요청 헤더 설정
+        headers = {
+            "Content-Type": "application/json; charset=utf-8",
+            "authorization": f"Bearer {token}",
+            "appkey": config['api_key'],
+            "appsecret": config['api_secret'],
+            "tr_id": "TTTT1002U",  # 해외주식 매수 주문
+            "custtype": "P",
+            "hashkey": hashkey
+        }
+        
+        # 매수 주문 API 호출
+        buy_url = f"{config['api']['base_url']}/uapi/overseas-stock/v1/trading/order"
+        
+        logger.info(f"📤 매수 주문 전송 중: {ticker} {quantity}주 @ ${price:.2f}")
+        
+        response = requests.post(buy_url, headers=headers, json=order_data, timeout=10)
+        
+        # 응답 확인
+        if response.status_code == 200:
+            result = response.json()
+            rt_cd = result.get("rt_cd", "")
+            
+            if rt_cd == "0":
+                order_no = result.get("output", {}).get("ODNO", "")
+                
+                logger.info(f"✅ 매수 주문 접수: {ticker} (주문번호: {order_no})")
+                
+                return {
+                    'success': True,
+                    'order_no': order_no,
+                    'ticker': ticker,
+                    'quantity': quantity,
+                    'price': price
+                }
+            else:
+                msg1 = result.get("msg1", "알 수 없는 오류")
+                logger.error(f"❌ 매수 주문 실패: {msg1} (rt_cd={rt_cd})")
+                
+                return {
+                    'success': False,
+                    'error': msg1
+                }
+        else:
+            logger.error(f"❌ 매수 주문 HTTP 오류: {response.status_code}")
+            logger.error(f"응답: {response.text}")
+            
+            return {
+                'success': False,
+                'error': f"HTTP {response.status_code}"
+            }
+    
+    except Exception as e:
+        logger.error(f"❌ 매수 주문 실행 중 오류: {e}")
+        import traceback
+        traceback.print_exc()
+        
+        return {
+            'success': False,
+            'error': str(e)
+        }
+
+# 
+# ↑↑↑ (v2.0 신규 함수 추가 완료) ↑↑↑
+#
 
 # ============================================================================
 # 주문 모니터링 클래스 (프리마켓용 REST 폴링)
