@@ -1,5 +1,6 @@
 # telegram_order_manager.py - 해외주식 자동매도 시스템 v2.0
 # 기획서 v2.0 (섹션 5, 8, 10) 기반 (Task 2, 3 적용)
+# 🆕 [v2.0] config 경로 및 디렉토리 생성 오류 수정
 
 import json
 import logging
@@ -55,11 +56,23 @@ class TelegramOrderManager:
         self.trade_counter = trade_counter
         
         # 기획서 8.1: 텔레그램 주문 상태 파일
-        # 🔴 [수정 6] config.yaml에 없어도 안전하게 절대 경로를 기본값으로 사용
-        self.state_file = config.get('system', {}).get(
-            'telegram_state_file', 
-            '/home/ec2-user/overseas-stock-auto-sell/telegram_orders.json'
+        # 
+        # ↓↓↓ (v2.0 경로 오류 수정) ↓↓↓
+        #
+        # ❌ [수정 전]
+        # self.state_file = config.get('system', {}).get(
+        #     'telegram_state_file', 
+        #     '/home/ec2-user/overseas-stock-auto-sell/telegram_orders.json'
+        # )
+        
+        # ✅ [수정 후] config.yaml의 [telegram_orders] 섹션을 바라보도록 수정
+        self.state_file = config.get('telegram_orders', {}).get(
+            'state_file', 
+            'telegram_orders.json' # config.yaml에도 정의된 기본값
         )
+        #
+        # ↑↑↑ (v2.0 경로 오류 수정 완료) ↑↑↑
+        #
         
         # 기획서 5.3: 최대 주문 수
         self.MAX_PENDING_ORDERS = 6
@@ -81,6 +94,23 @@ class TelegramOrderManager:
     def load_orders(self):
         """기획서 8.3: telegram_orders.json에서 주문 상태 로드"""
         with self.lock:
+            # 
+            # ↓↓↓ (v2.0 디렉토리 생성 추가) ↓↓↓
+            #
+            # --- ✅ [추가] 디렉토리 자동 생성 ---
+            try:
+                # state_file이 'logs/telegram_orders.json' 등일 경우 대비
+                log_dir = os.path.dirname(self.state_file)
+                if log_dir and not os.path.exists(log_dir):
+                    os.makedirs(log_dir, exist_ok=True)
+                    logger.info(f"텔레그램 주문 상태 디렉토리 생성: {log_dir}")
+            except Exception as e:
+                logger.warning(f"텔레그램 주문 디렉토리 생성 실패: {e}")
+            # --- ✅ [추가] 완료 ---
+            #
+            # ↑↑↑ (v2.0 디렉토리 생성 추가 완료) ↑↑↑
+            #
+
             if not os.path.exists(self.state_file):
                 logger.warning(f"{self.state_file}이(가) 없습니다. 새 파일을 생성합니다.")
                 self.save_orders_internal() # 빈 파일 생성
