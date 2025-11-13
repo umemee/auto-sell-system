@@ -1,4 +1,4 @@
-# smart_order_monitor.py - Korea Investment Securities Smart Order Monitor
+# smart_order_monitor.py - v2.0 기획서 Phase 4 (DailyTradeCounter) 적용
 # Specification v1.1 Compliant
 
 import requests
@@ -28,18 +28,27 @@ except ImportError:
             pass
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-# 🔴 [v1.2 신규] 일일 매매 횟수 제한 (2순위)
+# 🔴 [v2.0 수정] DailyTradeCounter v2.0 Phase 4 업그레이드
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 class DailyTradeCounter:
     """
-    일일 매매 횟수 카운터 (미국 동부 시간 기준)
-    요청사항 2순위: 하루 총 6회 (시간대 구분 없음)
+    일일 매매 횟수 카운터 (v2.0 통합 제어 시스템)
+    - source ('auto', 'telegram') 별 카운트
+    - threading.Lock()으로 Race Condition 방지 (기획서 12.2)
     """
     def __init__(self, telegram_bot=None):
         self.telegram_bot = telegram_bot
         self.date = None
         self.count = 0
         self.MAX_TRADES = 8  # 하루 최대 매매 횟수
+        
+        # 🆕 [v2.0] 소스별 카운트
+        self.auto_count = 0
+        self.telegram_count = 0
+        
+        # 🆕 [v2.0] Race Condition 방지용 락
+        self.lock = threading.Lock()
+        
         try:
             # 타임존 설정 (기본: US/Eastern)
             self.tz = timezone('US/Eastern')
@@ -47,10 +56,10 @@ class DailyTradeCounter:
             logger.error("pytz 라이브러리가 필요합니다. 'pip install pytz'")
             self.tz = None
         
-        self.reset_if_new_day()
+        self._reset_if_new_day() # 락 없이 내부 호출
 
-    def reset_if_new_day(self):
-        """날짜가 바뀌면 카운터 리셋"""
+    def _reset_if_new_day(self):
+        """(내부용) 날짜가 바뀌면 카운터 리셋 (락 없이 호출)"""
         if not self.tz:
             today = datetime.now().date() # Fallback
         else:
@@ -59,42 +68,80 @@ class DailyTradeCounter:
         if self.date != today:
             self.date = today
             self.count = 0
+            # 🆕 [v2.0] 소스별 카운트 리셋
+            self.auto_count = 0
+            self.telegram_count = 0
             logger.info(f"📅 새로운 날: {today} (ET). 매매 카운터 리셋 (최대 {self.MAX_TRADES}회).")
 
     def can_trade(self):
-        """매매 가능 여부 확인"""
-        self.reset_if_new_day()
-        
-        if self.count >= self.MAX_TRADES:
-            logger.warning(f"⚠️ 오늘 매매 {self.count}/{self.MAX_TRADES}회 도달. 더 이상 매매하지 않습니다.")
-            return False
-        return True
-
-    def increment(self):
-        """매매 횟수 증가"""
-        self.reset_if_new_day() # 날짜 변경 보장
-        
-        if self.count < self.MAX_TRADES:
-            self.count += 1
-            logger.info(f"✅ 매매 완료: {self.count}/{self.MAX_TRADES}회")
+        """매매 가능 여부 확인 (스레드 안전)"""
+        with self.lock:
+            self._reset_if_new_day()
             
-            # 텔레그램 알림 (선택)
+            if self.count >= self.MAX_TRADES:
+                logger.warning(f"⚠️ 오늘 매매 {self.count}/{self.MAX_TRADES}회 도달. 더 이상 매매하지 않습니다.")
+                return False
+            return True
+
+    def increment(self, source='auto'):
+        """
+        매매 횟수 증가 (스레드 안전)
+        
+        Args:
+            source (str): 'auto' 또는 'telegram'
+        """
+        with self.lock:
+            self._reset_if_new_day() # 날짜 변경 보장
+            
+            # 🆕 [v2.0] 한도 도달 시 방어적 코드 (기획서 7.2 Race Condition)
+            if self.count >= self.MAX_TRADES:
+                logger.warning(f"이미 매매 한도({self.MAX_TRADES}회) 도달. 카운트: {self.count}")
+                return
+
+            self.count += 1
+            
+            # 🆕 [v2.0] 소스별 카운트
+            if source == 'auto':
+                self.auto_count += 1
+            elif source == 'telegram':
+                self.telegram_count += 1
+                
+            logger.info(
+                f"✅ [{source.upper()}] 매매 완료: {self.count}/{self.MAX_TRADES}회 "
+                f"(Auto: {self.auto_count}, TG: {self.telegram_count})"
+            )
+            
+            # 텔레그램 알림 (한도 도달 시)
             if self.count >= self.MAX_TRADES:
                 if self.telegram_bot and hasattr(self.telegram_bot, 'send_message'):
                     try:
                         self.telegram_bot.send_message(
-                            f"🚫 오늘 매매 한도 도달 ({self.MAX_TRADES}회)\n"
+                            f"🚫 오늘 매매 한도 도달 ({self.MAX_TRADES}회)\n\n"
+                            f"• 자동 감지: {self.auto_count}회\n"
+                            f"• 텔레그램: {self.telegram_count}회\n\n"
                             f"내일 (ET 기준)까지 매매를 중단합니다."
                         )
                     except Exception as e:
                         logger.error(f"매매 한도 도달 알림 실패: {e}")
-        else:
-            logger.warning(f"이미 매매 한도({self.MAX_TRADES}회) 도달. 카운트: {self.count}")
+
+    # 🆕 [v2.0] main.py에서 요청한 통계 메서드
+    def get_stats(self):
+        """소스별 통계 반환 (스레드 안전)"""
+        with self.lock:
+            self._reset_if_new_day()
+            
+            return {
+                'total': self.count,
+                'auto': self.auto_count,
+                'telegram': self.telegram_count,
+                'remaining': self.MAX_TRADES - self.count,
+                'max_trades': self.MAX_TRADES
+            }
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-# 🔴 [추가] 수정 1: SellOrderMonitor 클래스
+# 🔴 [v2.0 수정] SellOrderMonitor (v2.0 연동)
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 class SellOrderMonitor:
     """
@@ -102,7 +149,7 @@ class SellOrderMonitor:
     
     역할:
     1. 매도 주문이 실제로 체결되었는지 10초마다 확인
-    2. 체결 확인 후에만 DailyTradeCounter 증가
+    2. 체결 확인 후에만 DailyTradeCounter 증가 (v2.0 - source 전달)
     3. 30분 이상 미체결 시 경고
     """
     
@@ -118,7 +165,7 @@ class SellOrderMonitor:
         self.is_running = False
         self.monitor_thread = None
         
-        logger.info("✅ SellOrderMonitor 초기화 완료")
+        logger.info("✅ SellOrderMonitor 초기화 완료 (v2.0)")
     
     def add_order(self, order_no, order_info):
         """
@@ -136,7 +183,7 @@ class SellOrderMonitor:
             }
         """
         self.pending_sells[order_no] = order_info
-        logger.info(f"📝 매도 주문 감시 등록: {order_no} ({order_info['ticker']})")
+        logger.info(f"📝 [{order_info.get('source', 'auto').upper()}] 매도 주문 감시 등록: {order_no} ({order_info['ticker']})")
     
     def check_order_filled(self, order_no):
         """
@@ -177,11 +224,11 @@ class SellOrderMonitor:
         """
         메인 감시 루프 - 10초마다 실행
         """
-        logger.info("🔍 매도 체결 감시 시작")
+        logger.info("🔍 매도 체결 감시 시작 (v2.0)")
         
         while self.is_running:
             try:
-                # 모든 대기 중인 주문 확인
+                # 락 없이 안전하게 순회하기 위해 list()로 복사
                 for order_no, info in list(self.pending_sells.items()):
                     
                     # 30분 이상 미체결이면 타임아웃
@@ -190,7 +237,8 @@ class SellOrderMonitor:
                         logger.warning(f"⚠️ 매도 미체결 타임아웃: {order_no} ({info['ticker']})")
                         
                         # 목록에서 제거
-                        del self.pending_sells[order_no]
+                        if order_no in self.pending_sells:
+                            del self.pending_sells[order_no]
                         
                         # 텔레그램 알림
                         if self.telegram_bot:
@@ -206,10 +254,13 @@ class SellOrderMonitor:
                     
                     # 체결 확인
                     if self.check_order_filled(order_no):
-                        logger.info(f"✅ 매도 체결 완료: {order_no} ({info['ticker']})")
+                        
+                        # 🆕 [v2.0] DailyTradeCounter에 source 전달
+                        source = info.get('source', 'auto')
+                        logger.info(f"✅ [{source.upper()}] 매도 체결 완료: {order_no} ({info['ticker']})")
                         
                         # ✅ 핵심: 체결 확인 후에만 카운터 증가!
-                        self.trade_counter.increment()
+                        self.trade_counter.increment(source=source)
                         
                         # 텔레그램 알림
                         if self.telegram_bot:
@@ -219,8 +270,11 @@ class SellOrderMonitor:
                             if buy_price > 0:
                                 profit_amount = (info['sell_price'] - buy_price) * info['quantity']
                             
+                            # 🆕 [v2.0] 알림에 소스 표시
+                            source_text = " (TG)" if source == 'telegram' else " (Auto)"
+                            
                             self.telegram_bot.send_message(
-                                f"✅ 매도 체결 완료 ({self.trade_counter.count}/{self.trade_counter.MAX_TRADES})\n\n"
+                                f"✅ 매도 체결 완료{source_text} ({self.trade_counter.get_stats()['total']}/{self.trade_counter.MAX_TRADES})\n\n"
                                 f"종목: {info['ticker']}\n"
                                 f"수량: {info['quantity']}주\n"
                                 f"체결가: ${info['sell_price']:.2f}\n"
@@ -229,7 +283,8 @@ class SellOrderMonitor:
                             )
                         
                         # 목록에서 제거
-                        del self.pending_sells[order_no]
+                        if order_no in self.pending_sells:
+                            del self.pending_sells[order_no]
                 
                 # 10초 대기
                 time.sleep(10)
@@ -348,19 +403,19 @@ class SmartOrderMonitor:
         # Last buy order scan time
         self.last_buy_scan = 0
         
-        # 🔴 [v1.2 신규] 일일 매매 카운터 초기화 (2순위)
+        # 🔴 [v2.0 수정] 일일 매매 카운터 초기화 (통합 제어)
         self.trade_counter = DailyTradeCounter(self.telegram_bot)
         
         # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-        # 🔴 [추가] 수정 2-1: 매도 체결 감시자 초기화
+        # 🔴 [v2.0 수정] 매도 체결 감시자 초기화 (공유 카운터 전달)
         # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
         self.sell_monitor = SellOrderMonitor(
             config=self.config,
             token_manager=self.token_manager,
             telegram_bot=self.telegram_bot,
-            trade_counter=self.trade_counter
+            trade_counter=self.trade_counter # 🆕 공유 인스턴스 전달
         )
-        logger.info("✅ SellOrderMonitor 통합 완료")
+        logger.info("✅ SellOrderMonitor 통합 완료 (v2.0)")
         # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
         
         # 🔴 [v1.3 신규] last_reset_date 초기화 (ET 기준)
@@ -378,7 +433,12 @@ class SmartOrderMonitor:
                     cutoff_time = datetime.now() - timedelta(hours=1)
                     
                     for order_no, order_data in state.get('orders', {}).items():
-                        created_at = datetime.fromisoformat(order_data['created_at'])
+                        created_at_str = order_data.get('created_at', '')
+                        if not created_at_str:
+                            continue
+                        
+                        created_at = datetime.fromisoformat(created_at_str)
+                        
                         if created_at > cutoff_time:
                             order_data['created_at'] = created_at
                             if 'last_checked' in order_data and order_data['last_checked']:
@@ -412,7 +472,7 @@ class SmartOrderMonitor:
                 for order_no, order_data in self.monitoring_orders.items():
                     order_copy = order_data.copy()
                     # created_at이 datetime 객체가 아닐 수 있음 (JSON에서 로드 직후)
-                    if isinstance(order_data['created_at'], datetime):
+                    if isinstance(order_data.get('created_at'), datetime):
                         order_copy['created_at'] = order_data['created_at'].isoformat()
                     # last_checked가 datetime 객체가 아닐 수 있음
                     if order_data.get('last_checked') and isinstance(order_data.get('last_checked'), datetime):
@@ -438,17 +498,27 @@ class SmartOrderMonitor:
             bool: True if within operating hours
         """
         try:
-            trading_tz = self.config.get('order_settings', {}).get('timezone', 'US/Eastern')
-            tz = timezone(trading_tz)
-            now_time = datetime.now(tz).time()
-            
-            start_time = dtime(4, 0)   # 04:00 ET
-            end_time = dtime(12, 0)    # 12:00 ET
-            
-            return start_time <= now_time < end_time
-        except Exception as e:
-            logger.error(f"System time check error: {e}")
-            return False
+            # ℹ️ order.py에서 is_market_hours 임포트 필요
+            from order import should_system_run as order_should_run
+            # 🔴 [v2.0] order.py의 v2.0 (주말/월요일 새벽 포함) 로직 사용
+            return order_should_run(
+                trading_timezone=self.config.get('order_settings', {}).get('timezone', 'US/Eastern')
+            )
+
+        except ImportError:
+            logger.warning("order.py의 should_system_run() 임포트 실패. 자체 로직 사용.")
+            try:
+                trading_tz = self.config.get('order_settings', {}).get('timezone', 'US/Eastern')
+                tz = timezone(trading_tz)
+                now_time = datetime.now(tz).time()
+                
+                start_time = dtime(4, 0)   # 04:00 ET
+                end_time = dtime(12, 0)    # 12:00 ET
+                
+                return start_time <= now_time < end_time
+            except Exception as e:
+                logger.error(f"System time check error: {e}")
+                return False
 
     def get_current_trading_mode(self):
         """
@@ -458,37 +528,47 @@ class SmartOrderMonitor:
             str: 'premarket', 'regular', 'closed'
         """
         try:
-            trading_tz = self.config.get('order_settings', {}).get('timezone', 'US/Eastern')
-            tz = timezone(trading_tz)
-            now_time = datetime.now(tz).time()
+            # ℹ️ order.py에서 is_market_hours 임포트 필요
+            from order import is_market_hours
+            # 🔴 [v2.0] order.py의 v2.0 (주말/월요일 새벽 포함) 로직 사용
+            return is_market_hours(
+                trading_timezone=self.config.get('order_settings', {}).get('timezone', 'US/Eastern')
+            )
             
-            logger.debug(f"🕐 Current time: {now_time.strftime('%H:%M')} ({trading_tz})")
+        except ImportError:
+            logger.warning("order.py의 is_market_hours() 임포트 실패. 자체 로직 사용.")
+            try:
+                trading_tz = self.config.get('order_settings', {}).get('timezone', 'US/Eastern')
+                tz = timezone(trading_tz)
+                now_time = datetime.now(tz).time()
+                
+                logger.debug(f"🕐 Current time: {now_time.strftime('%H:%M')} ({trading_tz})")
+                
+                # Spec 2.3: Regular hours (WebSocket mode)
+                if 'regular' in self.config['polling']:
+                    for time_range in self.config['polling']['regular'].get('time_ranges', []):
+                        start_time = dtime(*[int(x) for x in time_range['start'].split(':')])
+                        end_time = dtime(*[int(x) for x in time_range['end'].split(':')])
+                        if start_time <= now_time < end_time:
+                            logger.debug(f"✅ Regular hours: {time_range['start']} ~ {time_range['end']}")
+                            return 'regular'
+                
+                # Spec 2.3: Pre-market (REST polling)
+                if 'premarket' in self.config['polling']:
+                    for time_range in self.config['polling']['premarket'].get('time_ranges', []):
+                        start_time = dtime(*[int(x) for x in time_range['start'].split(':')])
+                        end_time = dtime(*[int(x) for x in time_range['end'].split(':')])
+                        if start_time <= now_time < end_time:
+                            logger.debug(f"✅ Pre-market: {time_range['start']} ~ {time_range['end']}")
+                            return 'premarket'
+                
+                # Spec 2.2: Sleep mode
+                logger.debug(f"⏸️ Sleep mode (closed)")
+                return 'closed'
             
-            # Spec 2.3: Regular hours (WebSocket mode)
-            if 'regular' in self.config['polling']:
-                for time_range in self.config['polling']['regular'].get('time_ranges', []):
-                    start_time = dtime(*[int(x) for x in time_range['start'].split(':')])
-                    end_time = dtime(*[int(x) for x in time_range['end'].split(':')])
-                    if start_time <= now_time < end_time:
-                        logger.debug(f"✅ Regular hours: {time_range['start']} ~ {time_range['end']}")
-                        return 'regular'
-            
-            # Spec 2.3: Pre-market (REST polling)
-            if 'premarket' in self.config['polling']:
-                for time_range in self.config['polling']['premarket'].get('time_ranges', []):
-                    start_time = dtime(*[int(x) for x in time_range['start'].split(':')])
-                    end_time = dtime(*[int(x) for x in time_range['end'].split(':')])
-                    if start_time <= now_time < end_time:
-                        logger.debug(f"✅ Pre-market: {time_range['start']} ~ {time_range['end']}")
-                        return 'premarket'
-            
-            # Spec 2.2: Sleep mode
-            logger.debug(f"⏸️ Sleep mode (closed)")
-            return 'closed'
-        
-        except Exception as e:
-            logger.error(f"Mode detection error: {e}")
-            return 'premarket'  # Safe default
+            except Exception as e:
+                logger.error(f"Mode detection error: {e}")
+                return 'premarket'  # Safe default
 
     def switch_mode_if_needed(self):
         """Spec 2.3: Switch mode if needed and notify"""
@@ -504,14 +584,15 @@ class SmartOrderMonitor:
             
             # Spec 6.1: Telegram notification
             if self.telegram_bot:
+                # 🔴 [v2.0] WebSocket 미사용으로 문구 수정
                 mode_names = {
                     'premarket': '🔵 Pre-market (REST Polling)',
-                    'regular': '⚡ Regular Hours (WebSocket)',
+                    'regular': '⚡ Regular Hours (REST Polling)', # 🔴 v2.0
                     'closed': '😴 Sleep Mode'
                 }
                 message = (
                     f"🔄 Mode Switch\n"
-                    f"{mode_names.get(old_mode, old_mode)} → {mode_names.get(new_mode, new_mode)}"
+                    f"{mode_names.get(old_mode, str(old_mode))} → {mode_names.get(new_mode, str(new_mode))}"
                 )
                 self.telegram_bot.send_message(message)
             
@@ -521,9 +602,9 @@ class SmartOrderMonitor:
             if new_mode == 'closed':
                 self.handle_sleep_mode()
             elif new_mode == 'regular':
-                # [수정] WebSocket 대신 REST 폴링 사용
+                # 🔴 [v2.0] WebSocket 제거
                 self.stop_websocket_mode() # 혹시 모르니 중지
-                logger.info("🧠 정규장 REST 폴링 모드 활성화")
+                logger.info("🧠 정규장 REST 폴링 모드 활성화 (v2.0)")
             elif new_mode == 'premarket':
                 self.stop_websocket_mode()
             
@@ -584,19 +665,10 @@ class SmartOrderMonitor:
             for i, row in df.iterrows():
                 ticker = row.get('pdno', '')
                 qty = row.get('ft_ccld_qty', '0')
-                # 'ft_ord_unpr3' (주문단가)가 실제 매수가에 더 가까울 수 있으나,
-                # 'ft_ccld_unpr3' (체결단가)가 매도 가격이므로,
-                # 매수가는 매도 주문의 '주문단가'를 가져와야 함.
-                # 여기서는 매도 내역만 조회하므로, 매수가는 'ft_ord_unpr3' (매도주문의 주문단가)
-                # 매도가는 'ft_ccld_unpr3' (매도주문의 체결단가)
-                
-                # 기획서상 매수가는 알 수 없음 (매도내역만 조회하므로)
-                # 임시로 ft_ord_unpr3 (매도 주문 시의 목표가)를 buy_price로 간주
-                # (수정 필요: 이 로직은 매수내역을 알아야 정확함)
                 
                 # --- 임시 로직 ---
                 # 수익률을 역산하여 매수가 추정
-                target_profit_rate = self.config.get('order_settings', {}).get('target_profit_rate', 3.0)
+                target_profit_rate = self.config.get('order_settings', {}).get('target_profit_rate', 6.0) # 🔴 v2.0: 6.0%
                 profit_margin = target_profit_rate / 100
                 
                 sell_price = float(row.get('ft_ccld_unpr3', '0')) # 매도 체결가
@@ -648,56 +720,25 @@ class SmartOrderMonitor:
 
     def start_websocket_mode(self):
         """
-        Spec 2.3: Start WebSocket for regular hours (ET 09:30-12:00)
-        Spec 5.2: If WebSocket fails after 3 attempts → System stop
+        Spec 2.3: Start WebSocket (v2.0: 사용 안 함)
         """
-        logger.info("⚡ Starting WebSocket mode...")
-        
-        try:
-            # Initialize WebSocket client if not exists
-            if self.ws_client is None:
-                self.ws_client = WebSocketClient(
-                    self.config,
-                    self.token_manager,
-                    self.handle_ws_message
-                )
-            
-            # Start WebSocket
-            self.ws_client.start()
-            self.ws_failure_count = 0  # Reset failure count
-            
-            logger.info("✅ WebSocket started successfully")
-            
-        except Exception as e:
-            self.ws_failure_count += 1
-            logger.error(f"❌ WebSocket start failed (Attempt {self.ws_failure_count}/{self.ws_max_failures}): {e}")
-            
-            # Spec 2.3, 5.2: After 3 failures → System stop
-            if self.ws_failure_count >= self.ws_max_failures:
-                logger.critical("🚨 WebSocket failed 3 times → SYSTEM STOP (Spec 2.3)")
-                
-                if self.telegram_bot:
-                    self.telegram_bot.send_error_notification(
-                        f"🚨 System Stopped: WebSocket connection failed {self.ws_max_failures} times\n"
-                        f"Spec 2.3: WebSocket failure → System stop"
-                    )
-                
-                # STOP THE ENTIRE SYSTEM
-                self.stop()
-                raise RuntimeError("WebSocket connection failed - System stopped per Spec 2.3")
+        # 🔴 [v2.0] WebSocket 미사용
+        logger.info("❌ WebSocket은 v2.0에서 사용되지 않습니다.")
+        return
 
     def stop_websocket_mode(self):
-        """Stop WebSocket when switching to pre-market mode"""
+        """Stop WebSocket (v2.0: 사용 안 함)"""
         if self.ws_client:
             logger.info("⏸️ Stopping WebSocket mode...")
             self.ws_client.stop()
+        self.ws_client = None # 🔴 [v2.0] 완전 제거
 
     def calculate_polling_interval(self, order_info):
         """
         Spec 3.2: Calculate smart polling interval
         
         Pre-market intervals:
-        - 05:00-09:30: 6 seconds (uniform)
+        - 05:00-09:30: 4 seconds (uniform) (v2.0)
         
         Regular hours intervals (REST polling):
         - High activity (09:30-09:40): 3 seconds
@@ -706,7 +747,7 @@ class SmartOrderMonitor:
         if self.current_mode == 'closed':
             return 3600  # Sleep mode
         
-        # ✅ 정규장 REST 폴링 주기 (기획서 수정)
+        # ✅ 정규장 REST 폴링 주기 (기획서 v2.0)
         if self.current_mode == 'regular':
             try:
                 trading_tz = self.config.get('order_settings', {}).get('timezone', 'US/Eastern')
@@ -733,14 +774,14 @@ class SmartOrderMonitor:
                 return 5  # 안전 기본값
         
         if self.current_mode == 'premarket':
-            # 프리마켓: uniform 6초
+            # 프리마켓: uniform 4초 (v2.0)
             try:
-                interval = self.premarket_config.get('interval_seconds', {}).get('uniform', 6)
+                interval = self.premarket_config.get('interval_seconds', {}).get('uniform', 4) # 🔴 v2.0: 4초
                 logger.debug(f"프리마켓: {interval}초")
                 return interval
             except Exception as e:
                 logger.error(f"프리마켓 폴링 주기 계산 오류: {e}")
-                return 6  # 안전 기본값
+                return 4  # 안전 기본값
         
         return 5  # 안전 기본값
 
@@ -1023,7 +1064,7 @@ class SmartOrderMonitor:
             
             # Spec 4.1: Get profit margin from config
             # order_settings.target_profit_rate (percentage)
-            target_profit_rate = self.config.get('order_settings', {}).get('target_profit_rate', 3.0)
+            target_profit_rate = self.config.get('order_settings', {}).get('target_profit_rate', 6.0) # 🔴 v2.0: 6.0%
             profit_margin = target_profit_rate / 100
             
             sell_price = round(filled_price * (1 + profit_margin), 4)
@@ -1106,93 +1147,12 @@ class SmartOrderMonitor:
     def handle_ws_message(self, message):
         """
         Spec 2.3: Handle WebSocket real-time messages (H0STCNI0)
-        
-        Args:
-            message: WebSocket message (JSON string)
+        (v2.0: 사용 안 함)
         """
-        try:
-            data = json.loads(message)
-            
-            # Real-time fill data (H0STCNI0)
-            if data.get('header', {}).get('tr_id') == 'H0STCNI0':
-                body = data.get('body', {})
-                if not body:
-                    return
-                
-                # Handle multiple fills
-                outputs = body.get('output', [])
-                if not isinstance(outputs, list):
-                    outputs = [outputs]
-                
-                for item in outputs:
-                    # Only process buy orders (02)
-                    if item.get('sll_buy_dvsn_cd') != '02':
-                        continue
-                    
-                    order_no = item.get("odno", "")
-                    if not order_no:
-                        continue
-                    
-                    # Spec 4.4: Prevent duplicate processing (✅ 1순위)
-                    if (order_no in self.processed_ws_orders or 
-                        order_no in self.processed_orders):
-                        logger.debug(f"Already processed WS fill: {order_no}")
-                        continue
-                    
-                    ticker = item.get("pdno", "")
-                    try:
-                        ccld_qty = int(item.get("ccld_qty", "0"))
-                        ccld_price = float(item.get("ccld_unpr", "0"))
-                    except ValueError:
-                        logger.warning(f"WS data parsing error: {item}")
-                        continue
-                    
-                    if ccld_qty > 0 and ccld_price > 0:
-                        
-                        # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-                        # 🔴 [v1.2 수정] 매매 한도 확인 (2순위)
-                        # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-                        if not self.trade_counter.can_trade():
-                            logger.warning(f"⚠️ [WS] 매매 한도 도달. {ticker} ({order_no}) 매도 주문을 실행하지 않습니다.")
-                            
-                            # ✅ 슬립모드 알림 (매매 한도 도달) (수정 2)
-                            if self.telegram_bot:
-                                self.telegram_bot.send_sleep_mode_notification(reason="trade_limit")
-                            
-                            # 매도는 안하지만, 처리는 된 것으로 간주 (중복 방지)
-                            self.processed_ws_orders.add(order_no)
-                            self.processed_orders.add(order_no) # 1순위
-                            continue
-                        # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-                        logger.info(f"🎉 [WS] New buy fill! {order_no}: {ticker} {ccld_qty} @ ${ccld_price}")
-                        
-                        order_info = {
-                            'ticker': ticker,
-                            'quantity': ccld_qty,
-                            'buy_price': ccld_price,
-                            'created_at': datetime.now(),
-                            'source': 'auto' # 🆕 v2.0
-                        }
-                        
-                        # Execute auto-sell with order number
-                        success = self.execute_auto_sell(order_info, ccld_price, order_no)
-                        
-                        if success:
-                            # 🔴 [수정] "성공" -> "접수"
-                            logger.info(f"✅ [WS] Auto-sell order placed: {ticker}")
-                            self.processed_ws_orders.add(order_no)
-                            # execute_auto_sell이 processed_orders에도 추가하고 SellOrderMonitor에 등록
-                        else:
-                            logger.error(f"❌ [WS] Auto-sell failed: {ticker}. Switching to REST polling.")
-                            # On failure, add to REST polling monitoring
-                            # 🔴 [v2.0 수정] add_order_to_monitor (새 메서드) 사용
-                            self.add_order_to_monitor(order_no, ticker, ccld_qty, ccld_price, source='auto')
-        
-        except json.JSONDecodeError:
-            logger.debug(f"WS message parsing failed (not JSON): {message[:50]}...")
-        except Exception as e:
-            logger.error(f"❌ WS message handling error: {e} - Message: {message}")
+        # 🔴 [v2.0] WebSocket 미사용
+        if self.current_mode != 'closed': # 닫힌 모드가 아닐 때만 로그
+            logger.debug(f"WS message ignored (v2.0): {message[:50]}...")
+        return
 
     def scan_for_new_buy_orders(self):
         """
@@ -1308,7 +1268,10 @@ class SmartOrderMonitor:
                         # (참고: 이 알림은 WS에서 이미 보냈을 수 있지만, 
                         #  POLL에서만 감지된 경우를 위해 여기서도 호출)
                         if self.telegram_bot:
-                            self.telegram_bot.send_sleep_mode_notification(reason="trade_limit")
+                            self.telegram_bot.send_sleep_mode_notification(
+                                reason="trade_limit",
+                                trade_stats=self.trade_counter.get_stats() # 🆕 v2.0
+                            )
                         
                         self.processed_orders.add(order_no) # 1순위
                         break # 루프 중단 (더 이상 오늘 매매 안함)
@@ -1338,7 +1301,7 @@ class SmartOrderMonitor:
                         # Spec 6.1: Telegram notification (execute_auto_sell에서 이미 보냄)
                         
                     else:
-                        # ✅ "이미 매도됨" 오류는 monitoring에 추가하지 않음
+                        # ✅ "이미 매도됨" 오류는 재시도하지 않고 제거
                         # 이 로직은 이미 v1.1 파일에 올바르게 구현되어 있었습니다.
                         logger.error(f"❌ [POLL] Auto-sell failed: {ticker}. Not adding to monitoring (already sold).")
                         
@@ -1443,11 +1406,7 @@ class SmartOrderMonitor:
                 
                 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
                 
-                # [수정] WebSocket 모드(정규장) 스킵 로직 제거
-                # if self.current_mode == 'regular':
-                #    logger.debug("⚡ WebSocket mode active... No REST polling")
-                #    time.sleep(5)  # Prevent CPU spinning
-                #    continue
+                # 🔴 [v2.0] WebSocket 모드(정규장) 스킵 로직 제거
                 
                 # ▼ Pre-market / Regular REST polling logic ▼
                 
@@ -1518,7 +1477,10 @@ class SmartOrderMonitor:
                             
                             # ✅ 슬립모드 알림 (매매 한도 도달) (수정 2)
                             if self.telegram_bot:
-                                self.telegram_bot.send_sleep_mode_notification(reason="trade_limit")
+                                self.telegram_bot.send_sleep_mode_notification(
+                                    reason="trade_limit",
+                                    trade_stats=self.trade_counter.get_stats() # 🆕 v2.0
+                                )
 
                             # 매도는 안하지만, 모니터링 중지 (중복 방지)
                             with self.lock: # 🔴 [추가] 락 적용
@@ -1604,9 +1566,7 @@ class SmartOrderMonitor:
         self.current_mode = self.get_current_trading_mode()
         self.is_running = True
         
-        # [수정] WebSocket 시작 로직 제거 (main.py에서 제어)
-        # if self.current_mode == 'regular':
-        #    self.start_websocket_mode()
+        # 🔴 [v2.0] WebSocket 시작 로직 제거
         
         # Start monitoring thread
         self.monitor_thread = threading.Thread(target=self.smart_monitor_loop, daemon=True)
@@ -1690,7 +1650,7 @@ class SmartOrderMonitor:
                 'quantity': quantity,
                 'buy_price': buy_price,
                 'source': source,  # 🆕 v2.0 (통계용)
-                'created_at': datetime.now(),
+                'created_at': datetime.now(), # 🔴 [수정] datetime 객체로 저장
                 'last_checked': None,
                 'check_count': 0,
                 'status': 'monitoring'
