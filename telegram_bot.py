@@ -1,4 +1,4 @@
-# telegram_bot.py - 기획서 v1.1 완전 준수 버전 (WebSocket 구독 제한 알림 추가)
+# telegram_bot.py - v2.0 기획서 준수 (대화형 명령어 추가)
 
 import requests
 import logging
@@ -12,19 +12,17 @@ from collections import defaultdict
 
 class TelegramBot:
     """
-    텔레그램 봇 (기획서 v1.1 완전 준수)
+    텔레그램 봇 (기획서 v2.0 대화형 명령어 포함)
     
     주요 기능:
-    - 시스템 시작/종료 알림 (기획서 6.1절)
-    - 매수/매도 알림 (기획서 6.1절)
-    - Rate Limit 경고 (기획서 6.1절)
-    - 오류 알림 (기획서 6.1절)
-    - 일일 통계 요약 (기획서 6.1절)
-    - 알림 중복 방지
-    - [v1.1] WebSocket 구독 제한 알림
+    - v1.1의 모든 알림 기능
+    - [v2.0 신규] /buy : 대화형 목표가 매수 주문
+    - [v2.0 신규] /orders : 대기 중인 텔레그램 주문 조회
+    - [v2.0 신규] /cancel : 대기 중인 텔레그램 주문 취소
     """
     
-    def __init__(self, bot_token, chat_id, config=None):
+    # (수정 1) __init__ 에 order_manager 와 conversation_states 추가
+    def __init__(self, bot_token, chat_id, config=None, order_manager=None):
         self.bot_token = bot_token
         self.chat_id = chat_id
         self.logger = logging.getLogger(__name__)
@@ -32,6 +30,13 @@ class TelegramBot:
         self.is_running = False
         self.polling_thread = None
         
+        # (신규) 텔레그램 주문 관리자 (Phase 1, 2에서 구현)
+        self.order_manager = order_manager
+        
+        # (신규) 대화형 명령어 상태 관리
+        # 예: { 1234567: {'type': 'buy', 'step': 'awaiting_ticker', 'data': {}} }
+        self.conversation_states = {}
+
         # 설정
         if config and 'telegram' in config:
             self.polling_interval = config['telegram'].get('polling_interval', 10)
@@ -74,7 +79,8 @@ class TelegramBot:
         self.last_alert_time[alert_type] = current_time
         return True
 
-    def send_message(self, message, parse_mode='HTML', force=False, alert_type=None):
+    # (수정 2) send_message의 chat_id를 동적으로 설정 가능하도록 변경
+    def send_message(self, message, parse_mode='HTML', force=False, alert_type=None, chat_id=None):
         """
         메시지 전송 (알림 중복 방지 포함)
         
@@ -83,22 +89,32 @@ class TelegramBot:
             parse_mode: HTML 또는 Markdown
             force: True시 중복 방지 무시
             alert_type: 알림 타입 (중복 방지용)
+            chat_id: (신규) 지정된 chat_id로 전송, None이면 self.chat_id 사용
         """
+        
+        # (신규) chat_id가 지정되지 않으면 기본 chat_id 사용
+        target_chat_id = chat_id if chat_id else self.chat_id
+        
+        if not target_chat_id:
+            self.logger.error("메시지 전송 실패: chat_id가 설정되지 않았습니다.")
+            return False
+            
         try:
-            # 알림 중복 방지 체크
-            if not force and alert_type and not self._should_send_alert(alert_type):
-                return False
+            # 알림 중복 방지 체크 (기본 chat_id에 대해서만)
+            if not force and alert_type and target_chat_id == self.chat_id:
+                if not self._should_send_alert(alert_type):
+                    return False
             
             url = f"{self.base_url}/sendMessage"
             data = {
-                "chat_id": self.chat_id,
+                "chat_id": target_chat_id,
                 "text": message,
                 "parse_mode": parse_mode
             }
 
             response = requests.post(url, data=data, timeout=self.timeout)
             if response.status_code == 200:
-                self.logger.debug("Telegram 메시지 전송 성공")
+                self.logger.debug(f"Telegram 메시지 전송 성공 (ChatID: {target_chat_id})")
                 return True
             else:
                 self.logger.error(f"Telegram 메시지 전송 실패: {response.text}")
@@ -110,63 +126,68 @@ class TelegramBot:
     def send_startup_notification(self):
         """✅ 시스템 시작 알림 (기획서 6.1절)"""
         message = f"""
-🚀 <b>자동 매도 시스템 시작</b>
+🚀 <b>자동 매도 시스템 시작</b> (v2.0)
 
 • 상태: ✅ 실행중
 • 시작 시간: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
-• 감시 대상: 미국 주식 매수 체결
-• 수익률 목표: +3% (기획서 4.1절)
-• 폴링 간격: {self.polling_interval}초
+• 운영 시간: ET 05:00 - 12:00
+• 수익률 목표: +6.0% (v2.0)
+• 폴링 간격: 4초 (프리마켓)
 
-📋 기획서 v1.1 준수 시스템
-✅ REST API: 50건/초 → 37건/초 (75% 안전 마진)
-✅ WebSocket 구독: 최대 20건 (2025.11.1~)
-✅ 무료 실시간 시세 (DNAS)
-✅ 적응형 폴링
-✅ WebSocket 자동 전환
+📋 v2.0 기획서 준수
+✅ **신규**: /buy 텔레그램 주문
+✅ 일일 8회 매매 제한 (통합)
+✅ 주말 자동 슬립
+❌ WebSocket 미사용 (v2.0)
 
 시스템이 정상적으로 작동하고 있습니다.
 """
         return self.send_message(message.strip(), force=True)
 
-    def send_buy_detection_notification(self, ticker, quantity, price, source='websocket'):
+    def send_buy_detection_notification(self, ticker, quantity, price, source='auto'):
         """
-        ✅ 추가: 매수 감지 알림 (기획서 6.1절)
+        ✅ 수정: 매수 감지 알림 (v2.0 - source 구분)
         
         Parameters:
-            ticker: 종목 코드
-            quantity: 수량
-            price: 매수가
-            source: 감지 소스 (websocket/polling)
+            source: 'auto' (자동감지) / 'telegram' (텔레그램 주문)
         """
         self.stats['total_buys'] += 1
         
-        source_emoji = "⚡" if source == 'websocket' else "🔍"
-        source_text = "WebSocket (정규장)" if source == 'websocket' else "REST 폴링 (장외)"
+        if source == 'telegram':
+            source_emoji = "🤖"
+            source_text = "텔레그램 주문 (목표가 도달)"
+        else: # auto
+            source_emoji = "🔍"
+            source_text = "KIS 앱 (자동 감지)"
         
         message = f"""
-{source_emoji} <b>매수 체결 감지</b>
+{source_emoji} <b>매수 체결 감지</b> ({source_text})
 
 • 종목: <b>{ticker}</b>
 • 수량: {quantity:,}주
 • 매수가: ${price:.2f}
-• 감지: {source_text}
 • 시각: {datetime.now().strftime('%H:%M:%S')}
 
-🎯 목표 수익률 +3% 도달 시 자동 매도 예정
-💰 목표가: ${price * 1.03:.2f}
+🎯 목표 수익률 +6.0% 도달 시 자동 매도 예정
+💰 목표가: ${price * 1.06:.2f}
 """
-        return self.send_message(message.strip(), alert_type=f"buy_{ticker}")
+        # 텔레그램 주문은 중복 방지 없이, 자동 감지만 중복 방지
+        alert_type = f"buy_{ticker}" if source == 'auto' else None
+        force_send = True if source == 'telegram' else False
+        
+        return self.send_message(message.strip(), alert_type=alert_type, force=force_send)
 
-    def send_sell_order_notification(self, ticker, quantity, buy_price, sell_price, profit_rate):
-        """✅ 매도 주문 알림 (기획서 6.1절)"""
+    def send_sell_order_notification(self, ticker, quantity, buy_price, sell_price, profit_rate, source='auto'):
+        """✅ 매도 주문 알림 (v2.0 - source 구분)"""
         self.stats['total_sells'] += 1
         self.stats['successful_sells'] += 1
         profit_amount = (sell_price - buy_price) * quantity
         self.stats['total_profit'] += profit_amount
         
+        source_text = " (TG 주문)" if source == 'telegram' else ""
+        
         message = f"""
-📈 <b>자동 매도 주문 실행</b>
+📈 <b>자동 매도 주문 실행{source_text}</b>
 
 • 종목: <b>{ticker}</b>
 • 수량: {quantity:,}주
@@ -249,6 +270,7 @@ class TelegramBot:
         ✅ 추가: WebSocket 실패 알림 (기획서 5.2절, 6.1절)
         
         정규장에서 3회 실패 시 시스템 종지 경고
+        (v2.0에서는 거의 사용되지 않음)
         """
         if is_regular_market and attempt >= max_attempts:
             message = f"""
@@ -280,12 +302,7 @@ class TelegramBot:
     def send_websocket_subscription_limit_alert(self, subscribed_count, pending_count, total_count):
         """
         ✅ [v1.1 신규] WebSocket 구독 제한 알림 (기획서 v1.1, 5.1절)
-        20건 제한으로 일부 종목이 구독되지 못할 경우
-        
-        Parameters:
-            subscribed_count (int): 구독 성공 종목 수
-            pending_count (int): 구독 대기 종목 수
-            total_count (int): 전체 보유 종목 수
+        (v2.0에서는 거의 사용되지 않음)
         """
         # 대기 중인 종목이 없으면 알림하지 않음
         if pending_count == 0:
@@ -362,78 +379,97 @@ class TelegramBot:
             """
             return self.send_error_notification(message, level="info")
 
-    def send_daily_summary(self):
+    def send_daily_summary(self, trade_stats=None):
         """
-        ✅ 추가: 일일 통계 요약 (기획서 6.1절)
+        ✅ 수정: 일일 통계 요약 (v2.0 - trade_stats 연동)
         
-        매일 01:00 (시스템 종료 시)에 전송
+        trade_stats: DailyTradeCounter에서 전달받은 통계 딕셔너리
         """
         runtime = datetime.now() - self.stats['start_time']
         runtime_hours = runtime.total_seconds() / 3600
         
+        # (신규) v2.0 통계
+        auto_trades = 0
+        telegram_trades = 0
+        total_trades = 0
+        
+        if trade_stats:
+            auto_trades = trade_stats.get('auto', 0)
+            telegram_trades = trade_stats.get('telegram', 0)
+            total_trades = trade_stats.get('total', 0)
+
+        # 기존 통계 (매도 시도 횟수)
+        total_sells = self.stats['total_sells']
+        successful_sells = self.stats['successful_sells']
+        failed_sells = self.stats['failed_sells']
+        
         success_rate = 0
-        if self.stats['total_sells'] > 0:
-            success_rate = (self.stats['successful_sells'] / self.stats['total_sells']) * 100
+        if total_sells > 0:
+            success_rate = (successful_sells / total_sells) * 100
         
         message = f"""
-📊 <b>일일 통계 요약</b>
+📊 <b>일일 통계 요약</b> (v2.0)
 
-<b>📈 거래 현황</b>
+<b>📈 거래 현황 (v1.x 기준)</b>
 • 매수 감지: {self.stats['total_buys']}건
-• 매도 시도: {self.stats['total_sells']}건
-• 매도 성공: {self.stats['successful_sells']}건
-• 매도 실패: {self.stats['failed_sells']}건
+• 매도 시도: {total_sells}건
+• 매도 성공: {successful_sells}건
+• 매도 실패: {failed_sells}건
 • 성공률: {success_rate:.1f}%
 
 <b>💰 수익 현황</b>
 • 총 수익: ${self.stats['total_profit']:.2f}
 
-<b>⚙️ 시스템</b>
+<b>⚙️ 시스템 (v2.0)</b>
+• 총 매매 (8회 한도): {total_trades}회
+    - 자동 감지: {auto_trades}회
+    - 텔레그램: {telegram_trades}회
 • 가동 시간: {runtime_hours:.1f}시간
 • 오류 횟수: {self.stats['errors']}회
 
-<b>기획서 v1.0 준수 시스템</b>
+<b>기획서 v2.0 준수 시스템</b>
 ✅ 일일 통계 요약 (기획서 6.1절)
 """
         return self.send_message(message.strip(), force=True)
 
-    # 
-    # ↓↓↓ (수정 1) 요청하신 새 함수가 여기에 추가되었습니다. ↓↓↓
-    #
-    def send_sleep_mode_notification(self, reason="normal"):
+    def send_sleep_mode_notification(self, reason="normal", trade_stats=None):
         """
-        슬립모드 진입 알림 (오전 01시 정상 종료 또는 매매 한도 도달)
+        ✅ 수정: 슬립모드 진입 알림 (v2.0)
         
         Parameters:
-            reason: "normal" (정상 종료) 또는 "trade_limit" (매매 한도 도달)
+            reason: "normal", "trade_limit", "weekend"
+            trade_stats: DailyTradeCounter 통계
         """
         if reason == "trade_limit":
             emoji = "🚫"
             title = "매매 한도 도달 - 슬립 모드"
-            reason_text = "오늘 설정된 매매 횟수에 도달했습니다."
-        else:
+            reason_text = f"오늘 설정된 매매 횟수({trade_stats.get('total', 0)}/8회)에 도달했습니다."
+        elif reason == "weekend":
+            emoji = "😴"
+            title = "주말 슬립 모드 진입"
+            reason_text = "미국장 주말(토/일)입니다."
+        else: # normal
             emoji = "😴"
             title = "슬립 모드 진입"
-            reason_text = "정규장 종료 시각 (한국시간 01:00)에 도달했습니다."
+            reason_text = f"정규장 종료 시각 (ET {datetime.now().strftime('%H:%M')})에 도달했습니다."
+        
+        next_start = "월요일 ET 05:00" if reason == "weekend" else "오늘 17:00 (ET 05:00)"
         
         message = f"""
 {emoji} <b>{title}</b>
 
 • 종료 시각: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
 • 사유: {reason_text}
-• 다음 시작: 오늘 17:00 (프리마켓)
+• 다음 시작: {next_start}
 
 시스템이 슬립 모드로 전환됩니다.
 """
         return self.send_message(message.strip(), force=True)
-    #
-    # ↑↑↑ (수정 1) 새 함수 추가 완료 ↑↑↑
-    #
 
-    def send_shutdown_notification(self):
-        """✅ 시스템 종료 알림 (기획서 6.1절)"""
+    def send_shutdown_notification(self, trade_stats=None):
+        """✅ 시스템 종료 알림 (v2.0 - 통계 연동)"""
         # 종료 전 일일 통계 전송
-        self.send_daily_summary()
+        self.send_daily_summary(trade_stats)
         
         time.sleep(1)  # 통계 메시지 전송 후 1초 대기
         
@@ -520,8 +556,11 @@ class TelegramBot:
             self.logger.error(f"메시지 큐 정리 오류: {e}")
             return False
 
+    # 
+    # ↓↓↓ (수정 3) handle_command: v2.0 신규 명령어 추가 ↓↓↓
+    #
     def handle_command(self, command, chat_id, message_date):
-        """명령어 처리 - 메시지 시간 검증 추가"""
+        """명령어 처리 - v2.0 명령어 추가"""
         try:
             # 메시지가 5분 이상 된 것은 무시 (시스템 시작 전 메시지)
             current_time = datetime.now().timestamp()
@@ -529,50 +568,134 @@ class TelegramBot:
                 self.logger.info(f"오래된 명령어 무시: {command} (나이: {current_time - message_date:.0f}초)")
                 return
 
+            # (신규) /buy, /orders, /cancel 은 응답 메시지를 동적으로 생성하므로
+            # 이 메서드 상단에서 처리하고 즉시 반환합니다.
+            
+            # --- [v2.0] /buy 명령어 (대화 시작) ---
+            if command == '/buy':
+                if not self.order_manager:
+                    self.send_message("오류: 텔레그램 주문 관리자가 연결되지 않았습니다.", chat_id=chat_id)
+                    return
+
+                if chat_id in self.conversation_states:
+                    self.send_message("이미 다른 대화가 진행 중입니다. '취소'를 입력하여 종료 후 다시 시도하세요.", chat_id=chat_id)
+                    return
+                
+                # 대화 상태 시작
+                initial_state = {
+                    'type': 'buy',
+                    'step': 'awaiting_ticker',
+                    'data': {}
+                }
+                self.conversation_states[chat_id] = initial_state
+                
+                # OrderManager에게 첫 번째 질문을 받아옴
+                response_message = self.order_manager.handle_buy_conversation(chat_id, None, initial_state)
+                self.send_message(response_message, chat_id=chat_id, parse_mode='HTML')
+                return # 이 메서드 종료
+
+            # --- [v2.0] /cancel 명령어 (대화 시작) ---
+            if command == '/cancel':
+                if not self.order_manager:
+                    self.send_message("오류: 텔레그램 주문 관리자가 연결되지 않았습니다.", chat_id=chat_id)
+                    return
+
+                if chat_id in self.conversation_states:
+                    self.send_message("이미 다른 대화가 진행 중입니다. '취소'를 입력하여 종료 후 다시 시도하세요.", chat_id=chat_id)
+                    return
+                
+                # 대화 상태 시작
+                initial_state = {
+                    'type': 'cancel',
+                    'step': 'awaiting_cancel_number',
+                    'data': {}
+                }
+                self.conversation_states[chat_id] = initial_state
+                
+                # OrderManager에게 취소 목록을 받아옴
+                response_message = self.order_manager.handle_cancel_conversation(chat_id, None, initial_state)
+                
+                # 만약 취소할 주문이 없으면 OrderManager가 "취소할 주문 없음" 메시지 반환
+                # 이 경우 대화 상태를 즉시 종료해야 함
+                if initial_state.get('step') == 'done':
+                    del self.conversation_states[chat_id]
+
+                self.send_message(response_message, chat_id=chat_id, parse_mode='HTML')
+                return # 이 메서드 종료
+
+            # --- [v2.0] /orders 명령어 (즉시 응답) ---
+            if command == '/orders':
+                if not self.order_manager:
+                    self.send_message("오류: 텔레그램 주문 관리자가 연결되지 않았습니다.", chat_id=chat_id)
+                    return
+                
+                response_message = self.order_manager.get_pending_orders_message()
+                self.send_message(response_message, chat_id=chat_id, parse_mode='HTML')
+                return # 이 메서드 종료
+
+            # --- 기존 명령어들 ---
+            
+            message = None # 보낼 메시지
+            
             if command == '/start':
                 message = """
-🤖 <b>자동 매도 시스템 봇</b>
+🤖 <b>자동 매도 시스템 봇 (v2.0)</b>
+
+v2.0 기획서에 따라 업그레이드되었습니다.
 
 <b>사용 가능한 명령어:</b>
+• /buy - 목표가 매수 주문 시작
+• /orders - 대기 중인 텔레그램 주문
+• /cancel - 텔레그램 주문 취소
 • /status - 시스템 상태 확인
 • /stats - 실시간 통계
 • /stop - 시스템 종료
 • /help - 도움말 보기
-
-현재 시스템이 실행 중입니다.
 """
             elif command == '/status':
                 runtime = datetime.now() - self.stats['start_time']
                 runtime_hours = runtime.total_seconds() / 3600
                 
+                # (신규) OrderManager에서 통계 가져오기 시도
+                tg_order_count = 0
+                if self.order_manager:
+                    tg_order_count = self.order_manager.get_pending_order_count()
+
                 message = f"""
-📊 <b>시스템 상태</b>
+📊 <b>시스템 상태 (v2.0)</b>
 
 • 상태: ✅ 실행중
 • 가동 시간: {runtime_hours:.1f}시간
 • 확인 시각: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
 • 폴링 간격: {self.polling_interval}초
-
-시스템이 정상적으로 작동하고 있습니다.
+• 텔레그램 주문 대기: {tg_order_count}건
 """
             elif command == '/stats':
                 success_rate = 0
                 if self.stats['total_sells'] > 0:
                     success_rate = (self.stats['successful_sells'] / self.stats['total_sells']) * 100
                 
-                message = f"""
-📈 <b>실시간 통계</b>
+                # (신규) v2.0 통계
+                trade_stats = {'auto': 0, 'telegram': 0, 'total': 0, 'remaining': 8}
+                if self.order_manager and hasattr(self.order_manager, 'trade_counter'):
+                    trade_stats = self.order_manager.trade_counter.get_stats()
 
-<b>거래</b>
-• 매수 감지: {self.stats['total_buys']}건
-• 매도 시도: {self.stats['total_sells']}건
-• 매도 성공: {self.stats['successful_sells']}건
-• 성공률: {success_rate:.1f}%
+                message = f"""
+📈 <b>실시간 통계 (v2.0)</b>
+
+<b>매매 (일일 8회 한도)</b>
+• 총 매매: {trade_stats['total']} / 8 회
+• 남은 횟수: {trade_stats['remaining']} 회
+• 자동 감지: {trade_stats['auto']} 회
+• 텔레그램: {trade_stats['telegram']} 회
 
 <b>수익</b>
 • 총 수익: ${self.stats['total_profit']:.2f}
 
 <b>시스템</b>
+• 매수 감지: {self.stats['total_buys']}건
+• 매도 성공: {self.stats['successful_sells']}건
+• 성공률: {success_rate:.1f}%
 • 오류: {self.stats['errors']}회
 """
             elif command == '/stop':
@@ -583,7 +706,7 @@ class TelegramBot:
 잠시 후 시스템이 안전하게 종료됩니다.
 """
                 # 메시지 전송 후 시스템 종료
-                self.send_message(message.strip())
+                self.send_message(message.strip(), chat_id=chat_id)
                 # 안전한 시스템 종료
                 self.logger.info("텔레그램에서 시스템 종료 요청을 받았습니다.")
                 os.kill(os.getpid(), signal.SIGTERM)
@@ -591,34 +714,29 @@ class TelegramBot:
 
             elif command == '/help':
                 message = f"""
-📚 도움말
+📚 도움말 (v2.0)
 
 명령어 목록:
-• /start - 봇 시작 및 소개
+• /buy - 대화형 목표가 매수 주문
+• /orders - 대기 중인 주문 목록
+• /cancel - 대기 중인 주문 취소
 • /status - 현재 시스템 상태 확인
 • /stats - 실시간 거래 통계
 • /stop - 시스템 안전 종료
 • /help - 이 도움말 보기
 
 기능:
-• 미국 주식 매수 체결 실시간 감시
-• 자동 +3% 매도 주문 실행
-• 실시간 알림 서비스
+• KIS 앱 수동 매수 감시
+• 텔레그램 목표가 매수
+• 자동 +6.0% 매도 주문 실행
+• 일일 8회 통합 매매 제한
+• 주말 자동 슬립
 
-📋 기획서 v1.1 준수 (2025-10-24):
-• REST API: 50건/초 (75% 마진으로 37건/초)
-• WebSocket 구독: 최대 20건 (2025.11.1~)
-• 무료 실시간 시세 (DNAS)
-• 적응형 폴링
-• WebSocket 자동 전환
-• 비상 정지 메커니즘
-
-운영 시간 (ET 기준):
-• 프리마켓: 04:00-09:30 (REST 폴링)
-• 정규장: 09:30-12:00 (WebSocket)
-• 수면: 12:00-04:00 (시스템 종료)
-
-문의사항이 있으시면 관리자에게 연락하세요.
+📋 기획서 v2.0 준수:
+• 수익률 목표: +6.0%
+• 운영 시간: ET 05:00 - 12:00
+• 폴링 주기: 4초 (균일)
+• WebSocket 미사용
 """
             else:
                 message = f"""
@@ -627,18 +745,76 @@ class TelegramBot:
 /help 명령어로 사용 가능한 명령어를 확인하세요.
 """
 
-            # 응답 전송
-            requests.post(f"{self.base_url}/sendMessage", data={
-                "chat_id": chat_id,
-                "text": message.strip(),
-                "parse_mode": "HTML"
-            }, timeout=self.timeout)
+            # 응답 전송 (신규 명령어 외)
+            if message:
+                requests.post(f"{self.base_url}/sendMessage", data={
+                    "chat_id": chat_id,
+                    "text": message.strip(),
+                    "parse_mode": "HTML"
+                }, timeout=self.timeout)
 
         except Exception as e:
             self.logger.error(f"명령어 처리 오류: {e}")
 
+    # 
+    # ↑↑↑ (수정 3) handle_command 수정 완료 ↑↑↑
+    #
+
+    # 
+    # ↓↓↓ (신규 4) handle_conversation: 대화형 명령어 처리기 ↓↓↓
+    #
+    def handle_conversation(self, chat_id, text, message_date):
+        """
+        /buy, /cancel 등 대화형 명령어의 후속 응답 처리
+        """
+        try:
+            state = self.conversation_states.get(chat_id)
+            if not state:
+                return # 상태가 없으면 무시
+
+            if not self.order_manager:
+                self.send_message("오류: 텔레그램 주문 관리자가 연결되지 않았습니다.", chat_id=chat_id)
+                del self.conversation_states[chat_id]
+                return
+
+            # '취소' 입력 시 대화 종료
+            if text.lower() == '취소':
+                del self.conversation_states[chat_id]
+                self.send_message("대화가 취소되었습니다.", chat_id=chat_id)
+                return
+
+            # 대화 유형에 따라 담당 핸들러 호출
+            conv_type = state.get('type')
+            
+            if conv_type == 'buy':
+                response_message = self.order_manager.handle_buy_conversation(chat_id, text, state)
+            elif conv_type == 'cancel':
+                response_message = self.order_manager.handle_cancel_conversation(chat_id, text, state)
+            else:
+                response_message = "알 수 없는 대화 상태입니다. 대화를 종료합니다."
+                del self.conversation_states[chat_id]
+
+            # 응답 메시지 전송
+            self.send_message(response_message, chat_id=chat_id, parse_mode='HTML')
+
+            # 대화가 완료되었는지 확인 (OrderManager가 state를 변경)
+            if state.get('step') == 'done' or state.get('step') == 'cancelled':
+                del self.conversation_states[chat_id]
+
+        except Exception as e:
+            self.logger.error(f"대화 처리 중 오류: {e}")
+            self.send_message("대화 처리 중 오류가 발생했습니다. 처음부터 다시 시도해주세요.", chat_id=chat_id)
+            if chat_id in self.conversation_states:
+                del self.conversation_states[chat_id]
+    # 
+    # ↑↑↑ (신규 4) handle_conversation 추가 완료 ↑↑↑
+    #
+
+    # 
+    # ↓↓↓ (수정 5) start_polling: 대화 상태 우선 처리 ↓↓↓
+    #
     def start_polling(self):
-        """텔레그램 봇 폴링 시작"""
+        """텔레그램 봇 폴링 시작 (대화 상태 관리 추가)"""
         self.logger.info(f"텔레그램 봇 폴링을 시작합니다... (간격: {self.polling_interval}초)")
         
         # 시작 시각을 먼저 기록
@@ -678,9 +854,19 @@ class TelegramBot:
 
                             if 'text' in message:
                                 text = message['text'].strip()
-                                self.logger.info(f"텔레그램 명령어 수신: {text}")
-                                if text.startswith('/'):
+                                self.logger.info(f"텔레그램 메시지 수신 (from {chat_id}): {text}")
+
+                                # (수정) 1순위: 대화 상태 확인
+                                if chat_id in self.conversation_states:
+                                    self.handle_conversation(chat_id, text, message_date)
+                                
+                                # 2순위: 새 명령어 확인
+                                elif text.startswith('/'):
                                     self.handle_command(text, chat_id, message_date)
+                                
+                                # 3순위: 그 외 (무시)
+                                else:
+                                    self.logger.debug(f"명령어 또는 대화가 아닌 메시지 무시: {text}")
 
                         offset = update['update_id'] + 1
 
@@ -707,22 +893,34 @@ class TelegramBot:
                     time.sleep(wait_time)
 
         self.logger.info("텔레그램 봇 폴링이 종료되었습니다.")
+    # 
+    # ↑↑↑ (수정 5) start_polling 수정 완료 ↑↑↑
+    #
 
-    def start(self):
-        """봇 시작 (메인에서 호출할 메서드)"""
+    # (수정 6) start: order_manager 주입
+    def start(self, order_manager=None):
+        """봇 시작 (order_manager 주입)"""
         if self.is_running:
             self.logger.warning("텔레그램 봇이 이미 실행 중입니다.")
             return
             
         self.logger.info("텔레그램 봇을 시작합니다...")
+        
+        # (신규) order_manager 연결
+        if order_manager:
+            self.order_manager = order_manager
+            self.logger.info("TelegramOrderManager가 성공적으로 연결되었습니다.")
+        else:
+            self.logger.warning("TelegramOrderManager가 연결되지 않았습니다. /buy 등 v2.0 명령어 사용 불가.")
+            
         self.polling_thread = threading.Thread(target=self.start_polling, daemon=True)
         self.polling_thread.start()
         
         # 시작 알림 전송
         self.send_startup_notification()
 
-    def stop(self):
-        """봇 중지 (메인에서 호출할 메서드)"""
+    def stop(self, trade_stats=None):
+        """봇 중지 (v2.0 - 통계 연동)"""
         if not self.is_running:
             return
             
@@ -730,7 +928,7 @@ class TelegramBot:
         self.is_running = False
         
         # 종료 알림 전송 (일일 통계 포함)
-        self.send_shutdown_notification()
+        self.send_shutdown_notification(trade_stats)
         
         # 폴링 스레드 종료 대기
         if self.polling_thread and self.polling_thread.is_alive():

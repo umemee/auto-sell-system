@@ -93,6 +93,178 @@ class DailyTradeCounter:
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# 🔴 [추가] 수정 1: SellOrderMonitor 클래스
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+class SellOrderMonitor:
+    """
+    매도 주문 체결 감시자
+    
+    역할:
+    1. 매도 주문이 실제로 체결되었는지 10초마다 확인
+    2. 체결 확인 후에만 DailyTradeCounter 증가
+    3. 30분 이상 미체결 시 경고
+    """
+    
+    def __init__(self, config, token_manager, telegram_bot, trade_counter):
+        self.config = config
+        self.token_manager = token_manager
+        self.telegram_bot = telegram_bot
+        self.trade_counter = trade_counter
+        
+        # 체결 대기 중인 매도 주문들
+        self.pending_sells = {}  # {order_no: order_info}
+        
+        self.is_running = False
+        self.monitor_thread = None
+        
+        logger.info("✅ SellOrderMonitor 초기화 완료")
+    
+    def add_order(self, order_no, order_info):
+        """
+        매도 주문을 감시 목록에 추가
+        
+        Args:
+            order_no: 주문번호 (예: "0030878422")
+            order_info: {
+                'ticker': 'AAPL',
+                'quantity': 10,
+                'sell_price': 159.00,
+                'buy_price': 150.00,
+                'source': 'auto',  # 또는 'telegram'
+                'created_at': datetime.now()
+            }
+        """
+        self.pending_sells[order_no] = order_info
+        logger.info(f"📝 매도 주문 감시 등록: {order_no} ({order_info['ticker']})")
+    
+    def check_order_filled(self, order_no):
+        """
+        특정 주문이 체결되었는지 확인
+        
+        Returns:
+            bool: 체결되었으면 True, 아니면 False
+        """
+        try:
+            from order import inquire_ccnl
+            from datetime import datetime
+            
+            today = datetime.now().strftime("%Y%m%d")
+            
+            # 체결 내역 조회
+            df = inquire_ccnl(
+                config=self.config,
+                token_manager=self.token_manager,
+                ord_strt_dt=today,
+                ord_end_dt=today,
+                sll_buy_dvsn="01",  # 매도만
+                ccld_nccs_dvsn="01",  # 체결만
+                odno=order_no
+            )
+            
+            # DataFrame이 비어있지 않으면 체결됨
+            if df is not None and not df.empty:
+                logger.info(f"✅ 체결 확인: {order_no}")
+                return True
+            
+            return False
+        
+        except Exception as e:
+            logger.error(f"❌ 체결 확인 오류 ({order_no}): {e}")
+            return False
+    
+    def monitor_loop(self):
+        """
+        메인 감시 루프 - 10초마다 실행
+        """
+        logger.info("🔍 매도 체결 감시 시작")
+        
+        while self.is_running:
+            try:
+                # 모든 대기 중인 주문 확인
+                for order_no, info in list(self.pending_sells.items()):
+                    
+                    # 30분 이상 미체결이면 타임아웃
+                    age_seconds = (datetime.now() - info['created_at']).total_seconds()
+                    if age_seconds > 1800:  # 30분
+                        logger.warning(f"⚠️ 매도 미체결 타임아웃: {order_no} ({info['ticker']})")
+                        
+                        # 목록에서 제거
+                        del self.pending_sells[order_no]
+                        
+                        # 텔레그램 알림
+                        if self.telegram_bot:
+                            self.telegram_bot.send_message(
+                                f"⚠️ 매도 미체결 경고\n\n"
+                                f"종목: {info['ticker']}\n"
+                                f"주문번호: {order_no}\n"
+                                f"경과 시간: 30분\n\n"
+                                f"KIS 앱에서 수동 확인 필요"
+                            )
+                        
+                        continue
+                    
+                    # 체결 확인
+                    if self.check_order_filled(order_no):
+                        logger.info(f"✅ 매도 체결 완료: {order_no} ({info['ticker']})")
+                        
+                        # ✅ 핵심: 체결 확인 후에만 카운터 증가!
+                        self.trade_counter.increment()
+                        
+                        # 텔레그램 알림
+                        if self.telegram_bot:
+                            # 수익 계산
+                            buy_price = info.get('buy_price', 0)
+                            profit_amount = 0
+                            if buy_price > 0:
+                                profit_amount = (info['sell_price'] - buy_price) * info['quantity']
+                            
+                            self.telegram_bot.send_message(
+                                f"✅ 매도 체결 완료 ({self.trade_counter.count}/{self.trade_counter.MAX_TRADES})\n\n"
+                                f"종목: {info['ticker']}\n"
+                                f"수량: {info['quantity']}주\n"
+                                f"체결가: ${info['sell_price']:.2f}\n"
+                                f"수익: ${profit_amount:.2f}\n"
+                                f"주문번호: {order_no}"
+                            )
+                        
+                        # 목록에서 제거
+                        del self.pending_sells[order_no]
+                
+                # 10초 대기
+                time.sleep(10)
+            
+            except Exception as e:
+                logger.error(f"❌ 매도 감시 루프 오류: {e}")
+                time.sleep(10)
+        
+        logger.info("🛑 매도 체결 감시 종료")
+    
+    def start(self):
+        """감시 스레드 시작"""
+        if self.is_running:
+            logger.warning("⚠️ 이미 실행 중")
+            return
+        
+        self.is_running = True
+        self.monitor_thread = threading.Thread(target=self.monitor_loop, daemon=True)
+        self.monitor_thread.start()
+        logger.info("🚀 매도 체결 감시 스레드 시작")
+    
+    def stop(self):
+        """감시 스레드 종료"""
+        if not self.is_running:
+            return
+        
+        self.is_running = False
+        
+        if self.monitor_thread and self.monitor_thread.is_alive():
+            self.monitor_thread.join(timeout=5)
+        
+        logger.info("🛑 매도 체결 감시 스레드 종료")
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+
 class SmartOrderMonitor:
     """
     Smart Order Monitor System (기획서 v1.1 완전 준수)
@@ -147,6 +319,12 @@ class SmartOrderMonitor:
         self.failed_orders = {}           # Failed orders: {order_no: (timestamp, reason)}
         self.processed_ws_orders = set()  # Processed via WebSocket
         
+        # ✅ 스레드 안전을 위한 Lock 추가
+        self._counter_lock = threading.Lock()
+        
+        # 🔴 [추가] v2.0 상태 저장을 위한 락
+        self.lock = threading.Lock()
+        
         # 🔴 [v1.2 수정] 상태 복원 먼저 실행
         self.load_persisted_state()
         
@@ -169,73 +347,87 @@ class SmartOrderMonitor:
         
         # Last buy order scan time
         self.last_buy_scan = 0
-
-        # ✅ 스레드 안전을 위한 Lock 추가
-        self._counter_lock = threading.Lock()
         
         # 🔴 [v1.2 신규] 일일 매매 카운터 초기화 (2순위)
         self.trade_counter = DailyTradeCounter(self.telegram_bot)
+        
+        # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+        # 🔴 [추가] 수정 2-1: 매도 체결 감시자 초기화
+        # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+        self.sell_monitor = SellOrderMonitor(
+            config=self.config,
+            token_manager=self.token_manager,
+            telegram_bot=self.telegram_bot,
+            trade_counter=self.trade_counter
+        )
+        logger.info("✅ SellOrderMonitor 통합 완료")
+        # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
         
         # 🔴 [v1.3 신규] last_reset_date 초기화 (ET 기준)
         self.reset_counters_if_needed()
 
     def load_persisted_state(self):
         """Spec 7.1: Load persisted state from file"""
-        try:
-            if os.path.exists(self.state_file):
-                with open(self.state_file, 'r', encoding='utf-8') as f:
-                    state = json.load(f)
-                
-                # Only restore orders from last 1 hour
-                cutoff_time = datetime.now() - timedelta(hours=1)
-                
-                for order_no, order_data in state.get('orders', {}).items():
-                    created_at = datetime.fromisoformat(order_data['created_at'])
-                    if created_at > cutoff_time:
-                        order_data['created_at'] = created_at
-                        if 'last_checked' in order_data and order_data['last_checked']:
-                            order_data['last_checked'] = datetime.fromisoformat(order_data['last_checked'])
-                        self.monitoring_orders[order_no] = order_data
-                
-                # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-                # 🔴 [v1.2 수정] 처리된 주문 목록 복원 (1순위)
-                # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-                # 재시작 시 중복 매도 방지를 위해 오늘 처리된 주문은 모두 복원
-                self.processed_orders = set(state.get('processed_orders', []))
-                
-                logger.info(f"💾 State restored: {len(self.monitoring_orders)} orders, {len(self.processed_orders)} processed orders")
-        except Exception as e:
-            logger.warning(f"State restoration failed: {e}")
+        with self.lock: # 🔴 [추가] 락 적용
+            try:
+                if os.path.exists(self.state_file):
+                    with open(self.state_file, 'r', encoding='utf-8') as f:
+                        state = json.load(f)
+                    
+                    # Only restore orders from last 1 hour
+                    cutoff_time = datetime.now() - timedelta(hours=1)
+                    
+                    for order_no, order_data in state.get('orders', {}).items():
+                        created_at = datetime.fromisoformat(order_data['created_at'])
+                        if created_at > cutoff_time:
+                            order_data['created_at'] = created_at
+                            if 'last_checked' in order_data and order_data['last_checked']:
+                                order_data['last_checked'] = datetime.fromisoformat(order_data['last_checked'])
+                            self.monitoring_orders[order_no] = order_data
+                    
+                    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+                    # 🔴 [v1.2 수정] 처리된 주문 목록 복원 (1순위)
+                    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+                    # 재시작 시 중복 매도 방지를 위해 오늘 처리된 주문은 모두 복원
+                    self.processed_orders = set(state.get('processed_orders', []))
+                    
+                    logger.info(f"💾 State restored: {len(self.monitoring_orders)} orders, {len(self.processed_orders)} processed orders")
+            except Exception as e:
+                logger.warning(f"State restoration failed: {e}")
 
     def save_state(self):
         """Spec 7.1: Save current state to file"""
-        try:
-            state = {
-                'timestamp': datetime.now().isoformat(),
-                'last_check': datetime.now().isoformat(),
-                'orders': {},
-                # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-                # 🔴 [v1.2 수정] 처리된 주문 목록 저장 (1순위)
-                # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-                'processed_orders': list(self.processed_orders)
-            }
-            
-            for order_no, order_data in self.monitoring_orders.items():
-                order_copy = order_data.copy()
-                order_copy['created_at'] = order_data['created_at'].isoformat()
-                if order_data.get('last_checked'):
-                    order_copy['last_checked'] = order_data['last_checked'].isoformat()
-                state['orders'][order_no] = order_copy
-            
-            os.makedirs(os.path.dirname(self.state_file), exist_ok=True)
-            
-            with open(self.state_file, 'w', encoding='utf-8') as f:
-                fcntl.flock(f, fcntl.LOCK_EX)  # 배타적 잠금
-                json.dump(state, f, ensure_ascii=False, indent=2)
-                fcntl.flock(f, fcntl.LOCK_UN)  # 잠금 해제
+        with self.lock: # 🔴 [추가] 락 적용
+            try:
+                state = {
+                    'timestamp': datetime.now().isoformat(),
+                    'last_check': datetime.now().isoformat(),
+                    'orders': {},
+                    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+                    # 🔴 [v1.2 수정] 처리된 주문 목록 저장 (1순위)
+                    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+                    'processed_orders': list(self.processed_orders)
+                }
+                
+                for order_no, order_data in self.monitoring_orders.items():
+                    order_copy = order_data.copy()
+                    # created_at이 datetime 객체가 아닐 수 있음 (JSON에서 로드 직후)
+                    if isinstance(order_data['created_at'], datetime):
+                        order_copy['created_at'] = order_data['created_at'].isoformat()
+                    # last_checked가 datetime 객체가 아닐 수 있음
+                    if order_data.get('last_checked') and isinstance(order_data.get('last_checked'), datetime):
+                        order_copy['last_checked'] = order_data['last_checked'].isoformat()
+                    state['orders'][order_no] = order_copy
+                
+                os.makedirs(os.path.dirname(self.state_file), exist_ok=True)
+                
+                with open(self.state_file, 'w', encoding='utf-8') as f:
+                    fcntl.flock(f, fcntl.LOCK_EX)  # 배타적 잠금
+                    json.dump(state, f, ensure_ascii=False, indent=2)
+                    fcntl.flock(f, fcntl.LOCK_UN)  # 잠금 해제
 
-        except Exception as e:
-            logger.warning(f"State save failed: {e}")
+            except Exception as e:
+                logger.warning(f"State save failed: {e}")
 
     def should_system_run(self):
         """
@@ -681,38 +873,6 @@ class SmartOrderMonitor:
         
         return False
 
-    def add_order_to_monitor(self, order_no, ticker, quantity, buy_price, order_time=None):
-        """Add order to monitoring list"""
-        if not order_time:
-            order_time = datetime.now()
-        
-        order_info = {
-            'ticker': ticker,
-            'quantity': quantity,
-            'buy_price': buy_price,
-            'created_at': order_time,
-            'last_checked': None,
-            'check_count': 0,
-            'mode_when_created': self.get_current_trading_mode()
-        }
-        
-        self.monitoring_orders[order_no] = order_info
-        current_mode = self.get_current_trading_mode()
-        
-        logger.info(f"📝 Order registered: {order_no} ({ticker} {quantity} @ ${buy_price}) - Mode: {current_mode}")
-        self.save_state()
-        
-        # Spec 6.1: Telegram notification
-        if self.telegram_bot:
-            mode_emoji = {'premarket': '🔵', 'regular': '⚡', 'closed': '😴'}
-            message = (
-                f"{mode_emoji.get(current_mode, '📝')} Order Registered\n"
-                f"📄 {order_no}\n"
-                f"🏷️ {ticker} {quantity} shares\n"
-                f"💰 ${buy_price}"
-            )
-            self.telegram_bot.send_message(message)
-
     def check_order_status(self, order_no):
         """
         Spec 3장: Check order status via REST API
@@ -886,50 +1046,58 @@ class SmartOrderMonitor:
                 execution_data,
                 self.telegram_bot
             )
-            
+
+            # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+            # 🔴 [수정] 수정 2-2: 매도 주문과 체결 분리
+            # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
             if success:
-                # Update statistics
-                if current_mode == 'regular':
-                    self.stats['ws_detections'] += 1
-                    total_detected = self.stats['ws_detections']
-                else:
-                    self.stats['successful_detections'] += 1
-                    total_detected = self.stats['successful_detections']
+                # place_sell_order가 주문번호를 반환하도록 수정 필요
+                # 주문번호 추출 (order.py 수정 후 사용 가능)
+                sell_order_no = success.get('order_no') if isinstance(success, dict) else None
                 
-                # Spec 4.4: Record successful order (✅ 1순위)
-                if order_no:
-                    self.processed_orders.add(order_no)
-                    logger.info(f"✅ Order {order_no} marked as processed")
-                
-                # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-                # 🔴 [v1.2 수정] 매매 횟수 증가 (2순위)
-                # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-                self.trade_counter.increment()
-                
-                logger.info(f"✅ Auto-sell success: {execution_data['ticker']} (Total: {total_detected})")
-                
-                # Spec 6.1: Telegram notification
-                if self.telegram_bot:
-                    mode_emoji = {'premarket': '🔵', 'regular': '⚡'}
+                if sell_order_no:
+                    # ✅ 매도 주문을 체결 감시 목록에 추가
+                    self.sell_monitor.add_order(sell_order_no, {
+                        'ticker': order_info['ticker'],
+                        'quantity': order_info['quantity'],
+                        'buy_price': filled_price,
+                        'sell_price': sell_price,
+                        'source': order_info.get('source', 'auto'),  # 🆕 v2.0
+                        'created_at': datetime.now()
+                    })
                     
-                    # ✅ 수정: 직관적인 매도 순서 표시 (수정 3)
-                    message = (
-                        f"{mode_emoji.get(current_mode, '🎉')} 매도 성공! ({self.trade_counter.count}/{self.trade_counter.MAX_TRADES})\n\n"
-                        f"🏷️ 종목: {execution_data['ticker']}\n"
-                        f"💰 매수가: ${filled_price:.2f}\n"
-                        f"💰 매도가: ${sell_price:.2f}\n"
-                        f"📈 수익률: +{target_profit_rate}%\n"
-                        f"💵 수익: ${(sell_price - filled_price) * execution_data['quantity']:.2f}\n\n"
-                        f"📊 오늘 {self.trade_counter.count}번째 매도 완료"
-                    )
-                    self.telegram_bot.send_message(message)
+                    # 통계만 업데이트 (카운터는 체결 후!)
+                    if current_mode == 'regular':
+                        self.stats['ws_detections'] += 1
+                    else:
+                        self.stats['successful_detections'] += 1
+                    
+                    # 처리됨 표시 (매수 주문번호 기준)
+                    if order_no:
+                        self.processed_orders.add(order_no)
+                    
+                    logger.info(f"📝 매도 주문 접수: {execution_data['ticker']} (체결 감시 중)")
+                else:
+                    logger.error("❌ 주문번호 없음 - 체결 감시 불가")
+                    # place_sell_order가 True(bool)를 반환한 경우 (order.py 수정 전)
+                    # 또는 dict를 반환했으나 order_no가 없는 경우
+                    # 실패로 간주
+                    if order_no:
+                        self.failed_orders[order_no] = (datetime.now(), 'Sell order_no missing')
+                    return False # 최종 실패 반환
+            
+            # place_sell_order 자체가 실패한 경우 (False 또는 None 반환)
             else:
                 # Spec 4.4: Record failed order
                 if order_no:
                     self.failed_orders[order_no] = (datetime.now(), 'Sell failed')
                     logger.warning(f"⚠️ Order {order_no} marked as failed")
+                return False # 최종 실패 반환
             
-            return success
+            # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+            
+            # 성공적으로 SellOrderMonitor에 등록되었으면 True 반환
+            return True
         
         except Exception as e:
             logger.error(f"❌ Auto-sell execution error: {e}")
@@ -984,8 +1152,6 @@ class SmartOrderMonitor:
                         # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
                         # 🔴 [v1.2 수정] 매매 한도 확인 (2순위)
                         # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-                        # execute_auto_sell에서 방어적 체크(v1.3)를 하므로
-                        # 여기서 미리 체크하고 로그를 남기는 것이 더 효율적임.
                         if not self.trade_counter.can_trade():
                             logger.warning(f"⚠️ [WS] 매매 한도 도달. {ticker} ({order_no}) 매도 주문을 실행하지 않습니다.")
                             
@@ -1005,20 +1171,23 @@ class SmartOrderMonitor:
                             'ticker': ticker,
                             'quantity': ccld_qty,
                             'buy_price': ccld_price,
-                            'created_at': datetime.now()
+                            'created_at': datetime.now(),
+                            'source': 'auto' # 🆕 v2.0
                         }
                         
                         # Execute auto-sell with order number
                         success = self.execute_auto_sell(order_info, ccld_price, order_no)
                         
                         if success:
-                            logger.info(f"✅ [WS] Auto-sell immediate success: {ticker}")
+                            # 🔴 [수정] "성공" -> "접수"
+                            logger.info(f"✅ [WS] Auto-sell order placed: {ticker}")
                             self.processed_ws_orders.add(order_no)
-                            # execute_auto_sell이 processed_orders에도 추가하고 카운트도 증가시킴
+                            # execute_auto_sell이 processed_orders에도 추가하고 SellOrderMonitor에 등록
                         else:
                             logger.error(f"❌ [WS] Auto-sell failed: {ticker}. Switching to REST polling.")
                             # On failure, add to REST polling monitoring
-                            self.add_order_to_monitor(order_no, ticker, ccld_qty, ccld_price)
+                            # 🔴 [v2.0 수정] add_order_to_monitor (새 메서드) 사용
+                            self.add_order_to_monitor(order_no, ticker, ccld_qty, ccld_price, source='auto')
         
         except json.JSONDecodeError:
             logger.debug(f"WS message parsing failed (not JSON): {message[:50]}...")
@@ -1153,7 +1322,8 @@ class SmartOrderMonitor:
                         'created_at': datetime.now(),
                         'last_checked': None,
                         'check_count': 0,
-                        'mode_when_created': self.get_current_trading_mode()
+                        'mode_when_created': self.get_current_trading_mode(),
+                        'source': 'auto' # 🆕 v2.0
                     }
                     
                     # Execute auto-sell with order number
@@ -1162,7 +1332,8 @@ class SmartOrderMonitor:
                     
                     # ✅ --- 수정 위치 2 ---
                     if success:
-                        logger.info(f"✅ [POLL] Auto-sell immediate success: {ticker}")
+                        # 🔴 [수정] "성공" -> "접수"
+                        logger.info(f"✅ [POLL] Auto-sell order placed: {ticker}")
                         
                         # Spec 6.1: Telegram notification (execute_auto_sell에서 이미 보냄)
                         
@@ -1197,24 +1368,34 @@ class SmartOrderMonitor:
         now = datetime.now()
         expired_orders = []
         
-        for order_no, order_info in self.monitoring_orders.items():
-            age_hours = (now - order_info['created_at']).total_seconds() / 3600
+        with self.lock: # 🔴 [추가] 락 적용
+            for order_no, order_info in self.monitoring_orders.items():
+                # 'created_at'이 isoformat 문자열일 수 있으므로 변환
+                created_at = order_info['created_at']
+                if isinstance(created_at, str):
+                    created_at = datetime.fromisoformat(created_at)
+                
+                age_hours = (now - created_at).total_seconds() / 3600
+                
+                # Expiration time based on mode
+                current_mode = self.get_current_trading_mode()
+                max_hours = 0.5 if current_mode == 'premarket' else 2
+                
+                if age_hours > max_hours:
+                    expired_orders.append(order_no)
             
-            # Expiration time based on mode
-            current_mode = self.get_current_trading_mode()
-            max_hours = 0.5 if current_mode == 'premarket' else 2
+            for order_no in expired_orders:
+                order_info = self.monitoring_orders.pop(order_no, None)
+                if order_info:
+                    # 'created_at'이 isoformat 문자열일 수 있으므로 변환
+                    created_at = order_info['created_at']
+                    if isinstance(created_at, str):
+                        created_at = datetime.fromisoformat(created_at)
+                    age_hours = (now - created_at).total_seconds() / 3600
+                    logger.info(f"⏰ Order expired: {order_no} ({age_hours:.1f} hours)")
             
-            if age_hours > max_hours:
-                expired_orders.append(order_no)
-        
-        for order_no in expired_orders:
-            order_info = self.monitoring_orders.pop(order_no, None)
-            if order_info:
-                age_hours = (now - order_info['created_at']).total_seconds() / 3600
-                logger.info(f"⏰ Order expired: {order_no} ({age_hours:.1f} hours)")
-        
-        if expired_orders:
-            self.save_state()
+            if expired_orders:
+                self.save_state() # 락 내부에서 호출
 
     def smart_monitor_loop(self):
         """
@@ -1227,17 +1408,40 @@ class SmartOrderMonitor:
         
         while self.is_running:
             try:
-                # Spec 2.2: Check if system should be running
+                # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+                # 🔴 [수정] 수정 4: 순서 변경: 모드 전환을 먼저 체크
+                # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+                
+                # 1단계: 모드 전환 체크 (슬립 모드 알림 포함)
+                if self.switch_mode_if_needed():
+                    # closed 모드로 전환되었으면 슬립 처리
+                    if self.current_mode == 'closed':
+                        logger.info("😴 슬립 모드 진입 확인")
+                        
+                        # handle_sleep_mode()는 switch_mode_if_needed()에서 이미 호출됨
+                        
+                        # 매도 주문 체결 대기 (5분)
+                        logger.info("⏳ 매도 주문 체결 여유 시간 (5분)...")
+                        time.sleep(300)
+                        
+                        # 시스템 종료
+                        logger.info("🛑 시스템 종료 시작")
+                        self.stop()
+                        break
+                
+                # 2단계: 백업 체크 (만약 모드 전환을 놓쳤다면)
                 if not self.should_system_run():
-                    logger.info("🌙 Outside operating hours (ET 12:00) - Stopping system")
+                    logger.warning("⚠️ 운영 시간 외 감지 (백업 체크)")
+                    
+                    if self.current_mode != 'closed':
+                        # 강제로 closed 모드 전환
+                        self.current_mode = 'closed'
+                        self.handle_sleep_mode()
+                    
                     self.stop()
                     break
                 
-                # Spec 2.3: Switch mode if needed
-                if self.switch_mode_if_needed():
-                    if self.current_mode == 'closed':
-                        time.sleep(300)  # 5 min wait in sleep mode
-                        continue
+                # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
                 
                 # [수정] WebSocket 모드(정규장) 스킵 로직 제거
                 # if self.current_mode == 'regular':
@@ -1273,7 +1477,10 @@ class SmartOrderMonitor:
                 # Process each monitoring order
                 processed_count = 0
                 
-                for order_no, order_info in list(self.monitoring_orders.items()):
+                with self.lock: # 🔴 [추가] 락 적용
+                    orders_to_check = list(self.monitoring_orders.items())
+                
+                for order_no, order_info in orders_to_check:
                     if not self.is_running:
                         break
                     
@@ -1282,14 +1489,20 @@ class SmartOrderMonitor:
                     now = datetime.now()
                     
                     # Skip if checked recently
-                    if (order_info['last_checked'] and 
-                        (now - order_info['last_checked']).total_seconds() < polling_interval):
-                        continue
+                    last_checked_str = order_info.get('last_checked')
+                    if last_checked_str:
+                        last_checked_dt = datetime.fromisoformat(last_checked_str)
+                        if (now - last_checked_dt).total_seconds() < polling_interval:
+                            continue
                     
                     # Check order status
                     status_info = self.check_order_status(order_no)
-                    order_info['last_checked'] = now
-                    order_info['check_count'] += 1
+                    
+                    with self.lock: # 🔴 [추가] 락 적용
+                        if order_no in self.monitoring_orders: # 확인 중 삭제 방지
+                            self.monitoring_orders[order_no]['last_checked'] = now.isoformat()
+                            self.monitoring_orders[order_no]['check_count'] += 1
+                    
                     processed_count += 1
                     
                     if status_info is None:
@@ -1300,8 +1513,6 @@ class SmartOrderMonitor:
                         status_info['filled_qty'] > 0):
                         
                         # 🔴 [v1.2 수정] 매매 한도 확인 (2순위)
-                        # 🔴 [v1.3 수정] execute_auto_sell에서 방어적 체크를 하므로
-                        # 여기서 미리 체크하고 로그를 남기는 것이 더 효율적임.
                         if not self.trade_counter.can_trade():
                             logger.warning(f"⚠️ [POLL] 매매 한도 도달. {order_info['ticker']} ({order_no}) 매도 주문을 실행하지 않습니다.")
                             
@@ -1310,7 +1521,8 @@ class SmartOrderMonitor:
                                 self.telegram_bot.send_sleep_mode_notification(reason="trade_limit")
 
                             # 매도는 안하지만, 모니터링 중지 (중복 방지)
-                            self.monitoring_orders.pop(order_no, None)
+                            with self.lock: # 🔴 [추가] 락 적용
+                                self.monitoring_orders.pop(order_no, None)
                             self.processed_orders.add(order_no) # 1순위
                             self.save_state()
                             continue
@@ -1321,39 +1533,38 @@ class SmartOrderMonitor:
                         )
                         
                         # Execute auto-sell with order number
-                        # execute_auto_sell이 성공 시 카운터 증가 및 processed_orders 추가
+                        # 🔴 [수정] execute_auto_sell은 이제 SellOrderMonitor에 등록
                         success = self.execute_auto_sell(order_info, status_info['filled_price'], order_no)
                         
                         # ✅ --- 수정 위치 1 ---
-                        if success:
-                            self.monitoring_orders.pop(order_no, None)
-                            self.save_state()
-                        else:
-                            # ✅ "이미 매도됨" 오류는 재시도하지 않고 제거
-                            # 이 로직은 이미 v1.1 파일에 올바르게 구현되어 있었습니다.
-                            logger.warning(f"⚠️ [POLL] Fill detected but sell failed: {order_no}. Removing from monitoring.")
+                        with self.lock: # 🔴 [추가] 락 적용
+                            if success:
+                                # 🔴 [수정] 성공 = 주문 접수. 모니터링 목록에서 제거
+                                self.monitoring_orders.pop(order_no, None)
+                            else:
+                                # ✅ "이미 매도됨" 오류는 재시도하지 않고 제거
+                                logger.warning(f"⚠️ [POLL] Fill detected but sell failed: {order_no}. Removing from monitoring.")
+                                
+                                # monitoring_orders에서 완전히 제거
+                                self.monitoring_orders.pop(order_no, None)
+                                
+                                # 재처리 방지 (✅ 1순위)
+                                self.processed_orders.add(order_no)
+                                
+                                # 텔레그램 알림
+                                if self.telegram_bot:
+                                    if hasattr(self.telegram_bot, 'send_info_notification'):
+                                        self.telegram_bot.send_info_notification(
+                                            f"매도 대상 없음: {order_info['ticker']} (이미 매도됨)"
+                                        )
+                                    else:
+                                        self.telegram_bot.send_message(
+                                            f"ℹ️ 시스템 정보\n매도 대상 없음: {order_info['ticker']} (이미 매도됨)"
+                                        )
+                                
+                                logger.info(f"🗑️ Order {order_no} removed from monitoring (already sold)")
                             
-                            # monitoring_orders에서 완전히 제거
-                            self.monitoring_orders.pop(order_no, None)
-                            
-                            # 재처리 방지 (✅ 1순위)
-                            self.processed_orders.add(order_no)
-                            
-                            # 상태 저장
-                            self.save_state()
-                            
-                            # 텔레그램 알림
-                            if self.telegram_bot:
-                                if hasattr(self.telegram_bot, 'send_info_notification'):
-                                    self.telegram_bot.send_info_notification(
-                                        f"매도 대상 없음: {order_info['ticker']} (이미 매도됨)"
-                                    )
-                                else:
-                                    self.telegram_bot.send_message(
-                                        f"ℹ️ 시스템 정보\n매도 대상 없음: {order_info['ticker']} (이미 매도됨)"
-                                    )
-                            
-                            logger.info(f"🗑️ Order {order_no} removed from monitoring (already sold)")
+                            self.save_state() # 락 내부에서 호출
                         # ✅ --- 수정 완료 1 ---
                     
                     # Rate limit: Wait between checks
@@ -1401,6 +1612,11 @@ class SmartOrderMonitor:
         self.monitor_thread = threading.Thread(target=self.smart_monitor_loop, daemon=True)
         self.monitor_thread.start()
         
+        # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+        # 🔴 [추가] 수정 2-3: 매도 체결 감시 시작
+        self.sell_monitor.start()
+        # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+        
         logger.info(f"🚀 Smart Order Monitor started - Initial mode: {self.current_mode}")
 
     def stop(self):
@@ -1414,7 +1630,13 @@ class SmartOrderMonitor:
         # Stop WebSocket
         self.stop_websocket_mode()
         
-        # Save state
+        # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+        # 🔴 [추가] 수정 2-4: 매도 체결 감시 종료
+        if hasattr(self, 'sell_monitor'):
+            self.sell_monitor.stop()
+        # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+        
+        # Save state (Stop 이후, 스레드 조인 전에)
         self.save_state()
         
         # Wait for thread
@@ -1428,16 +1650,72 @@ class SmartOrderMonitor:
             f"WS: {self.stats['ws_detections']}"
         )
 
+    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    # 🔴 [신규] Step 4: 요청하신 메서드 추가
+    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    def add_order_to_monitor(self, order_no, ticker, quantity, buy_price, source='auto'):
+        """
+        [v2.0 신규] 외부에서 주문을 모니터링 목록에 추가
+        텔레그램 주문 매수 체결 후 자동 매도 대기 등록용
+        
+        Args:
+            order_no (str): KIS 주문번호 (예: "0030878422")
+            ticker (str): 종목코드 (예: "AAPL")
+            quantity (int): 수량
+            buy_price (float): 매수가
+            source (str): 'auto' 또는 'telegram'
+        
+        Returns:
+            bool: 등록 성공 시 True, 실패 시 False
+        
+        Example:
+            >>> monitor.add_order_to_monitor(
+            ...     order_no="0030878500",
+            ...     ticker="AAPL",
+            ...     quantity=10,
+            ...     buy_price=175.00,
+            ...     source='telegram'
+            ... )
+            True
+        """
+        with self.lock:
+            # 중복 체크
+            if order_no in self.monitoring_orders:
+                logger.warning(f"⚠️ 이미 모니터링 중인 주문: {order_no}")
+                return False
+            
+            # 주문 정보 등록
+            self.monitoring_orders[order_no] = {
+                'ticker': ticker,
+                'quantity': quantity,
+                'buy_price': buy_price,
+                'source': source,  # 🆕 v2.0 (통계용)
+                'created_at': datetime.now(),
+                'last_checked': None,
+                'check_count': 0,
+                'status': 'monitoring'
+            }
+            
+            # 상태 저장
+            self.save_state()
+            
+            logger.info(
+                f"📝 [{source.upper()}] 모니터링 등록: "
+                f"{order_no} ({ticker} {quantity}주 @ ${buy_price:.2f})"
+            )
+            return True
+
     def get_monitoring_count(self):
         """Get current monitoring order count"""
-        return len(self.monitoring_orders)
+        with self.lock: # 🔴 [추가] 락 적용
+            return len(self.monitoring_orders)
 
     def get_detailed_stats(self):
         """Get detailed statistics"""
         current_mode = self.get_current_trading_mode()
         
         return {
-            'monitoring_count': len(self.monitoring_orders),
+            'monitoring_count': self.get_monitoring_count(), # 락 적용된 메서드 호출
             'current_mode': current_mode,
             'daily_api_calls': self.daily_api_count,
             'hourly_api_calls': self.hourly_api_count,

@@ -519,7 +519,8 @@ def place_sell_order(config, token_manager, execution_data, telegram_bot=None):
         telegram_bot: TelegramBot 인스턴스 (선택)
     
     Returns:
-        bool: 매도 주문 성공 여부
+        dict: 매도 주문 성공 시 {'success': True, 'order_no': ...}
+        bool: 실패 시 False
         
     매도 실패 처리 (기획서 4.4):
         - "주문수량이 가능수량보다 큽니다" 오류 → 즉시 포기
@@ -536,7 +537,7 @@ def place_sell_order(config, token_manager, execution_data, telegram_bot=None):
         profit_margin = target_profit_rate / 100  # 3.0 → 0.03
         
         # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-        # 🔴 [수정] 요청하신 매도가 계산 로직
+        # 🔴 [v1.4 수정] $1 기준 조건부 반올림
         # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
         
         # 1. 먼저 반올림 없이 원시 매도가 계산
@@ -630,20 +631,34 @@ def place_sell_order(config, token_manager, execution_data, telegram_bot=None):
             
             if rt_cd == "0":
                 order_no = result.get("output", {}).get("ODNO", "")
-                logger.info(f"✅ 매도 주문 성공: {ticker} (주문번호: {order_no})")
                 
-                # 텔레그램 알림
+                # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+                # 🔴 [수정] 수정 3: 알림 메시지 변경 및 dict 반환
+                # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+                logger.info(f"✅ 매도 주문 접수: {ticker} (주문번호: {order_no})")
+                
+                # Telegram notification
                 if telegram_bot:
-                    message = f"""✅ 자동 매도 주문 성공
+                    message = f"""📝 매도 주문 접수 (체결 감시 중)
 
 📊 종목: {ticker}
 📈 수량: {execution_data['quantity']}주
-💰 매도가: ${sell_price}
+💰 주문가: ${sell_price}
 🎯 목표 수익률: +{target_profit_rate}%
-📝 주문번호: {order_no}"""
+📝 주문번호: {order_no}
+
+⏳ 체결 확인 중... (최대 30분)"""
                     telegram_bot.send_message(message)
                 
-                return True
+                # ✅ 수정: 주문번호를 포함한 딕셔너리 반환
+                return {
+                    'success': True,
+                    'order_no': order_no,
+                    'ticker': ticker,
+                    'quantity': execution_data['quantity'],
+                    'price': sell_price
+                }
+                # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
             else:
                 # 기획서 4.4: 매도 실패 처리
                 msg1 = result.get("msg1", "알 수 없는 오류")
@@ -742,7 +757,7 @@ class OrderMonitor:
             }
         
             # 파라미터 설정
-            today = datetime.now().strftime("%Y%m%d")
+            today = datetime.now().strftime("%Ym%d")
         
             # 한국투자증권 공식 파라미터 (GitHub 확인 완료)
             params = {
@@ -819,13 +834,21 @@ class OrderMonitor:
             logger.info(f"🎯 체결 감지: {execution_data['ticker']} ${filled_price}")
             
             # 자동 매도 주문 실행
-            success = place_sell_order(
+            # 🔴 [수정] 반환값이 dict | bool 이므로 success 여부만 체크
+            result = place_sell_order(
                 self.config,
                 self.token_manager,
                 execution_data,
                 self.telegram_bot
             )
             
+            # 딕셔너리면 'success' 키로, bool이면 값 자체로 성공 여부 판단
+            success = False
+            if isinstance(result, dict):
+                success = result.get('success', False)
+            elif isinstance(result, bool):
+                success = result
+                
             return success
         
         except Exception as e:
