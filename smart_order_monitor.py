@@ -1,7 +1,7 @@
 # smart_order_monitor.py - v2.0 기획서 Phase 4 (DailyTradeCounter) 적용
 # Specification v1.1 Compliant
-# [v2.5 수정] 날짜 포맷 오타 수정 (%Ym%d -> %Y%m%d) - 중요!!
-# [v2.5 수정] 연속 요청 제한 완화 (10 -> 20)
+# [v2.6 수정] 날짜 포맷 오타 긴급 수정 (%Ym%d -> %Y%m%d)
+# [v2.6 수정] 연속 요청 제한 완화 (10 -> 20)
 
 import requests
 import json
@@ -184,7 +184,7 @@ class SellOrderMonitor:
             from order import inquire_ccnl
             from datetime import datetime
             
-            # [수정] 날짜 포맷 오타 수정
+            # [수정] 날짜 포맷 오타 수정 (%Ym%d -> %Y%m%d)
             today = datetime.now().strftime("%Y%m%d")
             
             # 체결 내역 조회
@@ -813,8 +813,9 @@ class SmartOrderMonitor:
                 "custtype": "P"
             }
             
-            # [수정] 날짜 포맷 오타 수정
+            # [수정] 날짜 포맷 오타 수정 (%Ym%d -> %Y%m%d)
             today = datetime.now().strftime("%Y%m%d")
+            
             params = {
                 "CANO": self.config['cano'],
                 "ACNT_PRDT_CD": self.config['acnt_prdt_cd'],
@@ -1107,6 +1108,7 @@ class SmartOrderMonitor:
                         break
                 
                 # 2단계: 백업 체크 (운영 시간 확인)
+                # [v2.4 수정] should_system_run 결과가 False여도 04:00 직전이면 대기
                 if not self.should_system_run():
                     try:
                         trading_tz = self.config.get('order_settings', {}).get('timezone', 'US/Eastern')
@@ -1264,6 +1266,8 @@ class SmartOrderMonitor:
         """Stop monitoring system"""
         if not self.is_running:
             return
+        
+        logger.info("🛑 Stopping monitor...")
         self.is_running = False
         
         self.stop_websocket_mode()
