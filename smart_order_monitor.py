@@ -1,7 +1,7 @@
 # smart_order_monitor.py - v2.0 기획서 Phase 4 (DailyTradeCounter) 적용
 # Specification v1.1 Compliant
-# [v2.6 수정] 날짜 포맷 오타 긴급 수정 (%Ym%d -> %Y%m%d)
-# [v2.6 수정] 연속 요청 제한 완화 (10 -> 20)
+# [v2.7 수정] Premarket 모드에서도 매도 모니터링 확실하게 실행되도록 루프 구조 개선
+# [v2.7 수정] 날짜 포맷 오타 수정 (%Y%m%d) 및 연속 요청 제한 완화 유지
 
 import requests
 import json
