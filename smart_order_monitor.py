@@ -1108,7 +1108,6 @@ class SmartOrderMonitor:
                         break
                 
                 # 2단계: 백업 체크 (운영 시간 확인)
-                # [v2.4 수정] should_system_run 결과가 False여도 04:00 직전이면 대기
                 if not self.should_system_run():
                     try:
                         trading_tz = self.config.get('order_settings', {}).get('timezone', 'US/Eastern')
