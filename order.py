@@ -1090,7 +1090,7 @@ class OrderMonitor:
             }
         
             # 파라미터 설정
-            today = datetime.now().strftime("%Ym%d")
+            today = datetime.now().strftime("%Y%m%d")
         
             # 한국투자증권 공식 파라미터 (GitHub 확인 완료)
             params = {
