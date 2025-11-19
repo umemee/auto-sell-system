@@ -20,9 +20,9 @@ def is_market_hours(trading_timezone='US/Eastern'):
     기획서 2.2: 시장 시간 상태 반환
     
     운영 시간 (ET 기준):
-    - 프리마켓: 04:00-09:30
+    - 프리마켓: 05:00-09:30 (수정됨)
     - 정규장: 09:30-12:00
-    - 수면 모드: 12:00-04:00 (다음날)
+    - 수면 모드: 12:00-05:00 (다음날)
     
     Returns: 'premarket', 'regular', 'closed'
     """
@@ -31,7 +31,8 @@ def is_market_hours(trading_timezone='US/Eastern'):
         now = datetime.now(tz).time()
         
         # 기획서 2.2: 운영 시간 정의
-        premarket_start = dtime(4, 0)     # 04:00 ET (한국 17:00)
+        # [수정] 프리마켓 시작 시간을 05:00으로 변경 (should_system_run과 통일)
+        premarket_start = dtime(5, 0)     # 05:00 ET (한국 19:00)
         regular_start = dtime(9, 30)      # 09:30 ET (한국 22:30)
         system_end = dtime(12, 0)         # 12:00 ET (한국 01:00)
         

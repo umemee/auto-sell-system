@@ -2,6 +2,7 @@
 # Specification v1.1 Compliant
 # 🆕 [v2.0] 슬립 모드 텔레그램 주문 취소 로직 추가
 # 🆕 [v2.0] 스레드 교착 상태(deadlock) 수정: smart_monitor_loop 내 self.stop() -> break
+# [v2.1 수정] 시작 시간 전 대기 로직 추가
 
 import requests
 import json
@@ -1452,6 +1453,23 @@ class SmartOrderMonitor:
                 
                 # 2단계: 백업 체크 (만약 모드 전환을 놓쳤다면)
                 if not self.should_system_run():
+                    # 🔴 [신규] 시작 시간(05:00 ET) 전이라면 종료하지 않고 대기
+                    try:
+                        from datetime import datetime, time as dtime
+                        from pytz import timezone
+                        
+                        tz = timezone('US/Eastern')
+                        now_time = datetime.now(tz).time()
+                        start_time = dtime(5, 0)
+                        
+                        # 04:30 ~ 05:00 사이라면 대기 (시작 직전)
+                        if dtime(4, 30) <= now_time < start_time:
+                            logger.info(f"⏳ 운영 시작 대기 중... (현재: {now_time.strftime('%H:%M')} ET)")
+                            time.sleep(30) # 30초 대기
+                            continue
+                    except Exception as e:
+                        logger.error(f"대기 로직 오류: {e}")
+
                     logger.warning("⚠️ 운영 시간 외 감지 (백업 체크)")
                     
                     if self.current_mode != 'closed':
