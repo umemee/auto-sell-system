@@ -1,7 +1,7 @@
 # smart_order_monitor.py - v2.0 기획서 Phase 4 (DailyTradeCounter) 적용
 # Specification v1.1 Compliant
-# [v2.4 수정] 운영 시간 04:00 ET (한국 18:00) 기준으로 변경
-# [v2.4 수정] 18시 장 시작 후 실행 시 즉시 작동 및 시작 전 대기 로직 강화
+# [v2.5 수정] 날짜 포맷 오타 수정 (%Ym%d -> %Y%m%d) - 중요!!
+# [v2.5 수정] 연속 요청 제한 완화 (10 -> 20)
 
 import requests
 import json
@@ -184,6 +184,7 @@ class SellOrderMonitor:
             from order import inquire_ccnl
             from datetime import datetime
             
+            # [수정] 날짜 포맷 오타 수정
             today = datetime.now().strftime("%Y%m%d")
             
             # 체결 내역 조회
@@ -712,7 +713,8 @@ class SmartOrderMonitor:
         if now_time - self.last_request_time < min_interval:
             return False
         
-        consecutive_limit = self.rate_config.get('consecutive_limit', 10)
+        # [수정] 연속 요청 제한 완화 (10 -> 20)
+        consecutive_limit = self.rate_config.get('consecutive_limit', 20)
         if self.consecutive_requests >= consecutive_limit:
             logger.warning(f"⚠️ Consecutive limit reached: {self.consecutive_requests}/{consecutive_limit}")
             time.sleep(1)
@@ -811,7 +813,8 @@ class SmartOrderMonitor:
                 "custtype": "P"
             }
             
-            today = datetime.now().strftime("%Ym%d")
+            # [수정] 날짜 포맷 오타 수정
+            today = datetime.now().strftime("%Y%m%d")
             params = {
                 "CANO": self.config['cano'],
                 "ACNT_PRDT_CD": self.config['acnt_prdt_cd'],
@@ -975,7 +978,9 @@ class SmartOrderMonitor:
                 "custtype": "P"
             }
             
-            today = datetime.now().strftime("%Ym%d")
+            # [수정] 날짜 포맷 오타 수정 (%Ym%d -> %Y%m%d)
+            today = datetime.now().strftime("%Y%m%d")
+            
             params = {
                 "CANO": self.config['cano'],
                 "ACNT_PRDT_CD": self.config['acnt_prdt_cd'],
@@ -1018,14 +1023,8 @@ class SmartOrderMonitor:
                         del self.failed_orders[order_no]
                 
                 ticker = order.get("pdno", "")
-                ccld_qty = order.get("ft_ccld_qty", "0")
-                ccld_price = order.get("ft_ccld_unpr3", "0")
-                
-                try:
-                    ccld_qty = int(ccld_qty) if ccld_qty else 0
-                    ccld_price = float(ccld_price) if ccld_price else 0.0
-                except:
-                    continue
+                ccld_qty = int(order.get("ft_ccld_qty", "0"))
+                ccld_price = float(order.get("ft_ccld_unpr3", "0"))
                 
                 if ccld_qty > 0 and ccld_price > 0:
                     if not self.trade_counter.can_trade():
@@ -1044,9 +1043,6 @@ class SmartOrderMonitor:
                         'quantity': ccld_qty,
                         'buy_price': ccld_price,
                         'created_at': datetime.now(),
-                        'last_checked': None,
-                        'check_count': 0,
-                        'mode_when_created': self.get_current_trading_mode(),
                         'source': 'auto'
                     }
                     
@@ -1071,8 +1067,8 @@ class SmartOrderMonitor:
         now = datetime.now()
         expired_orders = []
         with self.lock:
-            for order_no, order_info in self.monitoring_orders.items():
-                created_at = order_info['created_at']
+            for order_no, info in self.monitoring_orders.items():
+                created_at = info['created_at']
                 if isinstance(created_at, str):
                     created_at = datetime.fromisoformat(created_at)
                 age_hours = (now - created_at).total_seconds() / 3600
@@ -1111,7 +1107,6 @@ class SmartOrderMonitor:
                         break
                 
                 # 2단계: 백업 체크 (운영 시간 확인)
-                # [v2.4 수정] should_system_run 결과가 False여도 04:00 직전이면 대기
                 if not self.should_system_run():
                     try:
                         trading_tz = self.config.get('order_settings', {}).get('timezone', 'US/Eastern')
@@ -1246,6 +1241,7 @@ class SmartOrderMonitor:
                 time.sleep(30)
         
         logger.info("🛑 Smart Order Monitor stopped")
+        self.is_running = False
 
     def start(self):
         """Start monitoring system"""
@@ -1268,8 +1264,6 @@ class SmartOrderMonitor:
         """Stop monitoring system"""
         if not self.is_running:
             return
-        
-        logger.info("🛑 Stopping monitor...")
         self.is_running = False
         
         self.stop_websocket_mode()
