@@ -1,7 +1,7 @@
 # smart_order_monitor.py - v2.0 기획서 Phase 4 (DailyTradeCounter) 적용
 # Specification v1.1 Compliant
 # [v2.7 수정] Premarket 모드에서도 매도 모니터링 확실하게 실행되도록 루프 구조 개선
-# [v2.7 수정] 날짜 포맷 오타 수정 (%Y%m%d) 및 연속 요청 제한 완화 유지
+# [v2.8 수정] API 필수 파라미터(SORT_SQN 등) 추가 및 날짜 포맷 오타 수정
 
 import requests
 import json
@@ -816,6 +816,7 @@ class SmartOrderMonitor:
             # [수정] 날짜 포맷 오타 수정 (%Ym%d -> %Y%m%d)
             today = datetime.now().strftime("%Y%m%d")
             
+            # ✅ [수정] 필수 파라미터 추가 (API 오류 방지)
             params = {
                 "CANO": self.config['cano'],
                 "ACNT_PRDT_CD": self.config['acnt_prdt_cd'],
@@ -825,10 +826,10 @@ class SmartOrderMonitor:
                 "SLL_BUY_DVSN": "02",
                 "CCLD_NCCS_DVSN": "01",
                 "OVRS_EXCG_CD": "NASD",
-                "SORT_SQN": "DS",
-                "ORD_DT": "",
-                "ORD_GNO_BRNO": "",
-                "ODNO": "",
+                "SORT_SQN": "DS",        # 필수 추가
+                "ORD_DT": "",            # 필수 추가
+                "ORD_GNO_BRNO": "",      # 필수 추가
+                "ODNO": "",              # 필수 추가
                 "CTX_AREA_NK200": "",
                 "CTX_AREA_FK200": ""
             }
@@ -899,7 +900,13 @@ class SmartOrderMonitor:
             current_mode = self.get_current_trading_mode()
             target_profit_rate = self.config.get('order_settings', {}).get('target_profit_rate', 6.0)
             profit_margin = target_profit_rate / 100
-            sell_price = round(filled_price * (1 + profit_margin), 4)
+            
+            # [수정] $1 기준 조건부 반올림 로직 적용
+            raw_sell_price = filled_price * (1 + profit_margin)
+            if raw_sell_price >= 1.0:
+                sell_price = round(raw_sell_price, 2)
+            else:
+                sell_price = round(raw_sell_price, 4)
             
             execution_data = {
                 'ticker': order_info['ticker'],
@@ -982,6 +989,7 @@ class SmartOrderMonitor:
             # [수정] 날짜 포맷 오타 수정 (%Ym%d -> %Y%m%d)
             today = datetime.now().strftime("%Y%m%d")
             
+            # ✅ [수정] 필수 파라미터 추가 (API 오류 방지)
             params = {
                 "CANO": self.config['cano'],
                 "ACNT_PRDT_CD": self.config['acnt_prdt_cd'],
@@ -991,6 +999,10 @@ class SmartOrderMonitor:
                 "SLL_BUY_DVSN": "02",
                 "CCLD_NCCS_DVSN": "01",
                 "OVRS_EXCG_CD": "NASD",
+                "SORT_SQN": "DS",        # 필수 추가
+                "ORD_DT": "",            # 필수 추가
+                "ORD_GNO_BRNO": "",      # 필수 추가
+                "ODNO": "",              # 필수 추가
                 "CTX_AREA_NK200": "",
                 "CTX_AREA_FK200": ""
             }
@@ -1113,10 +1125,10 @@ class SmartOrderMonitor:
                         trading_tz = self.config.get('order_settings', {}).get('timezone', 'US/Eastern')
                         tz = timezone(trading_tz)
                         now_time = datetime.now(tz).time()
-                        start_time = dtime(4, 0)  # 04:00 ET
+                        start_time = dtime(5, 0)  # 05:00 ET
                         
-                        # 03:30 ~ 04:00 사이라면 종료하지 않고 대기 (30초)
-                        if dtime(3, 30) <= now_time < start_time:
+                        # 04:30 ~ 05:00 사이라면 종료하지 않고 대기 (30초)
+                        if dtime(4, 30) <= now_time < start_time:
                             logger.info(f"⏳ 운영 시작 대기 중... (현재: {now_time.strftime('%H:%M')} ET)")
                             time.sleep(30)
                             continue
