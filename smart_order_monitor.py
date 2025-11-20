@@ -473,8 +473,8 @@ class SmartOrderMonitor:
                 # logger.debug("주말 - 운영 안 함")
                 return False
                 
-            # 04:00 ET ~ 12:00 ET
-            start_time = dtime(4, 0)
+            # 05:00 ET ~ 12:00 ET
+            start_time = dtime(5, 0)
             end_time = dtime(12, 0)
             
             is_running = start_time <= now_time < end_time
@@ -494,8 +494,8 @@ class SmartOrderMonitor:
             tz = timezone(trading_tz)
             now_time = datetime.now(tz).time()
             
-            # 04:00 ~ 09:30 : Premarket
-            if dtime(4, 0) <= now_time < dtime(9, 30):
+            # 05:00 ~ 09:30 : Premarket
+            if dtime(5, 0) <= now_time < dtime(9, 30):
                 return 'premarket'
             # 09:30 ~ 12:00 : Regular
             elif dtime(9, 30) <= now_time < dtime(12, 0):
