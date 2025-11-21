@@ -2,6 +2,7 @@
 # Specification v1.1 Compliant
 # [v2.7 수정] Premarket 모드에서도 매도 모니터링 확실하게 실행되도록 루프 구조 개선
 # [v2.8 수정] API 필수 파라미터(SORT_SQN 등) 추가 및 날짜 포맷 오타 수정
+# [v2.9 수정] 스마트 모니터 루프 종료(break) 제거 -> 대기(continue) 로직으로 변경 (자동 재시작 문제 해결)
 
 import requests
 import json
@@ -1105,21 +1106,25 @@ class SmartOrderMonitor:
     def smart_monitor_loop(self):
         """
         Spec 3장: Main monitoring loop
+        [수정] 슬립 모드 시 스레드를 종료(break)하지 않고 대기(continue)하도록 변경
         """
         logger.info("🚀 Smart Order Monitor started (04:00 ET Start)")
         
         while self.is_running:
             try:
                 # 1단계: 모드 전환 체크
-                if self.switch_mode_if_needed():
-                    if self.current_mode == 'closed':
-                        logger.info("😴 슬립 모드 진입 확인")
-                        time.sleep(300)
-                        logger.info("🛑 시스템 종료 시작")
-                        logger.info("smart_monitor_loop: 루프를 종료합니다 (closed)")
-                        break
+                # 모드 변경이 감지되면 내부적으로 current_mode를 업데이트하고 알림을 보냅니다.
+                self.switch_mode_if_needed()
                 
-                # 2단계: 백업 체크 (운영 시간 확인)
+                # 2단계: 슬립 모드(Closed) 상태 처리
+                if self.current_mode == 'closed':
+                    # 🛑 수정 핵심: break로 종료하지 않고 1분 대기 후 다시 체크
+                    # ET 05:00(한국 19:00)가 되면 switch_mode_if_needed()에서 자동으로
+                    # 'premarket'으로 모드가 변경되어 루프 아래로 진행됩니다.
+                    time.sleep(60)
+                    continue
+
+                # 3단계: 백업 체크 (운영 시간 확인)
                 if not self.should_system_run():
                     try:
                         trading_tz = self.config.get('order_settings', {}).get('timezone', 'US/Eastern')
@@ -1135,15 +1140,17 @@ class SmartOrderMonitor:
                     except Exception:
                         pass
                     
-                    # 그 외의 시간은 진짜 종료
-                    logger.warning("⚠️ 운영 시간 외 감지 (백업 체크)")
+                    # 그 외의 시간은 슬립 모드로 강제 전환 후 대기
                     if self.current_mode != 'closed':
+                        logger.warning("⚠️ 운영 시간 외 감지 (백업 체크) -> 슬립 모드 전환")
                         self.current_mode = 'closed'
                         self.handle_sleep_mode()
-                    logger.info("smart_monitor_loop: 루프를 종료합니다 (should_system_run)")
-                    break
+                    
+                    # 🛑 수정 핵심: 여기서도 break 대신 대기
+                    time.sleep(60)
+                    continue
                 
-                # ▼ Pre-market / Regular REST polling logic ▼
+                # ▼ Pre-market / Regular REST polling logic (정상 운영 로직) ▼
                 current_time = time.time()
                 if current_time - self.last_buy_scan > 10:
                     if self.trade_counter.can_trade():
