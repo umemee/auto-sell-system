@@ -3,6 +3,7 @@
 # [v2.7 수정] Premarket 모드에서도 매도 모니터링 확실하게 실행되도록 루프 구조 개선
 # [v2.8 수정] API 필수 파라미터(SORT_SQN 등) 추가 및 날짜 포맷 오타 수정
 # [v2.9 수정] 스마트 모니터 루프 종료(break) 제거 -> 대기(continue) 로직으로 변경 (자동 재시작 문제 해결)
+# [v3.0 수정] 주말(금요일 장마감 후 ~ 일요일) 슬립 모드 진입 시 시스템 완전 종료 (sys.exit)
 
 import requests
 import json
@@ -11,6 +12,7 @@ import time
 import threading
 import os
 import fcntl
+import sys  # [v3.0 추가] 종료를 위해 필요
 from datetime import datetime, timedelta, time as dtime
 from pytz import timezone
 
@@ -546,8 +548,62 @@ class SmartOrderMonitor:
 
     def handle_sleep_mode(self):
         """Spec 2.2: Handle sleep mode (한국시간 01:00)"""
-        logger.info("😴 슬립 모드 진입 - 한국시간 오전 01시")
+        
+        # 🆕 [v3.0] 주말(금요일 장마감 후 ~ 일요일) 체크 및 자동 종료
+        try:
+            # 타임존 및 요일 확인
+            trading_tz = self.config.get('order_settings', {}).get('timezone', 'US/Eastern')
+            tz = timezone(trading_tz)
+            now_dt = datetime.now(tz)
+            weekday = now_dt.weekday() # 0:Mon ... 4:Fri, 5:Sat, 6:Sun
+            weekday_names = ['월', '화', '수', '목', '금', '토', '일']
+            
+            # ✅ 조건: 금요일(4)이고 모드가 'closed'이거나, 토(5)/일(6)요일인 경우
+            # (switch_mode_if_needed에서 closed일 때만 여기로 오므로, 금요일이면 장마감 후임)
+            if weekday >= 4: 
+                logger.info(f"🌴 주말/휴일({weekday_names[weekday]}요일) 슬립 모드 - 시스템 완전 종료 절차 시작")
+                
+                # 1. 텔레그램 주문 취소
+                if hasattr(self, 'telegram_order_manager') and self.telegram_order_manager:
+                    try:
+                        cancelled_orders = self.telegram_order_manager.cancel_all_pending_orders()
+                        if cancelled_orders:
+                            logger.info(f"🌙 [TG] 종료 전 주문 취소: {len(cancelled_orders)}건")
+                    except Exception as e:
+                        logger.error(f"❌ 주문 취소 실패: {e}")
 
+                # 2. 당일 매매 내역(CSV) 전송
+                self.send_daily_trades_csv()
+
+                # 3. 텔레그램 '완전 종료' 알림
+                if self.telegram_bot:
+                    try:
+                        self.telegram_bot.send_message(
+                            f"🛑 <b>주간 거래 종료 (시스템 OFF)</b>\n\n"
+                            f"금일 장이 마감되어 시스템을 완전히 종료합니다.\n"
+                            f"({weekday_names[weekday]}요일 / {now_dt.strftime('%H:%M')} ET)\n\n"
+                            f"✅ 월요일 오후에 다시 실행해주세요!",
+                            parse_mode='HTML',
+                            force=True
+                        )
+                    except:
+                        pass
+                
+                # 4. 프로세스 강제 종료
+                logger.info("🛑 주말이므로 프로세스를 완전히 종료합니다. (sys.exit(0))")
+                self.is_running = False
+                sys.exit(0) # 여기서 프로그램이 완전히 꺼짐
+
+        except SystemExit:
+            raise # sys.exit()은 다시 던져야 함
+        except Exception as e:
+            logger.error(f"주말 체크 로직 오류: {e}")
+            # 오류 발생 시 평일 로직으로 진행
+
+        # --- 평일(월~목) 슬립 모드 로직 (기존 유지) ---
+        logger.info("😴 슬립 모드 진입 (평일 대기 - 내일 다시 가동)")
+
+        # 1. 텔레그램 주문 취소
         if hasattr(self, 'telegram_order_manager') and self.telegram_order_manager:
             try:
                 cancelled_orders = self.telegram_order_manager.cancel_all_pending_orders()
@@ -569,9 +625,11 @@ class SmartOrderMonitor:
         else:
             logger.warning("⚠️ 텔레그램 주문 관리자(telegram_order_manager)가 SmartOrderMonitor에 연결되지 않았습니다.")
         
+        # 2. 평일 슬립 알림
         if self.telegram_bot:
             self.telegram_bot.send_sleep_mode_notification(reason="normal")
         
+        # 3. 당일 매매 내역 전송
         self.send_daily_trades_csv()
 
     def send_daily_trades_csv(self):

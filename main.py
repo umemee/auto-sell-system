@@ -10,6 +10,7 @@
 # 6. 메인 루프에서 WebSocket 상태 로깅 제거
 # 7. [개선] config.yaml에서 로그 파일 경로를 읽어오도록 수정
 # 8. [보완] A->B 슬립 모드 연동 (주문 취소용)
+# 9. [v2.5 추가] 주말(토, 일) 실행 방지 로직 추가 (자동 종료)
 
 import logging
 import time
@@ -18,6 +19,8 @@ import sys
 import argparse
 import threading
 import os
+from datetime import datetime # [v2.5 추가]
+from pytz import timezone     # [v2.5 추가]
 from logging.handlers import RotatingFileHandler
 from dotenv import load_dotenv
 
@@ -254,6 +257,27 @@ def main():
     #
     # ↑↑↑ (수정 2) 순서 변경 완료 ↑↑↑
     #
+    
+    #
+    # 🆕 [v2.5] 주말(토, 일) 실행 방지 로직 (텔레그램 알림 없이 조용히 종료)
+    #
+    try:
+        # config에서 타임존 가져오기 (기본값 US/Eastern)
+        tz_name = config.get('order_settings', {}).get('timezone', 'US/Eastern')
+        tz = timezone(tz_name)
+        now = datetime.now(tz)
+        
+        # 0:월, 1:화, ..., 5:토, 6:일
+        if now.weekday() >= 5:
+            day_name = "토요일" if now.weekday() == 5 else "일요일"
+            logging.info(f"🌴 오늘은 {day_name}({now.date()})입니다. 주말이므로 시스템을 시작하지 않습니다.")
+            logging.info("🛑 주말 실행 방지 로직에 의해 종료합니다. (sys.exit(0))")
+            sys.exit(0) # 텔레그램 봇을 켜지 않고 여기서 즉시 종료
+            
+    except SystemExit:
+        sys.exit(0)
+    except Exception as e:
+        logging.warning(f"⚠️ 주말 체크 중 오류 발생 (무시하고 진행): {e}")
 
     # 3. 시그널 핸들러 등록
     signal.signal(signal.SIGINT, signal_handler)
