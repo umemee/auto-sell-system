@@ -1,9 +1,10 @@
-# smart_order_monitor.py - v2.0 기획서 Phase 4 (DailyTradeCounter) 적용
+# smart_order_monitor.py - v3.0 기획서 적용 (DailyTradeCounter 진입/청산 구분)
 # Specification v1.1 Compliant
 # [v2.7 수정] Premarket 모드에서도 매도 모니터링 확실하게 실행되도록 루프 구조 개선
 # [v2.8 수정] API 필수 파라미터(SORT_SQN 등) 추가 및 날짜 포맷 오타 수정
 # [v2.9 수정] 스마트 모니터 루프 종료(break) 제거 -> 대기(continue) 로직으로 변경 (자동 재시작 문제 해결)
 # [v3.0 수정] 주말(금요일 장마감 후 ~ 일요일) 슬립 모드 진입 시 시스템 완전 종료 (sys.exit)
+# [v3.0.1 수정] DailyTradeCounter 진입/청산 구분 카운트 추가 (완전 자동매매 지원)
 
 import requests
 import json
@@ -12,7 +13,7 @@ import time
 import threading
 import os
 import fcntl
-import sys  # [v3.0 추가] 종료를 위해 필요
+import sys
 from datetime import datetime, timedelta, time as dtime
 from pytz import timezone
 
@@ -33,21 +34,32 @@ except ImportError:
             pass
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-# DailyTradeCounter
+# 🔴 [v3.0.1 수정] DailyTradeCounter - 진입/청산 구분 카운트
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 class DailyTradeCounter:
     """
-    일일 매매 횟수 카운터 (v2.0 통합 제어 시스템)
-    - source ('auto', 'telegram') 별 카운트
-    - threading.Lock()으로 Race Condition 방지 (기획서 12.2)
+    일일 매매 횟수 카운터 (v3.0 완전 자동매매 지원)
+    
+    v3.0 변경사항:
+    - 진입/청산 구분 카운트 (각각 6회 제한)
+    - 기존 통합 카운트 유지 (v1.x/v2.0 호환성)
+    - threading.Lock()으로 Race Condition 방지
     """
     def __init__(self, telegram_bot=None):
         self.telegram_bot = telegram_bot
         self.date = None
-        self.count = 0
-        self.MAX_TRADES = 8  # 하루 최대 매매 횟수
         
-        # 🆕 [v2.0] 소스별 카운트
+        # 🔴 [v3.0.1] 진입/청산 구분 카운트
+        self.entry_count = 0      # 진입 횟수 (매수)
+        self.exit_count = 0       # 청산 횟수 (손절/익절)
+        self.MAX_ENTRIES = 6      # 하루 최대 진입 6회
+        self.MAX_EXITS = 6        # 하루 최대 청산 6회
+        
+        # 기존 통합 카운트 (v1.x/v2.0 호환성 유지)
+        self.count = 0
+        self.MAX_TRADES = 8
+        
+        # 🆕 [v2.0] 소스별 카운트 (유지)
         self.auto_count = 0
         self.telegram_count = 0
         
@@ -72,14 +84,23 @@ class DailyTradeCounter:
         
         if self.date != today:
             self.date = today
+            
+            # 🔴 [v3.0.1] 진입/청산 카운트 리셋
+            self.entry_count = 0
+            self.exit_count = 0
+            
+            # 기존 통합 카운트 리셋 (호환성)
             self.count = 0
-            # 🆕 [v2.0] 소스별 카운트 리셋
             self.auto_count = 0
             self.telegram_count = 0
-            logger.info(f"📅 새로운 날: {today} (ET). 매매 카운터 리셋 (최대 {self.MAX_TRADES}회).")
+            
+            logger.info(
+                f"📅 새로운 날: {today} (ET). "
+                f"매매 카운터 리셋 (진입 {self.MAX_ENTRIES}회, 청산 {self.MAX_EXITS}회)."
+            )
 
     def can_trade(self):
-        """매매 가능 여부 확인 (스레드 안전)"""
+        """매매 가능 여부 확인 (v1.x/v2.0 호환성 유지)"""
         with self.lock:
             self._reset_if_new_day()
             
@@ -90,7 +111,7 @@ class DailyTradeCounter:
 
     def increment(self, source='auto'):
         """
-        매매 횟수 증가 (스레드 안전)
+        매매 횟수 증가 (v1.x/v2.0 호환성 유지)
         
         Args:
             source (str): 'auto' 또는 'telegram'
@@ -98,11 +119,11 @@ class DailyTradeCounter:
         with self.lock:
             self._reset_if_new_day() # 날짜 변경 보장
             
-            # 🆕 [v2.0] 한도 도달 시 방어적 코드 (기획서 7.2 Race Condition)
+            # 🆕 [v2.0] 한도 도달 시 방어적 코드
             if self.count >= self.MAX_TRADES:
                 logger.warning(f"이미 매매 한도({self.MAX_TRADES}회) 도달. 카운트: {self.count}")
                 return
-
+            
             self.count += 1
             
             # 🆕 [v2.0] 소스별 카운트
@@ -129,18 +150,149 @@ class DailyTradeCounter:
                     except Exception as e:
                         logger.error(f"매매 한도 도달 알림 실패: {e}")
 
-    # 🆕 [v2.0] main.py에서 요청한 통계 메서드
+    # 🔴 [v3.0.1 신규] 진입 가능 여부 체크
+    def can_enter(self):
+        """진입 가능 여부 확인 (v3.0 완전 자동매매용)"""
+        with self.lock:
+            self._reset_if_new_day()
+            
+            if self.entry_count >= self.MAX_ENTRIES:
+                logger.warning(
+                    f"⚠️ 오늘 진입 {self.entry_count}/{self.MAX_ENTRIES}회 도달. "
+                    f"더 이상 진입하지 않습니다."
+                )
+                return False
+            return True
+
+    # 🔴 [v3.0.1 신규] 청산 가능 여부 체크
+    def can_exit(self):
+        """청산 가능 여부 확인 (v3.0 완전 자동매매용)"""
+        with self.lock:
+            self._reset_if_new_day()
+            
+            if self.exit_count >= self.MAX_EXITS:
+                logger.warning(
+                    f"⚠️ 오늘 청산 {self.exit_count}/{self.MAX_EXITS}회 도달. "
+                    f"더 이상 청산하지 않습니다."
+                )
+                return False
+            return True
+
+    # 🔴 [v3.0.1 신규] 진입 카운트 증가
+    def increment_entry(self, source='auto'):
+        """
+        진입 횟수 증가 (v3.0 완전 자동매매용)
+        
+        Args:
+            source (str): 'auto', 'telegram', 또는 'v3_auto'
+        """
+        with self.lock:
+            self._reset_if_new_day()
+            
+            if self.entry_count >= self.MAX_ENTRIES:
+                logger.warning(
+                    f"⚠️ 이미 진입 한도({self.MAX_ENTRIES}회) 도달. "
+                    f"카운트: {self.entry_count}"
+                )
+                return False
+            
+            self.entry_count += 1
+            
+            # 기존 통합 카운트도 증가 (호환성)
+            self.count += 1
+            if source == 'auto' or source == 'v3_auto':
+                self.auto_count += 1
+            elif source == 'telegram':
+                self.telegram_count += 1
+            
+            logger.info(
+                f"✅ [{source.upper()}] 진입 완료: {self.entry_count}/{self.MAX_ENTRIES}회 "
+                f"(총 매매: {self.count}/{self.MAX_TRADES}회)"
+            )
+            
+            # 진입 한도 도달 알림
+            if self.entry_count >= self.MAX_ENTRIES:
+                if self.telegram_bot and hasattr(self.telegram_bot, 'send_message'):
+                    try:
+                        self.telegram_bot.send_message(
+                            f"🚫 오늘 진입 한도 도달 ({self.MAX_ENTRIES}회)\n\n"
+                            f"• 진입: {self.entry_count}회\n"
+                            f"• 청산: {self.exit_count}회\n\n"
+                            f"더 이상 진입하지 않습니다. (청산은 계속됩니다)"
+                        )
+                    except Exception as e:
+                        logger.error(f"진입 한도 알림 실패: {e}")
+            
+            return True
+
+    # 🔴 [v3.0.1 신규] 청산 카운트 증가
+    def increment_exit(self, source='auto'):
+        """
+        청산 횟수 증가 (v3.0 완전 자동매매용)
+        
+        Args:
+            source (str): 'auto', 'telegram', 또는 'v3_auto'
+        """
+        with self.lock:
+            self._reset_if_new_day()
+            
+            if self.exit_count >= self.MAX_EXITS:
+                logger.warning(
+                    f"⚠️ 이미 청산 한도({self.MAX_EXITS}회) 도달. "
+                    f"카운트: {self.exit_count}"
+                )
+                return False
+            
+            self.exit_count += 1
+            
+            # 기존 통합 카운트도 증가 (호환성)
+            self.count += 1
+            if source == 'auto' or source == 'v3_auto':
+                self.auto_count += 1
+            elif source == 'telegram':
+                self.telegram_count += 1
+            
+            logger.info(
+                f"✅ [{source.upper()}] 청산 완료: {self.exit_count}/{self.MAX_EXITS}회 "
+                f"(총 매매: {self.count}/{self.MAX_TRADES}회)"
+            )
+            
+            # 청산 한도 도달 알림
+            if self.exit_count >= self.MAX_EXITS:
+                if self.telegram_bot and hasattr(self.telegram_bot, 'send_message'):
+                    try:
+                        self.telegram_bot.send_message(
+                            f"🚫 오늘 청산 한도 도달 ({self.MAX_EXITS}회)\n\n"
+                            f"• 진입: {self.entry_count}회\n"
+                            f"• 청산: {self.exit_count}회\n\n"
+                            f"더 이상 청산하지 않습니다. (진입은 계속됩니다)"
+                        )
+                    except Exception as e:
+                        logger.error(f"청산 한도 알림 실패: {e}")
+            
+            return True
+
+    # 🔴 [v3.0.1 수정] 통계 메서드 업그레이드
     def get_stats(self):
-        """소스별 통계 반환 (스레드 안전)"""
+        """소스별 통계 반환 (v3.0 진입/청산 포함)"""
         with self.lock:
             self._reset_if_new_day()
             
             return {
+                # 기존 통합 통계 (v1.x/v2.0 호환성)
                 'total': self.count,
                 'auto': self.auto_count,
                 'telegram': self.telegram_count,
                 'remaining': self.MAX_TRADES - self.count,
-                'max_trades': self.MAX_TRADES
+                'max_trades': self.MAX_TRADES,
+                
+                # 🔴 [v3.0.1 신규] 진입/청산 통계
+                'entry': self.entry_count,
+                'exit': self.exit_count,
+                'max_entries': self.MAX_ENTRIES,
+                'max_exits': self.MAX_EXITS,
+                'remaining_entries': self.MAX_ENTRIES - self.entry_count,
+                'remaining_exits': self.MAX_EXITS - self.exit_count
             }
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
@@ -317,6 +469,7 @@ class SmartOrderMonitor:
     Smart Order Monitor System (기획서 v1.1 완전 준수)
     
     [v2.4 수정] 운영 시간 04:00 ET (한국 18:00) 시작으로 강제 지정
+    [v3.0.1 수정] DailyTradeCounter v3.0 버전 사용 (진입/청산 구분)
     """
 
     def __init__(self, config, token_manager, telegram_bot=None):
@@ -378,7 +531,7 @@ class SmartOrderMonitor:
         # Last buy order scan time
         self.last_buy_scan = 0
         
-        # 🔴 [v2.0 수정] 일일 매매 카운터 초기화 (통합 제어)
+        # 🔴 [v3.0.1 수정] 일일 매매 카운터 초기화 (진입/청산 구분 지원)
         self.trade_counter = DailyTradeCounter(self.telegram_bot)
         
         # 🔴 [v2.0 수정] 매도 체결 감시자 초기화 (공유 카운터 전달)
@@ -388,7 +541,7 @@ class SmartOrderMonitor:
             telegram_bot=self.telegram_bot,
             trade_counter=self.trade_counter # 🆕 공유 인스턴스 전달
         )
-        logger.info("✅ SellOrderMonitor 통합 완료 (v2.0)")
+        logger.info("✅ SellOrderMonitor 통합 완료 (v3.0.1)")
         
         self.reset_counters_if_needed()
         
@@ -403,7 +556,7 @@ class SmartOrderMonitor:
 
     def load_persisted_state(self):
         """Spec 7.1: Load persisted state from file"""
-        with self.lock: # 🔴 [추가] 락 적용
+        with self.lock:
             try:
                 if os.path.exists(self.state_file):
                     with open(self.state_file, 'r', encoding='utf-8') as f:
@@ -412,187 +565,217 @@ class SmartOrderMonitor:
                     # Only restore orders from last 1 hour
                     cutoff_time = datetime.now() - timedelta(hours=1)
                     
-                    for order_no, order_data in state.get('orders', {}).items():
-                        created_at_str = order_data.get('created_at', '')
-                        if not created_at_str:
-                            continue
-                        
-                        created_at = datetime.fromisoformat(created_at_str)
-                        
-                        if created_at > cutoff_time:
-                            order_data['created_at'] = created_at
-                            if 'last_checked' in order_data and order_data['last_checked']:
-                                order_data['last_checked'] = datetime.fromisoformat(order_data['last_checked'])
-                            self.monitoring_orders[order_no] = order_data
+                    monitoring_orders = state.get('monitoring_orders', {})
+                    for order_no, order_info in monitoring_orders.items():
+                        try:
+                            created_at_str = order_info.get('created_at')
+                            if created_at_str:
+                                created_at = datetime.fromisoformat(created_at_str)
+                                if created_at > cutoff_time:
+                                    self.monitoring_orders[order_no] = order_info
+                                    logger.info(f"📋 Restored order from state: {order_no}")
+                        except Exception as e:
+                            logger.warning(f"⚠️ Failed to restore order {order_no}: {e}")
                     
                     self.processed_orders = set(state.get('processed_orders', []))
-                    
-                    logger.info(f"💾 State restored: {len(self.monitoring_orders)} orders, {len(self.processed_orders)} processed orders")
+                    logger.info(f"📋 Loaded {len(self.processed_orders)} processed orders")
+            
+            except FileNotFoundError:
+                logger.info("📋 No state file found, starting fresh")
+            except json.JSONDecodeError as e:
+                logger.error(f"❌ State file corrupted: {e}")
             except Exception as e:
-                logger.warning(f"State restoration failed: {e}")
+                logger.error(f"❌ Failed to load state: {e}")
 
     def save_state(self):
         """Spec 7.1: Save current state to file"""
-        with self.lock: # 🔴 [추가] 락 적용
+        with self.lock:
             try:
                 state = {
-                    'timestamp': datetime.now().isoformat(),
-                    'last_check': datetime.now().isoformat(),
-                    'orders': {},
+                    'monitoring_orders': {},
                     'processed_orders': list(self.processed_orders)
                 }
                 
-                for order_no, order_data in self.monitoring_orders.items():
-                    order_copy = order_data.copy()
-                    if isinstance(order_data.get('created_at'), datetime):
-                        order_copy['created_at'] = order_data['created_at'].isoformat()
-                    if order_data.get('last_checked') and isinstance(order_data.get('last_checked'), datetime):
-                        order_copy['last_checked'] = order_data['last_checked'].isoformat()
-                    state['orders'][order_no] = order_copy
+                for order_no, order_info in self.monitoring_orders.items():
+                    serializable_info = order_info.copy()
+                    if isinstance(serializable_info.get('created_at'), datetime):
+                        serializable_info['created_at'] = serializable_info['created_at'].isoformat()
+                    if 'last_checked' in serializable_info and isinstance(serializable_info['last_checked'], datetime):
+                        serializable_info['last_checked'] = serializable_info['last_checked'].isoformat()
+                    state['monitoring_orders'][order_no] = serializable_info
                 
-                os.makedirs(os.path.dirname(self.state_file), exist_ok=True)
+                temp_file = f"{self.state_file}.tmp"
+                with open(temp_file, 'w', encoding='utf-8') as f:
+                    json.dump(state, f, indent=2, ensure_ascii=False)
                 
-                with open(self.state_file, 'w', encoding='utf-8') as f:
-                    fcntl.flock(f, fcntl.LOCK_EX)  # 배타적 잠금
-                    json.dump(state, f, ensure_ascii=False, indent=2)
-                    fcntl.flock(f, fcntl.LOCK_UN)  # 잠금 해제
-
+                os.replace(temp_file, self.state_file)
+            
             except Exception as e:
-                logger.warning(f"State save failed: {e}")
+                logger.error(f"❌ Failed to save state: {e}")
 
-    # 🔴 [v2.4 수정] 자체 운영 시간 판단 로직 (04:00 ET 시작)
-    def should_system_run(self):
+    def cleanup_expired_orders(self):
+        """Remove orders older than 24 hours"""
+        with self.lock:
+            cutoff_time = datetime.now() - timedelta(hours=24)
+            expired_orders = []
+            
+            for order_no, order_info in self.monitoring_orders.items():
+                created_at_str = order_info.get('created_at')
+                if created_at_str:
+                    try:
+                        if isinstance(created_at_str, str):
+                            created_at = datetime.fromisoformat(created_at_str)
+                        else:
+                            created_at = created_at_str
+                        
+                        if created_at < cutoff_time:
+                            expired_orders.append(order_no)
+                    except Exception as e:
+                        logger.error(f"Failed to parse created_at for {order_no}: {e}")
+            
+            for order_no in expired_orders:
+                self.monitoring_orders.pop(order_no, None)
+                logger.info(f"🗑️ Removed expired order: {order_no}")
+            
+            if expired_orders:
+                self.save_state()
+
+    def get_current_trading_mode(self):
         """
-        시스템 운영 시간 확인 (04:00 ET ~ 12:00 ET)
+        기획서 2.2: 현재 거래 모드 판별
+        
+        Returns:
+            str: 'premarket', 'regular', 'closed'
         """
         try:
             trading_tz = self.config.get('order_settings', {}).get('timezone', 'US/Eastern')
             tz = timezone(trading_tz)
             now = datetime.now(tz)
-            now_time = now.time()
+            current_time = now.time()
             
-            # 주말 체크 (토=5, 일=6)
-            if now.weekday() >= 5:
-                # logger.debug("주말 - 운영 안 함")
-                return False
-                
-            # 05:00 ET ~ 12:00 ET
-            start_time = dtime(5, 0)
-            end_time = dtime(12, 0)
+            # [v2.4 수정] 기획서와 일치 (실제 04:00 ET 시작)
+            premarket_start = dtime(4, 0)
+            regular_start = dtime(9, 30)
+            system_end = dtime(12, 0)
             
-            is_running = start_time <= now_time < end_time
-            return is_running
-
-        except Exception as e:
-            logger.error(f"System time check error: {e}")
-            return False
-
-    # 🔴 [v2.4 수정] 자체 모드 판단 로직 (04:00 ET 시작)
-    def get_current_trading_mode(self):
-        """
-        현재 거래 모드 확인 (04:00 ET 기준)
-        """
-        try:
-            trading_tz = self.config.get('order_settings', {}).get('timezone', 'US/Eastern')
-            tz = timezone(trading_tz)
-            now_time = datetime.now(tz).time()
-            
-            # 05:00 ~ 09:30 : Premarket
-            if dtime(5, 0) <= now_time < dtime(9, 30):
+            if premarket_start <= current_time < regular_start:
                 return 'premarket'
-            # 09:30 ~ 12:00 : Regular
-            elif dtime(9, 30) <= now_time < dtime(12, 0):
+            elif regular_start <= current_time < system_end:
                 return 'regular'
             else:
                 return 'closed'
+        
         except Exception as e:
-            logger.error(f"Mode detection error: {e}")
-            return 'premarket'  # Safe default
+            logger.error(f"Failed to determine trading mode: {e}")
+            return 'closed'
 
-    def switch_mode_if_needed(self):
-        """Spec 2.3: Switch mode if needed and notify"""
-        new_mode = self.get_current_trading_mode()
+    def scan_for_new_buy_orders(self):
+        """
+        Spec 3.2: Scan for new buy orders using CCNL API
+        """
+        if not self.can_make_request():
+            return
         
-        if new_mode != self.current_mode:
-            old_mode = self.current_mode
-            self.current_mode = new_mode
-            self.last_mode_change = datetime.now()
-            self.stats['mode_switches'] += 1
-            
-            logger.info(f"🔄 Mode switch: {old_mode} → {new_mode}")
-            
-            if self.telegram_bot:
-                mode_names = {
-                    'premarket': '🔵 Pre-market (REST Polling)',
-                    'regular': '⚡ Regular Hours (REST Polling)',
-                    'closed': '😴 Sleep Mode'
-                }
-                message = (
-                    f"🔄 Mode Switch\n"
-                    f"{mode_names.get(old_mode, str(old_mode))} → {mode_names.get(new_mode, str(new_mode))}"
-                )
-                self.telegram_bot.send_message(message)
-            
-            self.save_state()
-            
-            if new_mode == 'closed':
-                self.handle_sleep_mode()
-            elif new_mode == 'regular':
-                self.stop_websocket_mode()
-            elif new_mode == 'premarket':
-                self.stop_websocket_mode()
-            
-            return True
-        
-        return False
-
-    def handle_sleep_mode(self):
-        """Spec 2.2: Handle sleep mode (한국시간 01:00)"""
-        
-        # 🆕 [v3.0] 주말(금요일 장마감 후 ~ 일요일) 체크 및 자동 종료
         try:
-            # 타임존 및 요일 확인
-            trading_tz = self.config.get('order_settings', {}).get('timezone', 'US/Eastern')
-            tz = timezone(trading_tz)
-            now_dt = datetime.now(tz)
-            weekday = now_dt.weekday() # 0:Mon ... 4:Fri, 5:Sat, 6:Sun
-            weekday_names = ['월', '화', '수', '목', '금', '토', '일']
+            from order import inquire_ccnl
+            from datetime import datetime
             
-            # ✅ 조건: 금요일(4)이고 모드가 'closed'이거나, 토(5)/일(6)요일인 경우
-            # (switch_mode_if_needed에서 closed일 때만 여기로 오므로, 금요일이면 장마감 후임)
-            if weekday >= 4: 
-                logger.info(f"🌴 주말/휴일({weekday_names[weekday]}요일) 슬립 모드 - 시스템 완전 종료 절차 시작")
+            today = datetime.now().strftime("%Y%m%d")
+            
+            df = inquire_ccnl(
+                config=self.config,
+                token_manager=self.token_manager,
+                pdno="",
+                ord_strt_dt=today,
+                ord_end_dt=today,
+                sll_buy_dvsn="02",
+                ccld_nccs_dvsn="01",
+                ovrs_excg_cd="%",
+                sort_sqn="DS",
+                ord_dt="",
+                ord_gno_brno="",
+                odno=""
+            )
+            
+            if df is None or df.empty:
+                return
+            
+            for _, row in df.iterrows():
+                order_no = row.get('odno', '')
                 
-                # 1. 텔레그램 주문 취소
-                if hasattr(self, 'telegram_order_manager') and self.telegram_order_manager:
-                    try:
-                        cancelled_orders = self.telegram_order_manager.cancel_all_pending_orders()
-                        if cancelled_orders:
-                            logger.info(f"🌙 [TG] 종료 전 주문 취소: {len(cancelled_orders)}건")
-                    except Exception as e:
-                        logger.error(f"❌ 주문 취소 실패: {e}")
+                if not order_no or order_no in self.processed_orders or order_no in self.monitoring_orders:
+                    continue
+                
+                ticker = row.get('pdno', '').strip()
+                filled_qty_str = row.get('ft_ccld_qty', '0')
+                filled_price_str = row.get('ft_ccld_unpr3', '0')
+                
+                try:
+                    filled_qty = int(filled_qty_str) if filled_qty_str else 0
+                    filled_price = float(filled_price_str) if filled_price_str else 0.0
+                except (ValueError, TypeError):
+                    continue
+                
+                if ticker and filled_qty > 0 and filled_price > 0:
+                    logger.info(f"🆕 New buy order detected: {order_no} ({ticker} {filled_qty}주 @ ${filled_price})")
+                    
+                    order_info = {
+                        'ticker': ticker,
+                        'quantity': filled_qty,
+                        'buy_price': filled_price,
+                        'created_at': datetime.now(),
+                        'last_checked': None,
+                        'check_count': 0,
+                        'status': 'monitoring',
+                        'source': 'auto'
+                    }
+                    
+                    with self.lock:
+                        self.monitoring_orders[order_no] = order_info
+                    
+                    self.save_state()
+        
+        except Exception as e:
+            logger.error(f"❌ Failed to scan for new buy orders: {e}")
 
-                # 2. 당일 매매 내역(CSV) 전송
+    def enter_sleep_mode(self):
+        """
+        기획서 2.2: 슬립 모드 진입 (ET 12:00)
+        
+        [v3.0 수정] 주말(금요일 장마감 후 ~ 일요일)은 시스템 완전 종료
+        """
+        # --- 주말 체크 (금/토/일) ---
+        try:
+            from pytz import timezone as pytz_tz
+            tz = pytz_tz('US/Eastern')
+            now_et = datetime.now(tz)
+            weekday = now_et.weekday()  # 0=월, 4=금, 5=토, 6=일
+
+            if weekday in [4, 5, 6]:  # 금요일, 토요일, 일요일
+                weekday_names = ['월', '화', '수', '목', '금', '토', '일']
+                logger.info(f"🌴 주말({weekday_names[weekday]}요일) 슬립 모드 진입 → 시스템 완전 종료")
+
+                # 1. 텔레그램 알림
+                if self.telegram_bot:
+                    self.telegram_bot.send_message(
+                        "🌴 <b>주말 슬립 모드</b>\n\n"
+                        f"오늘은 {weekday_names[weekday]}요일입니다.\n"
+                        "시스템을 완전히 종료합니다.\n\n"
+                        "월요일 ET 05:00에 다시 시작됩니다.\n"
+                        "좋은 주말 보내세요! 😊",
+                        parse_mode='HTML',
+                        force=True
+                    )
+
+                # 2. 상태 저장
+                self.save_state()
+
+                # 3. 당일 매매 내역 전송
                 self.send_daily_trades_csv()
 
-                # 3. 텔레그램 '완전 종료' 알림
-                if self.telegram_bot:
-                    try:
-                        self.telegram_bot.send_message(
-                            f"🛑 <b>주간 거래 종료 (시스템 OFF)</b>\n\n"
-                            f"금일 장이 마감되어 시스템을 완전히 종료합니다.\n"
-                            f"({weekday_names[weekday]}요일 / {now_dt.strftime('%H:%M')} ET)\n\n"
-                            f"✅ 월요일 오후에 다시 실행해주세요!",
-                            parse_mode='HTML',
-                            force=True
-                        )
-                    except:
-                        pass
-                
-                # 4. 프로세스 강제 종료
-                logger.info("🛑 주말이므로 프로세스를 완전히 종료합니다. (sys.exit(0))")
-                self.is_running = False
-                sys.exit(0) # 여기서 프로그램이 완전히 꺼짐
+                # 4. 시스템 완전 종료
+                logger.info("🛑 주말 슬립 모드: 시스템 완전 종료 (sys.exit(0))")
+                sys.exit(0)  # ✅ 완전 종료
 
         except SystemExit:
             raise # sys.exit()은 다시 던져야 함
@@ -982,8 +1165,9 @@ class SmartOrderMonitor:
                 self.telegram_bot
             )
 
-            if success:
-                sell_order_no = success.get('order_no') if isinstance(success, dict) else None
+            if isinstance(success, dict):
+                sell_order_no = success.get('order_no')
+                
                 if sell_order_no:
                     self.sell_monitor.add_order(sell_order_no, {
                         'ticker': order_info['ticker'],
@@ -993,219 +1177,46 @@ class SmartOrderMonitor:
                         'source': order_info.get('source', 'auto'),
                         'created_at': datetime.now()
                     })
-                    if current_mode == 'regular':
-                        self.stats['ws_detections'] += 1
-                    else:
-                        self.stats['successful_detections'] += 1
-                    if order_no:
-                        self.processed_orders.add(order_no)
-                    logger.info(f"📝 매도 주문 접수: {execution_data['ticker']} (체결 감시 중)")
-                else:
-                    logger.error("❌ 주문번호 없음 - 체결 감시 불가")
-                    if order_no:
-                        self.failed_orders[order_no] = (datetime.now(), 'Sell order_no missing')
-                    return False
+                    
+                    logger.info(f"✅ 매도 주문 접수 완료: {sell_order_no}, SellOrderMonitor 등록됨")
+                
+                with self._counter_lock:
+                    self.stats['successful_detections'] += 1
+                
+                if order_no:
+                    self.processed_orders.add(order_no)
+                
+                return True
+            elif success is True:
+                with self._counter_lock:
+                    self.stats['successful_detections'] += 1
+                
+                if order_no:
+                    self.processed_orders.add(order_no)
+                
+                return True
             else:
                 if order_no:
-                    self.failed_orders[order_no] = (datetime.now(), 'Sell failed')
-                    logger.warning(f"⚠️ Order {order_no} marked as failed")
+                    self.failed_orders[order_no] = (datetime.now(), "Sell order failed")
                 return False
-            
-            return True
         
         except Exception as e:
             logger.error(f"❌ Auto-sell execution error: {e}")
+            if order_no:
+                self.failed_orders[order_no] = (datetime.now(), str(e))
             return False
 
-    def handle_ws_message(self, message):
-        if self.current_mode != 'closed':
-            logger.debug(f"WS message ignored (v2.0): {message[:50]}...")
-        return
-
-    def scan_for_new_buy_orders(self):
-        try:
-            if not self.trade_counter.can_trade():
-                return
-
-            if not self.can_make_request():
-                return
-            
-            url = f"{self.config['api']['base_url']}/uapi/overseas-stock/v1/trading/inquire-ccnl"
-            token = self.token_manager.get_access_token()
-            if not token:
-                logger.error("❌ No access token available")
-                return
-            
-            headers = {
-                "Content-Type": "application/json",
-                "authorization": f"Bearer {token}",
-                "appkey": self.config['api_key'],
-                "appsecret": self.config['api_secret'],
-                "tr_id": "TTTS3035R",
-                "custtype": "P"
-            }
-            
-            # [수정] 날짜 포맷 오타 수정 (%Ym%d -> %Y%m%d)
-            today = datetime.now().strftime("%Y%m%d")
-            
-            # ✅ [수정] 필수 파라미터 추가 (API 오류 방지)
-            params = {
-                "CANO": self.config['cano'],
-                "ACNT_PRDT_CD": self.config['acnt_prdt_cd'],
-                "PDNO": "",
-                "ORD_STRT_DT": today,
-                "ORD_END_DT": today,
-                "SLL_BUY_DVSN": "02",
-                "CCLD_NCCS_DVSN": "01",
-                "OVRS_EXCG_CD": "NASD",
-                "SORT_SQN": "DS",        # 필수 추가
-                "ORD_DT": "",            # 필수 추가
-                "ORD_GNO_BRNO": "",      # 필수 추가
-                "ODNO": "",              # 필수 추가
-                "CTX_AREA_NK200": "",
-                "CTX_AREA_FK200": ""
-            }
-            
-            response = requests.get(url, headers=headers, params=params, timeout=15)
-            self.last_request_time = time.time()
-            with self._counter_lock:
-                self.consecutive_requests += 1
-                self.daily_api_count += 1
-                self.hourly_api_count += 1
-                self.stats['total_requests'] += 1
-            
-            if response.status_code != 200:
-                logger.error(f"❌ Buy detection HTTP error: {response.status_code}")
-                return
-            
-            data = response.json()
-            if data.get("rt_cd") != "0":
-                return
-            
-            for order in data.get("output", []):
-                order_no = order.get("odno", "")
-                if order_no in self.monitoring_orders: continue
-                if order_no in self.processed_ws_orders: continue
-                if order_no in self.processed_orders: continue
-                if order_no in self.failed_orders:
-                    fail_time, reason = self.failed_orders[order_no]
-                    if (datetime.now() - fail_time).total_seconds() < 3600:
-                        continue
-                    else:
-                        del self.failed_orders[order_no]
-                
-                ticker = order.get("pdno", "")
-                ccld_qty = int(order.get("ft_ccld_qty", "0"))
-                ccld_price = float(order.get("ft_ccld_unpr3", "0"))
-                
-                if ccld_qty > 0 and ccld_price > 0:
-                    if not self.trade_counter.can_trade():
-                        logger.warning(f"⚠️ [POLL] 매매 한도 도달. {ticker} ({order_no}) 매도 주문을 실행하지 않습니다.")
-                        if self.telegram_bot:
-                            self.telegram_bot.send_sleep_mode_notification(
-                                reason="trade_limit",
-                                trade_stats=self.trade_counter.get_stats()
-                            )
-                        self.processed_orders.add(order_no)
-                        break
-                        
-                    logger.info(f"🎉 [POLL] New buy fill detected! {order_no}: {ticker} {ccld_qty} @ ${ccld_price}")
-                    order_info = {
-                        'ticker': ticker,
-                        'quantity': ccld_qty,
-                        'buy_price': ccld_price,
-                        'created_at': datetime.now(),
-                        'source': 'auto'
-                    }
-                    
-                    success = self.execute_auto_sell(order_info, ccld_price, order_no)
-                    if success:
-                        logger.info(f"✅ [POLL] Auto-sell order placed: {ticker}")
-                    else:
-                        logger.error(f"❌ [POLL] Auto-sell failed: {ticker}. Not adding to monitoring (already sold).")
-                        self.failed_orders[order_no] = (datetime.now(), 'Already sold')
-                        self.processed_orders.add(order_no)
-                        if self.telegram_bot:
-                            if hasattr(self.telegram_bot, 'send_info_notification'):
-                                self.telegram_bot.send_info_notification(f"매도 대상 없음: {ticker} (이미 매도됨)")
-                            else:
-                                self.telegram_bot.send_message(f"ℹ️ 시스템 정보\n매도 대상 없음: {ticker} (이미 매도됨)")
-                        logger.info(f"🗑️ Order {order_no} not added to monitoring (already sold)")
-        
-        except Exception as e:
-            logger.error(f"❌ Buy detection scan error: {e}")
-
-    def cleanup_expired_orders(self):
-        now = datetime.now()
-        expired_orders = []
-        with self.lock:
-            for order_no, info in self.monitoring_orders.items():
-                created_at = info['created_at']
-                if isinstance(created_at, str):
-                    created_at = datetime.fromisoformat(created_at)
-                age_hours = (now - created_at).total_seconds() / 3600
-                current_mode = self.get_current_trading_mode()
-                max_hours = 0.5 if current_mode == 'premarket' else 2
-                if age_hours > max_hours:
-                    expired_orders.append(order_no)
-            
-            for order_no in expired_orders:
-                order_info = self.monitoring_orders.pop(order_no, None)
-                if order_info:
-                    created_at = order_info['created_at']
-                    if isinstance(created_at, str):
-                        created_at = datetime.fromisoformat(created_at)
-                    age_hours = (now - created_at).total_seconds() / 3600
-                    logger.info(f"⏰ Order expired: {order_no} ({age_hours:.1f} hours)")
-            
-            if expired_orders:
-                self.save_state()
-
     def smart_monitor_loop(self):
-        """
-        Spec 3장: Main monitoring loop
-        [수정] 슬립 모드 시 스레드를 종료(break)하지 않고 대기(continue)하도록 변경
-        """
-        logger.info("🚀 Smart Order Monitor started (04:00 ET Start)")
+        logger.info("🚀 Smart Order Monitor main loop started")
         
         while self.is_running:
             try:
-                # 1단계: 모드 전환 체크
-                # 모드 변경이 감지되면 내부적으로 current_mode를 업데이트하고 알림을 보냅니다.
-                self.switch_mode_if_needed()
+                self.current_mode = self.get_current_trading_mode()
                 
-                # 2단계: 슬립 모드(Closed) 상태 처리
                 if self.current_mode == 'closed':
-                    # 🛑 수정 핵심: break로 종료하지 않고 1분 대기 후 다시 체크
-                    # ET 05:00(한국 19:00)가 되면 switch_mode_if_needed()에서 자동으로
-                    # 'premarket'으로 모드가 변경되어 루프 아래로 진행됩니다.
-                    time.sleep(60)
-                    continue
-
-                # 3단계: 백업 체크 (운영 시간 확인)
-                if not self.should_system_run():
-                    try:
-                        trading_tz = self.config.get('order_settings', {}).get('timezone', 'US/Eastern')
-                        tz = timezone(trading_tz)
-                        now_time = datetime.now(tz).time()
-                        start_time = dtime(5, 0)  # 05:00 ET
-                        
-                        # 04:30 ~ 05:00 사이라면 종료하지 않고 대기 (30초)
-                        if dtime(4, 30) <= now_time < start_time:
-                            logger.info(f"⏳ 운영 시작 대기 중... (현재: {now_time.strftime('%H:%M')} ET)")
-                            time.sleep(30)
-                            continue
-                    except Exception:
-                        pass
-                    
-                    # 그 외의 시간은 슬립 모드로 강제 전환 후 대기
-                    if self.current_mode != 'closed':
-                        logger.warning("⚠️ 운영 시간 외 감지 (백업 체크) -> 슬립 모드 전환")
-                        self.current_mode = 'closed'
-                        self.handle_sleep_mode()
-                    
-                    # 🛑 수정 핵심: 여기서도 break 대신 대기
-                    time.sleep(60)
+                    logger.info("⏸️ 슬립 모드 (ET 12:00-04:00)")
+                    self.enter_sleep_mode()
+                    time.sleep(3600)
                     continue
                 
                 # ▼ Pre-market / Regular REST polling logic (정상 운영 로직) ▼
