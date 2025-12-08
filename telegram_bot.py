@@ -63,6 +63,15 @@ class TelegramBot:
             'start_time': datetime.now()
         }
 
+    def _get_kst_time(self):
+        """
+        ✅ [수정] KST 시간 반환 헬퍼 메서드
+        
+        모든 알림 메시지에서 정확한 한국 시간을 표시하기 위해 사용
+        """
+        from pytz import timezone
+        return datetime.now(timezone('Asia/Seoul'))
+
     def _should_send_alert(self, alert_type):
         """
         ✅ 추가: 알림 중복 방지 체크 (기획서 6.1절)
@@ -124,12 +133,14 @@ class TelegramBot:
             return False
 
     def send_startup_notification(self):
-        """✅ 시스템 시작 알림 (기획서 6.1절)"""
+        """✅ [수정 1/15] 시스템 시작 알림 (기획서 6.1절)"""
+        now_kst = self._get_kst_time()
+        
         message = f"""
 🚀 <b>자동 매도 시스템 시작</b> (v2.0)
 
 • 상태: ✅ 실행중
-• 시작 시간: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
+• 시작 시간: {now_kst.strftime('%Y-%m-%d %H:%M:%S')}
 • 운영 시간: ET 05:00 - 12:00
 • 수익률 목표: +6.0% (v2.0)
 • 폴링 간격: 4초 (프리마켓)
@@ -146,12 +157,13 @@ class TelegramBot:
 
     def send_buy_detection_notification(self, ticker, quantity, price, source='auto'):
         """
-        ✅ 수정: 매수 감지 알림 (v2.0 - source 구분)
+        ✅ [수정 2/15] 매수 감지 알림 (v2.0 - source 구분)
         
         Parameters:
             source: 'auto' (자동감지) / 'telegram' (텔레그램 주문)
         """
         self.stats['total_buys'] += 1
+        now_kst = self._get_kst_time()
         
         if source == 'telegram':
             source_emoji = "🤖"
@@ -166,7 +178,7 @@ class TelegramBot:
 • 종목: <b>{ticker}</b>
 • 수량: {quantity:,}주
 • 매수가: ${price:.2f}
-• 시각: {datetime.now().strftime('%H:%M:%S')}
+• 시각: {now_kst.strftime('%H:%M:%S')}
 
 🎯 목표 수익률 +6.0% 도달 시 자동 매도 예정
 💰 목표가: ${price * 1.06:.2f}
@@ -178,11 +190,12 @@ class TelegramBot:
         return self.send_message(message.strip(), alert_type=alert_type, force=force_send)
 
     def send_sell_order_notification(self, ticker, quantity, buy_price, sell_price, profit_rate, source='auto'):
-        """✅ 매도 주문 알림 (v2.0 - source 구분)"""
+        """✅ [수정 3/15] 매도 주문 알림 (v2.0 - source 구분)"""
         self.stats['total_sells'] += 1
         self.stats['successful_sells'] += 1
         profit_amount = (sell_price - buy_price) * quantity
         self.stats['total_profit'] += profit_amount
+        now_kst = self._get_kst_time()
         
         source_text = " (TG 주문)" if source == 'telegram' else ""
         
@@ -195,15 +208,16 @@ class TelegramBot:
 • 매도가: ${sell_price:.2f}
 • 수익률: <b>+{profit_rate:.1f}%</b>
 • 수익금: <b>${profit_amount:.2f}</b>
-• 시각: {datetime.now().strftime('%H:%M:%S')}
+• 시각: {now_kst.strftime('%H:%M:%S')}
 
 ✅ 매도 주문이 성공적으로 실행되었습니다.
 """
         return self.send_message(message.strip(), force=True)
 
     def send_sell_failure_notification(self, ticker, quantity, reason):
-        """✅ 추가: 매도 실패 알림 (기획서 6.1절)"""
+        """✅ [수정 4/15] 매도 실패 알림 (기획서 6.1절)"""
         self.stats['failed_sells'] += 1
+        now_kst = self._get_kst_time()
         
         message = f"""
 ⚠️ <b>매도 주문 실패</b>
@@ -211,7 +225,7 @@ class TelegramBot:
 • 종목: <b>{ticker}</b>
 • 수량: {quantity:,}주
 • 실패 사유: {reason}
-• 시각: {datetime.now().strftime('%H:%M:%S')}
+• 시각: {now_kst.strftime('%H:%M:%S')}
 
 ⚠️ 수동 확인이 필요합니다.
 """
@@ -219,12 +233,14 @@ class TelegramBot:
 
     def send_rate_limit_warning(self, current_usage, limit, utilization_pct):
         """
-        ✅ 추가: Rate Limit 경고 알림 (기획서 5.2절, 6.1절)
+        ✅ [수정 5/15] Rate Limit 경고 알림 (기획서 5.2절, 6.1절)
         
         90% 도달 시 경고
         """
         if utilization_pct < 90:
             return False
+        
+        now_kst = self._get_kst_time()
         
         message = f"""
 ⚠️ <b>Rate Limit 경고</b>
@@ -232,7 +248,7 @@ class TelegramBot:
 • 현재 사용량: {current_usage:,}회
 • 일일 한도: {limit:,}회
 • 사용률: <b>{utilization_pct:.1f}%</b>
-• 시각: {datetime.now().strftime('%H:%M:%S')}
+• 시각: {now_kst.strftime('%H:%M:%S')}
 
 <b>기획서 5.2절: Rate Limit 90% 도달</b>
 
@@ -243,7 +259,7 @@ class TelegramBot:
 
     def send_consecutive_errors_alert(self, error_count, error_type):
         """
-        ✅ 추가: 연속 오류 알림 (기획서 5.2절, 6.1절)
+        ✅ [수정 6/15] 연속 오류 알림 (기획서 5.2절, 6.1절)
         
         연속 10회 API 오류 시 알림
         """
@@ -251,13 +267,14 @@ class TelegramBot:
             return False
         
         self.stats['errors'] += 1
+        now_kst = self._get_kst_time()
         
         message = f"""
 🚨 <b>연속 API 오류 감지</b>
 
 • 오류 타입: {error_type}
 • 연속 횟수: {error_count}회
-• 시각: {datetime.now().strftime('%H:%M:%S')}
+• 시각: {now_kst.strftime('%H:%M:%S')}
 
 <b>기획서 5.2절: 연속 10회 API 오류</b>
 
@@ -267,18 +284,20 @@ class TelegramBot:
 
     def send_websocket_failure_alert(self, attempt, max_attempts, is_regular_market):
         """
-        ✅ 추가: WebSocket 실패 알림 (기획서 5.2절, 6.1절)
+        ✅ [수정 7-8/15] WebSocket 실패 알림 (기획서 5.2절, 6.1절)
         
         정규장에서 3회 실패 시 시스템 종지 경고
         (v2.0에서는 거의 사용되지 않음)
         """
+        now_kst = self._get_kst_time()
+        
         if is_regular_market and attempt >= max_attempts:
             message = f"""
 🚨 <b>긴급: WebSocket 연결 실패</b>
 
 • 시도 횟수: {attempt}/{max_attempts}
 • 시장 상태: 정규장 (ET 09:30-12:00)
-• 시각: {datetime.now().strftime('%H:%M:%S')}
+• 시각: {now_kst.strftime('%H:%M:%S')}
 
 <b>기획서 5.2절: WebSocket 3회 실패</b>
 
@@ -292,7 +311,7 @@ class TelegramBot:
 ⚠️ <b>WebSocket 재연결 시도</b>
 
 • 시도: {attempt}/{max_attempts}
-• 시각: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
+• 시각: {now_kst.strftime('%Y-%m-%d %H:%M:%S')}
 
 연결을 복구하려고 시도하고 있습니다.
 """
@@ -301,12 +320,14 @@ class TelegramBot:
     # --- 신규 함수 추가 ---
     def send_websocket_subscription_limit_alert(self, subscribed_count, pending_count, total_count):
         """
-        ✅ [v1.1 신규] WebSocket 구독 제한 알림 (기획서 v1.1, 5.1절)
+        ✅ [수정 9/15] WebSocket 구독 제한 알림 (기획서 v1.1, 5.1절)
         (v2.0에서는 거의 사용되지 않음)
         """
         # 대기 중인 종목이 없으면 알림하지 않음
         if pending_count == 0:
             return False
+        
+        now_kst = self._get_kst_time()
         
         message = f"""
 ⚠️ <b>WebSocket 구독 제한</b>
@@ -324,18 +345,20 @@ class TelegramBot:
 • 나머지 {pending_count}개는 REST 폴링 (선택적)
 
 ℹ️ 시스템은 정상 작동하고 있습니다.
-시간: {datetime.now().strftime('%H:%M:%S')}
+시간: {now_kst.strftime('%H:%M:%S')}
 """
         return self.send_message(message.strip(), alert_type="ws_subscription_limit")
     # --- 신규 함수 추가 완료 ---
 
     def send_account_query_failure_alert(self, error_message):
-        """✅ 추가: 계좌 정보 조회 실패 알림 (기획서 5.2절, 6.1절)"""
+        """✅ [수정 10/15] 계좌 정보 조회 실패 알림 (기획서 5.2절, 6.1절)"""
+        now_kst = self._get_kst_time()
+        
         message = f"""
 ⚠️ <b>계좌 정보 조회 실패</b>
 
 • 오류 내용: {error_message}
-• 시각: {datetime.now().strftime('%H:%M:%S')}
+• 시각: {now_kst.strftime('%H:%M:%S')}
 
 <b>기획서 5.2절: 계좌 정보 조회 실패</b>
 
@@ -346,7 +369,7 @@ class TelegramBot:
 
     def send_error_notification(self, error_message, level="warning"):
         """
-        ✅ 개선: 오류 알림 (레벨 추가)
+        ✅ [수정 11/15] 오류 알림 (레벨 추가)
         
         Parameters:
             error_message: 오류 메시지
@@ -359,12 +382,13 @@ class TelegramBot:
         }
         
         emoji = emoji_map.get(level, '⚠️')
+        now_kst = self._get_kst_time()
         
         message = f"""
 {emoji} <b>시스템 {level.upper()}</b>
 
 오류 내용: {error_message}
-발생 시각: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
+발생 시각: {now_kst.strftime('%Y-%m-%d %H:%M:%S')}
 
 시스템 상태를 확인해 주세요.
 """
@@ -434,12 +458,14 @@ class TelegramBot:
 
     def send_sleep_mode_notification(self, reason="normal", trade_stats=None):
         """
-        ✅ 수정: 슬립모드 진입 알림 (v2.0)
+        ✅ [수정 12/15] 슬립모드 진입 알림 (v2.0)
         
         Parameters:
             reason: "normal", "trade_limit", "weekend"
             trade_stats: DailyTradeCounter 통계
         """
+        from pytz import timezone
+
         if reason == "trade_limit":
             emoji = "🚫"
             title = "매매 한도 도달 - 슬립 모드"
@@ -451,14 +477,16 @@ class TelegramBot:
         else: # normal
             emoji = "😴"
             title = "슬립 모드 진입"
-            reason_text = f"정규장 종료 시각 (ET {datetime.now().strftime('%H:%M')})에 도달했습니다."
+            now_et = datetime.now(timezone('US/Eastern'))
+            reason_text = f"정규장 종료 시각 (ET {now_et.strftime('%H:%M')})에 도달했습니다."
         
         next_start = "월요일 ET 05:00" if reason == "weekend" else "오늘 17:00 (ET 05:00)"
         
+        now_kst = self._get_kst_time()
         message = f"""
 {emoji} <b>{title}</b>
 
-• 종료 시각: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
+• 종료 시각: {now_kst.strftime('%Y-%m-%d %H:%M:%S')}
 • 사유: {reason_text}
 • 다음 시작: {next_start}
 
@@ -467,16 +495,18 @@ class TelegramBot:
         return self.send_message(message.strip(), force=True)
 
     def send_shutdown_notification(self, trade_stats=None):
-        """✅ 시스템 종료 알림 (v2.0 - 통계 연동)"""
+        """✅ [수정 13/15] 시스템 종료 알림 (v2.0 - 통계 연동)"""
         # 종료 전 일일 통계 전송
         self.send_daily_summary(trade_stats)
         
         time.sleep(1)  # 통계 메시지 전송 후 1초 대기
         
+        now_kst = self._get_kst_time()
+        
         message = f"""
 🛑 <b>자동 매도 시스템 종료</b>
 
-• 종료 시각: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
+• 종료 시각: {now_kst.strftime('%Y-%m-%d %H:%M:%S')}
 • 상태: 정상 종료
 
 시스템이 안전하게 종료되었습니다.
@@ -485,15 +515,17 @@ class TelegramBot:
 
     def send_emergency_stop_notification(self, reason):
         """
-        ✅ 추가: 긴급 종지 알림 (기획서 5.2절, 6.1절)
+        ✅ [수정 14/15] 긴급 종지 알림 (기획서 5.2절, 6.1절)
         
         비상 정지 시 전송
         """
+        now_kst = self._get_kst_time()
+        
         message = f"""
 🚨 <b>긴급 시스템 종지</b>
 
 • 종지 사유: <b>{reason}</b>
-• 시각: {datetime.now().strftime('%H:%M:%S')}
+• 시각: {now_kst.strftime('%H:%M:%S')}
 
 <b>기획서 5.2절: 비상 증지 조건 충족</b>
 
@@ -655,6 +687,7 @@ v2.0 기획서에 따라 업그레이드되었습니다.
             elif command == '/status':
                 runtime = datetime.now() - self.stats['start_time']
                 runtime_hours = runtime.total_seconds() / 3600
+                now_kst = self._get_kst_time()
                 
                 # (신규) OrderManager에서 통계 가져오기 시도
                 tg_order_count = 0
@@ -666,7 +699,7 @@ v2.0 기획서에 따라 업그레이드되었습니다.
 
 • 상태: ✅ 실행중
 • 가동 시간: {runtime_hours:.1f}시간
-• 확인 시각: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
+• 확인 시각: {now_kst.strftime('%Y-%m-%d %H:%M:%S')}
 • 폴링 간격: {self.polling_interval}초
 • 텔레그램 주문 대기: {tg_order_count}건
 """
