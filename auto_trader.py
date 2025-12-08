@@ -335,7 +335,7 @@ class AutoTrader:
                     self.update_ranking()
                 
                 # 2. 포지션 확인
-                current_holding = self.order_monitor.get_active_orders()
+                current_holding = self.order_monitor.monitoring_orders
                 has_position = len(current_holding) > 0
                 
                 # 3. 각 감시 종목 체크

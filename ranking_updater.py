@@ -79,7 +79,7 @@ class RankingUpdater:
         # 헤더 구성
         headers = {
             'content-type': 'application/json; charset=utf-8',
-            'authorization': f'Bearer {self.token_manager.get_token()}',
+            'authorization': f'Bearer {self.token_manager.get_access_token()}',
             'appkey': self.config['auth']['appkey'],
             'appsecret': self.config['auth']['appsecret'],
             'tr_id': self.tr_id,
