@@ -81,7 +81,7 @@ class RankingUpdater:
         
         headers = {
             'content-type': 'application/json; charset=utf-8',
-            'authorization': f'Bearer {self.token_manager.get_token()}',
+            'authorization': f'Bearer {self.token_manager.get_access_token()}',
             'appkey': os.getenv('KIS_APP_KEY'),
             'appsecret': os.getenv('KIS_APP_SECRET'),
             'tr_id': self.tr_id,
