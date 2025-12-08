@@ -356,7 +356,6 @@ def main():
             ranking_updater = RankingUpdater(
                 config=config,
                 token_manager=token_manager,
-                telegram_bot=telegram_bot
             )
             logging.info("✅ RankingUpdater 초기화 완료")
             
