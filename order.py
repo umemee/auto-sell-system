@@ -1327,7 +1327,117 @@ class OrderExecutor:
                 'success': False,
                 'reason': str(e)
             }
-    
+        
+    def place_limit_buy_order(self, ticker: str, limit_price: float, quantity: Optional[int] = None) -> Dict[str, Any]:
+        """
+        지정가 매수 주문 (선행 주문용)
+        
+        Args:
+            ticker: 종목코드
+            limit_price: 지정가 (예: 174.50)
+            quantity: 수량 (None이면 전액)
+        
+        Returns:
+            dict: {'success': bool, 'order_no': str, 'reason': str}
+        """
+        try:
+            logger.info(f"📝 {ticker} 지정가 매수: ${limit_price:.2f}")
+            
+            # 1. 수량 계산 (전액)
+            if quantity is None:
+                available_cash = self.get_available_cash()
+                
+                if available_cash < 100:
+                    logger.error(f"❌ 자금 부족: ${available_cash:.2f}")
+                    return {'success': False, 'reason': 'insufficient_funds'}
+                
+                quantity = int(available_cash / limit_price)
+                
+                if quantity < 1:
+                    logger.error(f"❌ 수량 부족: {quantity}주")
+                    return {'success': False, 'reason': 'insufficient_quantity'}
+            
+            # 2. 가격 포맷팅
+            if limit_price >= 1.0:
+                price_str = f"{limit_price:.2f}"
+            else:
+                price_str = f"{limit_price:.4f}"
+            
+            logger.info(
+                f"📝 지정가 매수 준비:\n"
+                f"  종목: {ticker}\n"
+                f"  수량: {quantity}주\n"
+                f"  지정가: ${price_str}"
+            )
+            
+            # 3. API 호출
+            url = f"{self.base_url}/uapi/overseas-stock/v1/trading/order"
+            
+            token = self.token_manager.get_access_token()
+            if not token:
+                return {'success': False, 'reason': 'no_token'}
+            
+            headers = {
+                'content-type': 'application/json; charset=utf-8',
+                'authorization': f'Bearer {token}',
+                'appkey': self.config['api_key'],
+                'appsecret': self.config['api_secret'],
+                'tr_id': 'JTTT1002U',  # 실전 매수
+                'custtype': 'P'
+            }
+            
+            body = {
+                'CANO': self.config['cano'],
+                'ACNT_PRDT_CD': self.config['acnt_prdt_cd'],
+                'OVRS_EXCG_CD': 'NASD',
+                'PDNO': ticker,
+                'ORD_DVSN': '00',              # 지정가
+                'ORD_QTY': str(quantity),
+                'OVRS_ORD_UNPR': price_str,    # 실제 가격
+                'CTAC_TLNO': '',
+                'MGCO_APTM_ODNO': '',
+                'SLL_TYPE': '',
+                'ORD_SVR_DVSN_CD': '0'
+            }
+            
+            response = requests.post(url, headers=headers, json=body, timeout=self.timeout)
+            data = response.json()
+            
+            if data.get('rt_cd') == '0':
+                order_no = data.get('output', {}).get('ODNO', '')
+                logger.info(f"✅ 지정가 매수 주문 성공: {order_no}")
+                
+                # 텔레그램 알림
+                self.telegram_bot.send_message(
+                    f"📝 지정가 매수 주문 접수\n\n"
+                    f"종목: {ticker}\n"
+                    f"수량: {quantity}주\n"
+                    f"지정가: ${price_str}\n"
+                    f"주문번호: {order_no}\n\n"
+                    f"⏳ 체결 대기 중..."
+                )
+                
+                return {
+                    'success': True,
+                    'order_no': order_no,
+                    'quantity': quantity,
+                    'price': limit_price
+                }
+            else:
+                error_msg = data.get('msg1', 'Unknown error')
+                logger.error(f"❌ 지정가 매수 실패: {error_msg}")
+                return {
+                    'success': False,
+                    'reason': error_msg
+                }
+        
+        except Exception as e:
+            logger.error(f"❌ 지정가 매수 오류: {e}")
+            return {
+                'success': False,
+                'reason': str(e)
+            }
+        
     def get_1min_candles(self, ticker: str, count: int) -> List[Dict]:
         """
         1분봉 조회

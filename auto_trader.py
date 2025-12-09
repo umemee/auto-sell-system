@@ -444,6 +444,34 @@ class AutoTrader:
             if current_candle['volume'] < avg_volume * self.VOLUME_MULTIPLIER:
                 return False
             
+            # ⚡ 조건 4-2: 절대 거래량 필터 (ATMCU 차단)
+            MIN_ABSOLUTE_VOLUME = 50
+            
+            if current_candle['volume'] < MIN_ABSOLUTE_VOLUME:
+                logger.warning(
+                    f"⚠️ {ticker} 절대 거래량 부족: "
+                    f"{current_candle['volume']}주 < {MIN_ABSOLUTE_VOLUME}주 "
+                    f"→ 영구 제외"
+                )
+                self.permanently_excluded.add(ticker)
+                self.touched_but_skipped.add(ticker)
+                return False
+            
+            # ⚡ 조건 4-3: 시간당 평균 거래량 필터
+            if len(candles) >= 60:
+                hourly_volumes = [c['volume'] for c in candles[-60:]]
+                avg_hourly_volume = sum(hourly_volumes) / 60
+                MIN_HOURLY_VOLUME = 10
+                
+                if avg_hourly_volume < MIN_HOURLY_VOLUME:
+                    logger.warning(
+                        f"⚠️ {ticker} 시간당 거래량 부족: "
+                        f"{avg_hourly_volume:.1f}주/분 < {MIN_HOURLY_VOLUME}주/분 "
+                        f"→ 영구 제외"
+                    )
+                    self.permanently_excluded.add(ticker)
+                    return False
+                            
             # 조건 5: RSI < 70 (선택 - 생략)
             # rsi = self._calculate_rsi(candles)
             # if rsi > 70:
