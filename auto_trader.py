@@ -343,6 +343,9 @@ class AutoTrader:
                     else:
                         logger.debug("⏰ ET 05:00 이전, 슬립 모드")
                     
+                    # ⚡ 수정: 슬립 중 타이머 리셋
+                    self.last_ranking_update = None
+
                    # 즉시 루프 탈출 (랭킹 업데이트 하지 않음)
                     time.sleep(60)
                     continue  # 다음 반복으로 바로 이동
