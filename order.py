@@ -1347,6 +1347,8 @@ class OrderExecutor:
             if not token:
                 return []
             
+            import os
+
             headers = {
                 'content-type': 'application/json; charset=utf-8',
                 'authorization': f'Bearer {token}',
@@ -1365,7 +1367,8 @@ class OrderExecutor:
                 'NEXT': '',
                 'NREC': str(min(count, 120)),
                 'FILL': '',
-                'KEYB': ''
+                'KEYB': '',
+                'GUBN': '0'
             }
             
             response = requests.get(url, headers=headers, params=params, timeout=self.timeout)

@@ -330,6 +330,23 @@ class AutoTrader:
         
         while self.is_running:
             try:
+                from datetime import datetime
+                from pytz import timezone
+            
+                now_et = datetime.now(timezone('US/Eastern'))
+                current_hour = now_et.hour
+
+                # ET 12:00 이후면 즉시 종료
+                if current_hour >= 12 or current_hour < 5:
+                    if current_hour >= 12:
+                        logger.info("⏰ ET 12:00 이후, 시스템 중지")
+                    else:
+                        logger.debug("⏰ ET 05:00 이전, 슬립 모드")
+                    
+                   # 즉시 루프 탈출 (랭킹 업데이트 하지 않음)
+                    time.sleep(60)
+                    continue  # 다음 반복으로 바로 이동
+
                 # 1. 랭킹 업데이트 체크
                 if self._should_update_ranking():
                     self.update_ranking()

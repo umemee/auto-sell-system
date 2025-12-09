@@ -77,15 +77,13 @@ class RankingUpdater:
         url = f"{self.base_url}/uapi/overseas-stock/v1/ranking/updown-rate"
         
         # 헤더 구성
-        import os
-        
         headers = {
             'content-type': 'application/json; charset=utf-8',
             'authorization': f'Bearer {self.token_manager.get_access_token()}',
-            'appkey': os.getenv('KIS_APP_KEY'),
-            'appsecret': os.getenv('KIS_APP_SECRET'),
+            'appkey': self.config['api_key'],  # ← 수정
+            'appsecret': self.config['api_secret'],  # ← 수정
             'tr_id': self.tr_id,
-            'custtype': 'P'  # P: 개인
+            'custtype': 'P'
         }
         
         # 파라미터 구성
