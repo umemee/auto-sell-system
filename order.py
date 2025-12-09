@@ -1485,16 +1485,22 @@ class OrderExecutor:
             
             response = requests.get(url, headers=headers, params=params, timeout=self.timeout)
             data = response.json()
-            
+            # ⚡ 추가: 실제 API 응답 전체 로깅
+            logger.info(f"📥 1분봉 API 응답: {json.dumps(data, ensure_ascii=False)[:500]}")  # 처음 500자만
+          
             if data.get('rt_cd') != '0':
                 logger.error(f"❌ 1분봉 조회 실패: {data.get('msg1')}")
+                logger.error(f"❌ 응답 코드: {data.get('rt_cd')}")  # 추가 로깅
                 return []
             
             output2 = data.get('output2', [])
+            logger.info(f"📊 output2 개수: {len(output2)}")  # 몇 개 아이템?
+
             
             candles = []
-            for item in output2:
+            for idx, item in enumerate(output2):  # idx 추가
                 try:
+                    logger.debug(f"📝 캔들 #{idx}: {item}")  # 각 아이템 로깅
                     candles.append({
                         'time': item['xhms'],
                         'open': float(item['open']),
@@ -1506,7 +1512,8 @@ class OrderExecutor:
                 except (KeyError, ValueError) as e:
                     logger.error(f"❌ 캔들 파싱 오류: {e}")
                     continue
-            
+                
+            logger.info(f"✅ 1분봉 수신 완료: {len(candles)}개")
             return candles
         
         except Exception as e:
