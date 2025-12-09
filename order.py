@@ -1476,6 +1476,8 @@ class OrderExecutor:
                 'PINC': '1',
                 'NEXT': '',
                 'NREC': str(min(count, 120)),
+                'BYMD': '',         
+                'MODP': '1',       
                 'FILL': '',
                 'KEYB': '',
                 'GUBN': '0'
