@@ -51,6 +51,9 @@ class TelegramBot:
         # ✅ 추가: 알림 중복 방지 (기획서 6.1절)
         self.last_alert_time = {}  # 알림 타입별 마지막 전송 시간
         self.alert_cooldown = 300  # 5분 내 같은 알림 중복 방지
+
+        # ✅ 추가: 슬립 모드 중복 방지 플래그
+        self.sleep_mode_notified = False  # 슬립 모드 알림 이미 발송 여부
         
         # ✅ 추가: 통계 추적
         self.stats = {
@@ -465,6 +468,11 @@ class TelegramBot:
             trade_stats: DailyTradeCounter 통계
         """
         from pytz import timezone
+       
+        if reason == "normal" and self.sleep_mode_notified:
+            # 이미 슬립 모드 알림을 보냈으면 무시
+            self.logger.debug("⏭️ 슬립 모드 알림 이미 발송됨 (중복 방지)")
+            return None
 
         if reason == "trade_limit":
             emoji = "🚫"
@@ -492,7 +500,23 @@ class TelegramBot:
 
 시스템이 슬립 모드로 전환됩니다.
 """
-        return self.send_message(message.strip(), force=True)
+        result = self.send_message(message.strip(), force=True)
+
+        # ⚡ [수정] 슬립 모드 알림 발송 플래그 설정
+        if reason == "normal":
+            self.sleep_mode_notified = True
+    
+        return result
+    
+    def reset_sleep_mode_flag(self):
+        """
+        ✅ [신규] 슬립 모드 플래그 리셋
+        
+        매일 ET 00:00에 DailyTradeCounter에서 호출됨
+        """
+        if self.sleep_mode_notified:
+            self.logger.info("🔄 슬립 모드 플래그 리셋 (새로운 거래일)")
+            self.sleep_mode_notified = False
 
     def send_shutdown_notification(self, trade_stats=None):
         """✅ [수정 13/15] 시스템 종료 알림 (v2.0 - 통계 연동)"""

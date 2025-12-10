@@ -98,6 +98,13 @@ class DailyTradeCounter:
                 f"📅 새로운 날: {today} (ET). "
                 f"매매 카운터 리셋 (진입 {self.MAX_ENTRIES}회, 청산 {self.MAX_EXITS}회)."
             )
+            
+            # ⚡ [수정] 텔레그램 슬립 모드 플래그 리셋
+            if self.telegram_bot and hasattr(self.telegram_bot, 'reset_sleep_mode_flag'):
+                try:
+                    self.telegram_bot.reset_sleep_mode_flag()
+                except Exception as e:
+                    logger.error(f"슬립 모드 플래그 리셋 실패: {e}")
 
     def can_trade(self):
         """매매 가능 여부 확인 (v1.x/v2.0 호환성 유지)"""

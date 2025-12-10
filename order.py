@@ -1464,7 +1464,7 @@ class OrderExecutor:
                 'authorization': f'Bearer {token}',
                 'appkey': self.config['api_key'],
                 'appsecret': self.config['api_secret'],
-                'tr_id': 'HHDFS76240000',
+                'tr_id': 'HHDFS76950200',
                 'custtype': 'P'
             }
             
@@ -1475,12 +1475,9 @@ class OrderExecutor:
                 'NMIN': '1',
                 'PINC': '1',
                 'NEXT': '',
-                'NREC': str(min(count, 120)),
-                'BYMD': '',         
-                'MODP': '1',       
+                'NREC': str(min(count, 120)),     
                 'FILL': '',
-                'KEYB': '',
-                'GUBN': '0'
+                'KEYB': ''
             }
             
             response = requests.get(url, headers=headers, params=params, timeout=self.timeout)
