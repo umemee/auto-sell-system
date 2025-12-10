@@ -324,11 +324,10 @@ def main():
         # 2. 토큰 매니저 초기화
         token_manager = TokenManager(config, telegram_bot)
         
-        # ✅ [수정] 시스템 시작 전 토큰 발급
+        # 시스템 시작 전 토큰 발급
         logging.info("🔑 Access Token 발급 중...")
         try:
-            token_manager.issue_token()
-            access_token = token_manager.get_access_token()
+            access_token = token_manager.get_access_token(force_refresh=True)
             
             if not access_token:
                 logging.error("❌ 토큰 발급 실패, 시스템 종료")
