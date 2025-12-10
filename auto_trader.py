@@ -88,10 +88,10 @@ class AutoTrader:
         logger.info("🚀 완전 자동매매 시작")
         self.is_running = True
         
-        # 1. 상태 복구 시도
-        self._load_state()
-        
-        # 2. 초기 랭킹 조회
+        # 1. 상태 복구 시도 (재진입 제외 정보만)
+        self._load_state_minimal()  # permanently_excluded, touched_but_skipped만
+    
+        # 2. 초기 랭킹 조회 (감시 목록 새로 구성)
         self.update_ranking()
         
         # 3. 텔레그램 알림
@@ -676,6 +676,48 @@ class AutoTrader:
         except Exception as e:
             logger.error(f"❌ 상태 로드 오류: {e}")
 
+    def _load_state_minimal(self):
+        """
+        최소 상태 복구 (재진입 제외 정보만)
+        
+        - permanently_excluded: 손절/익절 완료 종목 (재진입 금지)
+        - touched_but_skipped: 터치했지만 못 산 종목 (재진입 금지)
+        
+        감시 목록(watch_list)은 복구하지 않음 → 항상 최신 TOP 3으로 시작
+        """
+        try:
+            with open(self.state_file, 'r') as f:
+                state = json.load(f)
+            
+            # 날짜 확인 (당일만 복구)
+            state_date = state.get('date')
+            today = datetime.now().strftime('%Y-%m-%d')
+            
+            if state_date != today:
+                logger.info("📅 새로운 거래일, 상태 초기화")
+                return
+            
+            # 재진입 제외 정보만 복구
+            self.touched_but_skipped = set(state.get('touched_but_skipped', []))
+            self.permanently_excluded = set(state.get('permanently_excluded', []))
+            
+            excluded_count = len(self.touched_but_skipped) + len(self.permanently_excluded)
+            
+            if excluded_count > 0:
+                logger.info(
+                    f"✅ 재진입 제외 정보 복구 완료\n"
+                    f"  터치 후 제외: {len(self.touched_but_skipped)}개\n"
+                    f"  손절/익절 완료: {len(self.permanently_excluded)}개\n"
+                    f"  📋 감시 목록은 최신 TOP 3으로 새로 구성합니다"
+                )
+            else:
+                logger.info("📝 제외 정보 없음, 완전히 새로 시작")
+        
+        except FileNotFoundError:
+            logger.info("📝 상태 파일 없음, 새로 시작")
+        
+        except Exception as e:
+            logger.error(f"❌ 상태 로드 오류: {e}")
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # 테스트 코드
