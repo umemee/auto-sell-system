@@ -683,6 +683,16 @@ class SmartOrderMonitor:
         if not self.can_make_request():
             return
         
+        # ✅ [수정] 토큰 확인 (Race Condition 방지)
+        try:
+            access_token = self.token_manager.get_access_token()
+            if not access_token:
+                logger.debug("⚠️ Access Token 없음, 매수 주문 스캔 건너뜀")
+                return
+        except Exception as e:
+            logger.debug(f"⚠️ 토큰 확인 실패: {e}, 매수 주문 스캔 건너뜀")
+            return
+        
         try:
             from order import inquire_ccnl
             from datetime import datetime
@@ -826,6 +836,16 @@ class SmartOrderMonitor:
         """
         당일 매매 내역을 CSV 형식으로 텔레그램 전송
         """
+        # ✅ [수정] 토큰 확인 (Race Condition 방지)
+        try:
+            access_token = self.token_manager.get_access_token()
+            if not access_token:
+                logger.warning("⚠️ Access Token 없음, 당일 내역 조회 건너뜀")
+                return
+        except Exception as e:
+            logger.warning(f"⚠️ 토큰 확인 실패: {e}, 당일 내역 조회 건너뜀")
+            return
+        
         try:
             from datetime import datetime
             

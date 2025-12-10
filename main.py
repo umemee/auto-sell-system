@@ -324,6 +324,21 @@ def main():
         # 2. 토큰 매니저 초기화
         token_manager = TokenManager(config, telegram_bot)
         
+        # ✅ [수정] 시스템 시작 전 토큰 발급
+        logging.info("🔑 Access Token 발급 중...")
+        try:
+            token_manager.issue_token()
+            access_token = token_manager.get_access_token()
+            
+            if not access_token:
+                logging.error("❌ 토큰 발급 실패, 시스템 종료")
+                sys.exit(1)
+            
+            logging.info("✅ Access Token 발급 완료")
+        except Exception as e:
+            logging.error(f"❌ 토큰 발급 오류: {e}")
+            sys.exit(1)
+
         # 3. 스마트 모니터 (시스템 A) 초기화
         smart_monitor = SmartOrderMonitor(config, token_manager, telegram_bot)
         shared_trade_counter = smart_monitor.trade_counter
