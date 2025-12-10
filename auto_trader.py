@@ -334,14 +334,17 @@ class AutoTrader:
                 from pytz import timezone
             
                 now_et = datetime.now(timezone('US/Eastern'))
-                current_hour = now_et.hour
-
-                # ET 12:00 이후면 즉시 종료
-                if current_hour >= 12 or current_hour < 5:
-                    if current_hour >= 12:
-                        logger.info("⏰ ET 12:00 이후, 시스템 중지")
+                
+                # ✅ 날짜 기반 운영 시간 계산
+                today_start = now_et.replace(hour=5, minute=0, second=0, microsecond=0)
+                today_end = now_et.replace(hour=12, minute=0, second=0, microsecond=0)
+                
+                # ET 05:00 ~ 12:00 외에는 슬립 모드
+                if not (today_start <= now_et < today_end):
+                    if now_et >= today_end:
+                        logger.info(f"⏰ ET 12:00 이후 (현재 {now_et.strftime('%H:%M')}), 시스템 중지")
                     else:
-                        logger.debug("⏰ ET 05:00 이전, 슬립 모드")
+                        logger.debug(f"⏰ ET 05:00 이전 (현재 {now_et.strftime('%H:%M')}), 슬립 모드")
                     
                     # ⚡ 수정: 슬립 중 타이머 리셋
                     self.last_ranking_update = None
