@@ -336,20 +336,20 @@ class AutoTrader:
                 now_et = datetime.now(timezone('US/Eastern'))
                 
                 # ✅ 날짜 기반 운영 시간 계산
-                today_start = now_et.replace(hour=5, minute=0, second=0, microsecond=0)
+                today_start = now_et.replace(hour=4, minute=0, second=0, microsecond=0)
                 today_end = now_et.replace(hour=12, minute=0, second=0, microsecond=0)
                 
-                # ET 05:00 ~ 12:00 외에는 슬립 모드
+                # ET 04:00 ~ 12:00 외에는 슬립 모드
                 if not (today_start <= now_et < today_end):
                     if now_et >= today_end:
                         logger.info(f"⏰ ET 12:00 이후 (현재 {now_et.strftime('%H:%M')}), 시스템 중지")
                     else:
-                        logger.debug(f"⏰ ET 05:00 이전 (현재 {now_et.strftime('%H:%M')}), 슬립 모드")
+                        logger.info(f"⏰ ET 04:00 이전 (현재 {now_et.strftime('%H:%M')}), 슬립 모드")
                     
                     # ⚡ 수정: 슬립 중 타이머 리셋
                     self.last_ranking_update = None
 
-                   # 즉시 루프 탈출 (랭킹 업데이트 하지 않음)
+                    # 즉시 루프 탈출 (랭킹 업데이트 하지 않음)
                     time.sleep(60)
                     continue  # 다음 반복으로 바로 이동
 
