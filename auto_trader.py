@@ -440,9 +440,10 @@ class AutoTrader:
             if diff_pct > self.TOUCH_THRESHOLD:
                 return False
             
-            # 조건 3: 현재가 > 현재 캔들 (반등)
-            if current_price <= current_candle['close']:
-                return False
+            # 조건 3: 현재가 > 현재 캔들 (반등) - ⚠️ 비활성화
+            # 터치 시 즉시 매수, 하락 시 -2% 손절로 관리
+            # if current_price <= current_candle['close']:
+            #     return False
             
             # 조건 4: 거래량 > 평균 × 1.2
             recent_volumes = [c['volume'] for c in candles[-20:]]
