@@ -761,14 +761,14 @@ class SmartOrderMonitor:
         
         [v3.0 수정] 주말(금요일 장마감 후 ~ 일요일)은 시스템 완전 종료
         """
-        # --- 주말 체크 (금/토/일) ---
+        # --- 주말 체크 (토/일) ---
         try:
             from pytz import timezone as pytz_tz
             tz = pytz_tz('US/Eastern')
             now_et = datetime.now(tz)
             weekday = now_et.weekday()  # 0=월, 4=금, 5=토, 6=일
 
-            if weekday in [4, 5, 6]:  # 금요일, 토요일, 일요일
+            if weekday in [5, 6]:  # 토요일, 일요일
                 weekday_names = ['월', '화', '수', '목', '금', '토', '일']
                 logger.info(f"🌴 주말({weekday_names[weekday]}요일) 슬립 모드 진입 → 시스템 완전 종료")
 
