@@ -250,7 +250,7 @@ auto_trader:
   enabled: true  # ✅ v3.0 완전 자동매매 활성화
   
   # 랭킹 업데이트 설정
-  ranking_update_interval: 3600  # 1시간 (초 단위)
+  ranking_update_interval: 1800  # 0.5시간 (초 단위)
   ranking_api:
     exchange: 'NAS'  # 거래소: NYS(뉴욕), NAS(나스닥), AMS(아멕스)
     volume_filter: '3'  # 거래량 필터: 3 = 10,000주 이상

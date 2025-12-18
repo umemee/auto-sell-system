@@ -1248,7 +1248,9 @@ class OrderExecutor:
                 'OVRS_EXCG_CD': 'NASD',
                 'TR_CRCY_CD': 'USD',
                 'CTX_AREA_FK200': '',
-                'CTX_AREA_NK200': ''
+                'CTX_AREA_NK200': '',
+                'INQR_DVSN': '00',
+                'INQR_DVSN_1': '00'  
             }
             
             response = requests.get(url, headers=headers, params=params, timeout=self.timeout)

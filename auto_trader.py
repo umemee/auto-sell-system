@@ -88,9 +88,24 @@ class AutoTrader:
         logger.info("🚀 완전 자동매매 시작")
         self.is_running = True
         
-        # 1. 상태 복구 시도 (재진입 제외 정보만)
-        self._load_state_minimal()  # permanently_excluded, touched_but_skipped만
+        # ✅ 거래일 변경 감지 → touched_but_skipped 초기화
+        try:
+            with open(self.state_file, 'r') as f:
+                saved_state = json.load(f)
+                saved_date = saved_state.get('date')
+        except:
+            saved_date = None
     
+        today_date = datetime.now().strftime('%Y-%m-%d')
+    
+        if saved_date != today_date:
+            logger.info(f"📅 새 거래일 시작 ({saved_date} → {today_date})")
+            logger.info("🌅 touched_but_skipped 초기화")
+            self.touched_but_skipped.clear()
+        else:
+            logger.info("📂 같은 거래일 - 상태 복구")
+            self._load_state_minimal()
+
         # 2. 초기 랭킹 조회 (감시 목록 새로 구성)
         self.update_ranking()
         
@@ -170,19 +185,29 @@ class AutoTrader:
                 self._add_if_new(item['ticker'])
             
             # 4. 순위 이탈 종목 제거
+            logger.info("🔧 [DEBUG] _remove_rank_out_tickers 시작")
             self._remove_rank_out_tickers(current_top3)
-            
+            logger.info("🔧 [DEBUG] _remove_rank_out_tickers 완료")
+
             # 5. 최대 개수 초과 시 제거
+            logger.info("🔧 [DEBUG] _limit_watch_list 시작")
             self._limit_watch_list(current_top3)
-            
+            logger.info("🔧 [DEBUG] _limit_watch_list 완료")
+
             # 6. 텔레그램 알림
+            logger.info("🔧 [DEBUG] _send_watch_list_update 시작")
             self._send_watch_list_update(current_top3)
-            
+            logger.info("🔧 [DEBUG] _send_watch_list_update 완료")
+
             # 업데이트 시각 기록
+            logger.info("🔧 [DEBUG] 시각 기록 시작")
             self.last_ranking_update = datetime.now()
-            
+            logger.info("🔧 [DEBUG] 시각 기록 완료")
+
             # 상태 저장
+            logger.info("🔧 [DEBUG] _save_state 시작")
             self._save_state()
+            logger.info("🔧 [DEBUG] _save_state 완료")
             
         except Exception as e:
             logger.error(f"❌ 랭킹 업데이트 오류: {e}")
