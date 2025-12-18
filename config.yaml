@@ -270,7 +270,7 @@ auto_trader:
   volume_multiplier: 1.1  # 거래량 최소 배수
   
   # 손절/익절 설정
-  stop_loss: -2.0  # 손절: -2%
+  stop_loss: -4.0  # 손절: -2%
   take_profit: 6.0  # 익절: +6%
   check_stop_first: true  # 손절 우선 체크
   
@@ -310,4 +310,5 @@ auto_trader:
 # - REST API 50건/초로 증가 (requests_per_second: 15 → 37)
 # - 무료 실시간 시세 정책 반영
 # - 비상 종지 조건 추가 (websocket_subscription_insufficient)
+
 # - 텔레그램 알림 추가 (websocket_subscription_warning)
