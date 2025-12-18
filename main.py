@@ -478,10 +478,16 @@ def main():
         status_count = 0
         last_stats_report = 0
         
+        start_time = time.time()
+
         while not shutdown_requested:
             try:
                 if status_count % 12 == 0:  # 1분마다 상태 출력
                     
+                    # ✅ 추가됨: 실행 시간 계산
+                    uptime_seconds = int(time.time() - start_time)
+                    uptime_str = f"{uptime_seconds // 3600}시간 {(uptime_seconds % 3600) // 60}분"
+
                     # 스마트 모니터 통계
                     if smart_monitor and hasattr(smart_monitor, 'get_detailed_stats'):
                         stats = smart_monitor.get_detailed_stats()
@@ -501,15 +507,18 @@ def main():
                             watch_count = len(auto_trader.watch_list) if hasattr(auto_trader, 'watch_list') else 0
                             excluded_count = len(auto_trader.permanently_excluded) if hasattr(auto_trader, 'permanently_excluded') else 0
                             
+                            # ✅ 수정됨: 로그 맨 앞에 실행 시간(Uptime) 추가
                             logging.info(
-                                f"📊 [v3.0] {current_mode} | "
+                                f"⏱️ [실행 {uptime_str}] 📊 [v3.0] {current_mode} | "
                                 f"감시: {watch_count}개 | 제외: {excluded_count}개 | "
                                 f"[A]감시: {monitor_count}건 | [B]대기: {tg_order_count}건 | "
                                 f"API(시간): {hourly_calls} | API(일일): {daily_calls}"
                             )
                         else:
+                            # ✅ 수정됨: 로그 맨 앞에 실행 시간(Uptime) 추가
                             logging.info(
-                                f"📊 상태: {current_mode} | [A]감시: {monitor_count}건 | [B]대기: {tg_order_count}건 | "
+                                f"⏱️ [실행 {uptime_str}] 📊 상태: {current_mode} | "
+                                f"[A]감시: {monitor_count}건 | [B]대기: {tg_order_count}건 | "
                                 f"API(시간): {hourly_calls} | API(일일): {daily_calls}"
                             )
                         
@@ -521,23 +530,30 @@ def main():
                             # 진입/청산 통계
                             trade_stats = shared_trade_counter.get_stats()
                             
-                            logging.info(
-                                f"📈 상세통계 - 성공(REST): {successful_detections}회, "
-                                f"Rate Limit: {rate_limit_errors}회, "
-                                f"진입: {trade_stats['entry']}/{trade_stats['max_entries']}회, "
-                                f"청산: {trade_stats['exit']}/{trade_stats['max_exits']}회"
-                            )
+                            # ✅ 수정됨: 구분선 추가로 가독성 향상
+                            logging.info(f"""
+    📈 [10분 정기 리포트]
+    ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    실행 시간: {uptime_str}
+    성공 감지(REST): {successful_detections}회
+    API 제한 경고: {rate_limit_errors}회
+    금일 매매 현황:
+      - 진입: {trade_stats['entry']} / {trade_stats['max_entries']}회
+      - 청산: {trade_stats['exit']} / {trade_stats['max_exits']}회
+    ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+                            """)
                             last_stats_report = status_count
                     else:
-                        logging.info(f"📊 상태: 로딩 중...")
+                        logging.info(f"📊 상태: 로딩 중... (실행 {uptime_str})")
                 
                 status_count += 1
                 time.sleep(5)
                 
             except KeyboardInterrupt:
+                logging.info("🛑 사용자 중단(Ctrl+C) 감지") # ✅ 추가됨
                 break
             except Exception as e:
-                logging.error(f"메인 루프 오류: {e}")
+                logging.error(f"❌ 메인 루프 치명적 오류: {e}") # ✅ 수정됨: 에러 강조
                 time.sleep(5)
                 
     except Exception as e:
