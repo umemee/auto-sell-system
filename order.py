@@ -11,6 +11,25 @@ from pytz import timezone
 
 logger = logging.getLogger(__name__)
 
+import functools # 수정한 부분: 데코레이터를 위한 도구 추가
+
+def log_api_call(api_name: str, tr_id: str):
+    """API 호출을 예쁘게 기록해주는 도구입니다."""
+    def decorator(func):
+        @functools.wraps(func)
+        def wrapper(*args, **kwargs):
+            # 수정한 부분: 호출 시작 알림
+            logger.info(f"\n{'='*40}\n📤 API 호출 시작: {api_name}\nTR_ID: {tr_id}\n{'='*40}")
+            try:
+                result = func(*args, **kwargs)
+                logger.info(f"✅ API 호출 성공: {api_name}")
+                return result
+            except Exception as e:
+                # 수정한 부분: 오류 발생 시 상세 내용 기록
+                logger.error(f"❌ API 호출 실패: {api_name}\n오류 내용: {str(e)}")
+                return None
+        return wrapper
+    return decorator
 
 # ============================================================================
 # 시장 시간 판별 함수 (기획서 2.2, 2.3)
@@ -116,6 +135,7 @@ def should_system_run(trading_timezone='US/Eastern'):
 # 보유 종목 조회 함수
 # ============================================================================
 
+@log_api_call('보유 종목 조회', 'TTTS3012R')
 def get_holdings(config, token_manager, exchange_code='NASD', currency_code='USD'):
     """
     해외주식 잔고 조회
@@ -159,28 +179,88 @@ def get_holdings(config, token_manager, exchange_code='NASD', currency_code='USD
             "CTX_AREA_NK200": ""
         }
         
-        logger.info(f"📋 보유 종목 조회 시작: {exchange_code} ({currency_code})")
+        masked_cano = config["cano"][:4] + "****" if config["cano"] else "Unknown"
+        
+        # ✅ 추가: API 호출 직전 상세 로그
+        logger.info(f"""
+    📤 API 호출 준비 (보유 종목 조회)
+    ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    엔드포인트: /uapi/overseas-stock/v1/trading/inquire-balance
+    TR_ID: TTTS3012R
+    계좌: {masked_cano} / {config["acnt_prdt_cd"]}
+    거래소: {exchange_code}
+    통화: {currency_code}
+    ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+        """)
         
         response = requests.get(url, headers=headers, params=params, timeout=15)
         
+        logger.info(f"""
+    📥 API 응답 수신 (보유 종목 조회)
+    ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    상태코드: {response.status_code}
+    응답 길이: {len(response.text)} bytes
+    응답 내용 (처음 300자):
+    {response.text[:300]}
+    ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+        """)
+
         if response.status_code != 200:
-            logger.error(f"❌ 보유 종목 조회 HTTP 오류: {response.status_code}")
-            logger.error(f"응답: {response.text}")
+            logger.error(f"""
+    ❌ HTTP 오류 (보유 종목 조회)
+    ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    상태코드: {response.status_code}
+    응답: {response.text}
+    ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+            """)
             return []
-        
-        data = response.json()
+
+        try:
+            data = response.json()
+        except json.JSONDecodeError as e:
+            # ✅ 추가: JSON 파싱 오류 처리
+            logger.error(f"""
+    ❌ JSON 파싱 오류 (보유 종목 조회)
+    ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    오류: {str(e)}
+    응답 원본: {response.text}
+    ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+            """)
+            return []
         
         rt_cd = data.get("rt_cd", "")
+        
+        # ✅ 추가: rt_cd 검증
         if rt_cd != "0":
             msg1 = data.get("msg1", "알 수 없는 오류")
-            logger.warning(f"⚠️ 보유 종목 조회 실패: {msg1} (rt_cd={rt_cd})")
+            msg2 = data.get("msg2", "")
+            logger.error(f"""
+    ❌ API 반환 오류 (보유 종목 조회)
+    ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    rt_cd: {rt_cd}
+    msg1: {msg1}
+    msg2: {msg2}
+    전체 응답: {json.dumps(data, ensure_ascii=False)}
+    ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+            """)
             return []
-        
+
         output2 = data.get("output2", [])
         
+        # ✅ 추가: output2 필드 검증
         if not output2:
-            logger.info("📋 보유 종목 없음")
+            logger.info(f"""
+    📋 조회 결과: 보유 종목 없음
+    ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    응답의 주요 필드:
+    - rt_cd: {data.get('rt_cd')}
+    - msg1: {data.get('msg1')}
+    - output1: {type(data.get('output1')).__name__}
+    - output2: {type(data.get('output2')).__name__}
+    ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+            """)
             return []
+
         
         holdings = []
         for item in output2:
@@ -249,7 +329,7 @@ def get_holdings(config, token_manager, exchange_code='NASD', currency_code='USD
 # ============================================================================
 # 주문체결내역 조회 함수
 # ============================================================================
-
+@log_api_call('체결내역 조회', 'TTTS3035R') 
 def inquire_ccnl(
         config,
         token_manager,
@@ -373,7 +453,7 @@ def inquire_ccnl(
 # ============================================================================
 # HashKey 생성 함수 (한국투자증권 공식)
 # ============================================================================
-
+@log_api_call('HashKey 생성', 'hashkey')
 def get_hash_key(config, token_manager, order_data):
     """
     한국투자증권 주문용 HashKey 생성
@@ -424,7 +504,7 @@ def get_hash_key(config, token_manager, order_data):
 # ============================================================================
 # 자동 매도 주문 실행 함수 (핵심!)
 # ============================================================================
-
+@log_api_call('자동 매도 주문', 'TTTT1006U')
 def place_sell_order(config, token_manager, execution_data, telegram_bot=None):
     """
     기획서 4장: 자동 매도 주문 실행 함수
@@ -512,31 +592,56 @@ def place_sell_order(config, token_manager, execution_data, telegram_bot=None):
         
         sell_url = f"{config['api']['base_url']}/uapi/overseas-stock/v1/trading/order"
         
-        logger.info(f"📤 매도 주문 전송 중: {ticker} {execution_data['quantity']}주 @ ${sell_price}")
+        # 수정한 부분: 주문 전송 전 최종 데이터 확인 로그
+        logger.info(f"""
+    📤 [매도 주문 전송] 호출 준비
+    ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    종목: {ticker}
+    수량: {execution_data['quantity']}주
+    가격: ${sell_price}
+    거래소: {exchange_code}
+    ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+        """)
         
         response = requests.post(sell_url, headers=headers, json=order_data, timeout=10)
         
+        # 수정한 부분: 응답 수신 직후 상세 로그
+        logger.info(f"📥 [매도 주문 응답] 수신 | 상태코드: {response.status_code}")
+        
         if response.status_code == 200:
-            result = response.json()
+            try:
+                result = response.json()
+            except json.JSONDecodeError:
+                logger.error(f"❌ 매도 주문 응답 파싱 실패: {response.text}")
+                return False
+
             rt_cd = result.get("rt_cd", "")
             
             if rt_cd == "0":
                 order_no = result.get("output", {}).get("ODNO", "")
-                
-                logger.info(f"✅ 매도 주문 접수: {ticker} (주문번호: {order_no})")
-                
+                logger.info(f"✅ 매도 주문 접수 성공: {ticker} (주문번호: {order_no})")
+    
+                # 텔레그램 알림
                 if telegram_bot:
-                    message = f"""📝 매도 주문 접수 (체결 감시 중)
+                    try:
+                        buy_price = execution_data['price']
+                        target_profit_rate = config.get('order_settings', {}).get('target_profit_rate', 6.0)
+                        profit_margin = target_profit_rate / 100
+                        sell_price = buy_price * (1 + profit_margin)
+            
+                        message = f"""📝 매도 주문 접수 (체결 감시 중)
 
-📊 종목: {ticker}
-📈 수량: {execution_data['quantity']}주
-💰 주문가: ${sell_price}
-🎯 목표 수익률: +{target_profit_rate}%
-📝 주문번호: {order_no}
+                📊 종목: {ticker}
+                📈 수량: {execution_data['quantity']}주
+                💰 주문가: ${sell_price}
+                🎯 목표 수익률: +{target_profit_rate}%
+                📝 주문번호: {order_no}
 
-⏳ 체결 확인 중... (최대 30분)"""
-                    telegram_bot.send_message(message)
-                
+                ⏳ 체결 확인 중... (최대 30분)"""
+                        telegram_bot.send_message(message)
+                    except Exception as e:
+                        logger.error(f"⚠️ 텔레그램 알림 실패: {e}")
+    
                 return {
                     'success': True,
                     'order_no': order_no,
@@ -544,9 +649,19 @@ def place_sell_order(config, token_manager, execution_data, telegram_bot=None):
                     'quantity': execution_data['quantity'],
                     'price': sell_price
                 }
+
             else:
+                # 수정한 부분: 매도 실패 시 상세 사유 출력
                 msg1 = result.get("msg1", "알 수 없는 오류")
-                logger.error(f"❌ 매도 주문 실패: {msg1} (rt_cd={rt_cd})")
+                msg2 = result.get("msg2", "")
+                logger.error(f"""
+    ❌ [매도 주문 실패] 증권사 메시지
+    ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    코드: {rt_cd}
+    사유1: {msg1}
+    사유2: {msg2}
+    ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+                """)
                 
                 if "가능수량" in msg1 or "주문수량" in msg1:
                     logger.warning(f"⚠️ 이미 매도된 주식으로 판단, 재시도 없이 무시")
@@ -662,7 +777,7 @@ def get_current_price(config, token_manager, ticker):
         traceback.print_exc()
         return None
 
-
+@log_api_call('가용 자금 조회', 'TTTS3007R')
 def get_available_funds(config, token_manager):
     """
     가용 매수 금액 조회
@@ -700,20 +815,31 @@ def get_available_funds(config, token_manager):
             "CTX_AREA_NK200": ""
         }
         
-        logger.debug("💰 가용 자금 조회 중...")
+        logger.info("💰 [가용 자금 조회] 요청 전송 중...")
         
         response = requests.get(url, headers=headers, params=params, timeout=15)
         
-        if response.status_code != 200:
-            logger.error(f"❌ 잔고 조회 HTTP 오류: {response.status_code}")
-            return 0.0
+        # 수정한 부분: 응답 상세 확인
+        logger.info(f"📥 [가용 자금 조회] 응답 수신 | 상태코드: {response.status_code}")
         
-        data = response.json()
+        if response.status_code != 200:
+            logger.error(f"❌ 잔고 조회 HTTP 오류: {response.status_code} | 응답: {response.text}")
+            return 0.0
+        logger.debug(f"✅ HTTP 상태 정상: 200")
+        
+        try:
+            data = response.json()
+        except json.JSONDecodeError as e:
+            logger.error(f"❌ 잔고 조회 JSON 파싱 실패: {response.text[:200]}")
+            return 0.0
+        if not isinstance(data, dict):
+            logger.error(f"❌ 응답이 딕셔너리가 아님: {type(data)}") 
+            return 0.0
         
         rt_cd = data.get("rt_cd", "")
         if rt_cd != "0":
             msg1 = data.get("msg1", "알 수 없는 오류")
-            logger.warning(f"⚠️ 잔고 조회 실패: {msg1} (rt_cd={rt_cd})")
+            logger.warning(f"⚠️ [잔고 조회 에러] 메시지: {msg1} (코드: {rt_cd})")
             return 0.0
         
         output1 = data.get("output1", {})
@@ -741,7 +867,7 @@ def get_available_funds(config, token_manager):
         traceback.print_exc()
         return 0.0
 
-
+@log_api_call('매수 주문', 'TTTT1002U')
 def place_buy_order(config, token_manager, ticker, quantity, price):
     """
     매수 주문 실행
@@ -802,10 +928,20 @@ def place_buy_order(config, token_manager, ticker, quantity, price):
         
         buy_url = f"{config['api']['base_url']}/uapi/overseas-stock/v1/trading/order"
         
-        logger.info(f"📤 매수 주문 전송 중: {ticker} {quantity}주 @ ${price:.2f}")
+        logger.info(f"""
+    📤 [매수 주문 전송] 호출 준비
+    ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    종목: {ticker}
+    수량: {quantity}주
+    가격: ${price:.2f}
+    거래소: {exchange_code}
+    ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+        """)
         
         response = requests.post(buy_url, headers=headers, json=order_data, timeout=10)
         
+        logger.info(f"📥 [매수 주문 응답] 수신 | 상태코드: {response.status_code}")
+
         if response.status_code == 200:
             result = response.json()
             rt_cd = result.get("rt_cd", "")
@@ -1217,7 +1353,8 @@ class OrderExecutor:
                 'success': False,
                 'reason': str(e)
             }
-    
+        
+    @log_api_call('Executor 가용 자금 조회', 'TTTS3012R')
     def get_available_cash(self) -> float:
         """
         가용 현금 조회
@@ -1252,14 +1389,21 @@ class OrderExecutor:
             }
             
             response = requests.get(url, headers=headers, params=params, timeout=self.timeout)
-            data = response.json()
+            logger.info(f"📥 [Executor 자금조회] 수신 | 상태코드: {response.status_code}")
+            
+            try:
+                data = response.json()
+            except json.JSONDecodeError:
+                logger.error(f"❌ 자금조회 파싱 실패: {response.text}")
+                return 0.0
             
             if data.get('rt_cd') == '0':
                 cash = float(data.get('output3', {}).get('frcr_dncl_amt_2', '0'))
-                logger.debug(f"💵 가용 현금: ${cash:.2f}")
+                logger.info(f"✅ 사용 가능 자금 확인: ${cash:.2f}") # debug를 info로 변경해 출력 보장
                 return cash
             else:
-                logger.error(f"❌ 잔고 조회 실패: {data.get('msg1')}")
+                # 수정한 부분: 실패 원인 상세 로깅
+                logger.error(f"❌ 자금 조회 실패: {data.get('msg1')} (코드: {data.get('rt_cd')})")
                 return 0.0
         
         except Exception as e:
@@ -1593,7 +1737,7 @@ class OrderExecutor:
                 f"  손실: {loss_pct:.2f}%"
             )
             
-            result = self.place_sell_order(order, reason='stop_loss')
+            result = self.execute_sell(order, reason='stop_loss')
             
             if result['success']:
                 if self.auto_trader:
@@ -1614,7 +1758,7 @@ class OrderExecutor:
                 f"  수익: {profit_pct:.2f}%"
             )
             
-            result = self.place_sell_order(order, reason='take_profit')
+            result = self.execute_sell(order, reason='take_profit')
             
             if result['success']:
                 if self.auto_trader:
@@ -1626,7 +1770,8 @@ class OrderExecutor:
         
         return False
     
-    def place_sell_order(self, order: Dict[str, Any], reason: str = 'take_profit') -> Dict[str, Any]:
+    @log_api_call('자동 청산 매도', 'JTTT1006U')
+    def execute_sell(self, order: Dict[str, Any], reason: str = 'take_profit') -> Dict[str, Any]:
         """
         매도 주문 실행
         
@@ -1640,7 +1785,16 @@ class OrderExecutor:
         try:
             ticker = order['ticker']
             quantity = order['quantity']
-            
+
+            logger.info(f"""
+    📤 [자동 매도 실행] 호출 준비 ({reason})
+    ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    종목: {ticker}
+    수량: {quantity}주
+    사유: {'🛑 손절' if reason == 'stop_loss' else '🎯 익절'}
+    ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+            """)
+
             url = f"{self.base_url}/uapi/overseas-stock/v1/trading/order"
             
             token = self.token_manager.get_access_token()
@@ -1667,6 +1821,7 @@ class OrderExecutor:
             }
             
             response = requests.post(url, headers=headers, json=body, timeout=self.timeout)
+            logger.info(f"📥 [자동 매도 응답] 수신 | 상태코드: {response.status_code}")
             data = response.json()
             
             if data.get('rt_cd') == '0':
