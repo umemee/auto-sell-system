@@ -353,30 +353,42 @@ class AutoTrader:
         """
         logger.info("👁️ 50MA 감시 시작")
         
+        # ✅ 추가됨: 루프 횟수 카운터 (생존 신고용)
+        loop_count = 0
+        
         while self.is_running:
             try:
+                # ✅ 추가됨: 루프 시작 시점 시간 측정 (성능 감시용)
+                loop_start_time = time.time()
+                loop_count += 1
+                
                 from datetime import datetime
                 from pytz import timezone
             
                 now_et = datetime.now(timezone('US/Eastern'))
                 
-                # ✅ 날짜 기반 운영 시간 계산
+                # 날짜 기반 운영 시간 계산
                 today_start = now_et.replace(hour=4, minute=0, second=0, microsecond=0)
                 today_end = now_et.replace(hour=12, minute=0, second=0, microsecond=0)
                 
                 # ET 04:00 ~ 12:00 외에는 슬립 모드
                 if not (today_start <= now_et < today_end):
                     if now_et >= today_end:
-                        logger.info(f"⏰ ET 12:00 이후 (현재 {now_et.strftime('%H:%M')}), 시스템 중지")
+                        # ✅ 수정됨: 로그 레벨을 info -> debug로 변경 (너무 시끄러움 방지)
+                        if loop_count % 30 == 0: # 2분마다 한 번씩만 출력
+                            logger.debug(f"💤 시스템 종료 대기 중 (ET 12:00 이후, 현재 {now_et.strftime('%H:%M')})")
                     else:
-                        logger.info(f"⏰ ET 04:00 이전 (현재 {now_et.strftime('%H:%M')}), 슬립 모드")
+                        if loop_count % 30 == 0:
+                            logger.debug(f"💤 개장 대기 중 (ET 04:00 이전, 현재 {now_et.strftime('%H:%M')})")
                     
-                    # ⚡ 수정: 슬립 중 타이머 리셋
                     self.last_ranking_update = None
-
-                    # 즉시 루프 탈출 (랭킹 업데이트 하지 않음)
                     time.sleep(60)
-                    continue  # 다음 반복으로 바로 이동
+                    continue
+
+                # ✅ 추가됨: 100회(약 6~7분)마다 생존 신고 및 상태 요약 로그 출력
+                if loop_count % 100 == 0:
+                    watch_str = ", ".join(self.watch_list) if self.watch_list else "없음"
+                    logger.info(f"👁️ [감시 중] 루프 #{loop_count} | 감시 목록({len(self.watch_list)}): {watch_str}")
 
                 # 1. 랭킹 업데이트 체크
                 if self._should_update_ranking():
@@ -401,22 +413,27 @@ class AutoTrader:
                         if has_position:
                             # 이미 보유 중 → 영구 제외
                             self.touched_but_skipped.add(ticker)
-                            logger.info(f"🔒 {ticker} 터치했지만 보유 중")
+                            logger.info(f"🔒 {ticker} 터치했지만 보유 중 (추가 매수 금지)") # ✅ 메시지 명확화
                             
                             self.telegram_bot.send_message(
-                                f"🎯 {ticker} 50선 터치\n"
-                                f"하지만 포지션 보유 중으로 매수 불가"
+                                f"🎯 {ticker} 50선 터치 감지!\n"
+                                f"✋ 하지만 현재 포지션 보유 중이라 매수하지 않습니다.\n"
+                                f"🚫 해당 종목은 금일 재진입 금지 목록에 추가됩니다."
                             )
                         else:
                             # 매수 시도 (선입선출 - 첫 번째만)
+                            logger.info(f"⚡ {ticker} 매수 조건 충족! 매수 시도합니다.") # ✅ 매수 의도 로그 추가
                             self._execute_buy(ticker)
                             break  # 1개만 매수
                 
-                # 4초 대기
+                # 4초 대기 (실제 처리 시간 고려하여 보정 가능하지만 여기선 단순 sleep)
                 time.sleep(self.MONITORING_INTERVAL)
             
             except Exception as e:
-                logger.error(f"❌ 감시 루프 오류: {e}")
+                # ✅ 수정됨: 에러 발생 시 더 자세한 정보 출력
+                logger.error(f"❌ 감시 루프 내부 오류 발생: {str(e)}")
+                import traceback
+                logger.error(traceback.format_exc()) # 스택 트레이스 출력
                 time.sleep(10)
     
     def _should_update_ranking(self) -> bool:
@@ -466,9 +483,12 @@ class AutoTrader:
                 return False
             
             # 조건 3: 현재가 > 현재 캔들 (반등) - ⚠️ 비활성화
-            # 터치 시 즉시 매수, 하락 시 -2% 손절로 관리
-            # if current_price <= current_candle['close']:
-            #     return False
+            # 조건 체크 과정을 상세히 남김 (나중에 "왜 안 샀어?" 할 때 확인용)
+            logger.debug(
+                f"🔍 {ticker} 조건 체크: "
+                f"이전(${prev_candle['close']:.2f}) > 50MA(${ma50:.2f})? {'O' if prev_candle['close'] > ma50 else 'X'} | "
+                f"현재(${current_candle['close']:.2f}) 50MA 터치? {'O' if diff_pct <= self.TOUCH_THRESHOLD else 'X'} ({diff_pct*100:.2f}%)"
+            )
             
             # 조건 4: 거래량 > 평균 × 1.2
             recent_volumes = [c['volume'] for c in candles[-20:]]
