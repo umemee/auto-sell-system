@@ -1238,7 +1238,7 @@ class OrderExecutor:
                 'authorization': f'Bearer {token}',
                 'appkey': self.config['api_key'],
                 'appsecret': self.config['api_secret'],
-                'tr_id': 'CTRP6548R',
+                'tr_id': 'TTTS3012R',
                 'custtype': 'P'
             }
             
@@ -1248,9 +1248,7 @@ class OrderExecutor:
                 'OVRS_EXCG_CD': 'NASD',
                 'TR_CRCY_CD': 'USD',
                 'CTX_AREA_FK200': '',
-                'CTX_AREA_NK200': '',
-                'INQR_DVSN': '00',
-                'INQR_DVSN_1': '00'  
+                'CTX_AREA_NK200': ''
             }
             
             response = requests.get(url, headers=headers, params=params, timeout=self.timeout)
