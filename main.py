@@ -387,6 +387,11 @@ def main():
             # 5-4. OrderExecutor에 AutoTrader 참조 주입 (콜백용)
             order_executor.auto_trader = auto_trader
             logging.info("✅ OrderExecutor <-> AutoTrader 연결 완료")
+
+            # ✨ [Phase 3] TelegramBot에 AutoTrader 주입 (수동 티커 추가 기능 활성화)
+            if telegram_bot:
+                telegram_bot.auto_trader = auto_trader
+                logging.info("✅ TelegramBot <-> AutoTrader 연결 완료 (수동 티커 추가 활성화)")
         
         # 6. 텔레그램 봇 시작 (OrderManager 주입)
         if telegram_bot:

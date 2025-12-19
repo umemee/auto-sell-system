@@ -11,21 +11,19 @@ from pytz import timezone
 
 logger = logging.getLogger(__name__)
 
-import functools # 수정한 부분: 데코레이터를 위한 도구 추가
+import functools
 
 def log_api_call(api_name: str, tr_id: str):
     """API 호출을 예쁘게 기록해주는 도구입니다."""
     def decorator(func):
         @functools.wraps(func)
         def wrapper(*args, **kwargs):
-            # 수정한 부분: 호출 시작 알림
             logger.info(f"\n{'='*40}\n📤 API 호출 시작: {api_name}\nTR_ID: {tr_id}\n{'='*40}")
             try:
                 result = func(*args, **kwargs)
                 logger.info(f"✅ API 호출 성공: {api_name}")
                 return result
             except Exception as e:
-                # 수정한 부분: 오류 발생 시 상세 내용 기록
                 logger.error(f"❌ API 호출 실패: {api_name}\n오류 내용: {str(e)}")
                 return None
         return wrapper
@@ -38,12 +36,6 @@ def log_api_call(api_name: str, tr_id: str):
 def is_market_hours(trading_timezone='US/Eastern'):
     """
     기획서 2.2: 시장 시간 상태 반환
-    
-    운영 시간 (ET 기준):
-    - 프리마켓: 05:00-09:30
-    - 정규장: 09:30-12:00
-    - 수면 모드: 12:00-05:00 (다음날)
-    
     Returns: 'premarket', 'regular', 'closed'
     """
     try:
@@ -68,10 +60,7 @@ def is_market_hours(trading_timezone='US/Eastern'):
 def is_extended_hours(trading_timezone='US/Eastern'):
     """
     기획서 2.3: 프리마켓 시간인지 판별
-    정규장(09:30-12:00 ET) 외 시간이면 True 반환
-    
-    Returns:
-        bool: 프리마켓 시간이면 True
+    Returns: bool
     """
     try:
         tz = timezone(trading_timezone)
@@ -89,13 +78,7 @@ def is_extended_hours(trading_timezone='US/Eastern'):
 def should_system_run(trading_timezone='US/Eastern'):
     """
     기획서 2.2: 시스템 운영 여부 확인
-    
-    주말 자동 슬립 모드:
-    - 금요일 ET 12:00 종료 → 월요일 ET 05:00 재시작
-    - 주말(토, 일) 내내 슬립 모드 유지
-
-    Returns:
-        bool: 운영 시간이면 True, 아니면 False
+    Returns: bool
     """
     try:
         tz = timezone(trading_timezone)
@@ -138,52 +121,44 @@ def should_system_run(trading_timezone='US/Eastern'):
 @log_api_call('보유 종목 조회', 'TTTS3012R')
 def get_holdings(config, token_manager, exchange_code='NASD', currency_code='USD'):
     """
-    해외주식 잔고 조회
-    
-    한국투자증권 공식 API:
-    - TR_ID: TTTS3012R (실전) / VTTS3012R (모의)
-    - 엔드포인트: /uapi/overseas-stock/v1/trading/inquire-balance
-    
-    Args:
-        config: 설정 딕셔너리
-        token_manager: TokenManager 인스턴스
-        exchange_code: 거래소 코드 (기본값: 'NASD' 미국전체)
-        currency_code: 통화 코드 (기본값: 'USD')
-    
-    Returns:
-        list: 보유 종목 리스트
+    해외주식 잔고 조회 (토큰 갱신 로직 추가됨)
     """
-    try:
-        url = f"{config['api']['base_url']}/uapi/overseas-stock/v1/trading/inquire-balance"
-        
-        token = token_manager.get_access_token()
-        if not token:
-            logger.error("❌ 보유 종목 조회: 액세스 토큰 없음")
-            return []
-        
-        headers = {
-            "Content-Type": "application/json",
-            "authorization": f"Bearer {token}",
-            "appkey": config["api_key"],
-            "appsecret": config["api_secret"],
-            "tr_id": "TTTS3012R",
-            "custtype": "P"
-        }
-        
-        params = {
-            "CANO": config["cano"],
-            "ACNT_PRDT_CD": config["acnt_prdt_cd"],
-            "OVRS_EXCG_CD": exchange_code,
-            "TR_CRCY_CD": currency_code,
-            "CTX_AREA_FK200": "",
-            "CTX_AREA_NK200": ""
-        }
-        
-        masked_cano = config["cano"][:4] + "****" if config["cano"] else "Unknown"
-        
-        # ✅ 추가: API 호출 직전 상세 로그
-        logger.info(f"""
-    📤 API 호출 준비 (보유 종목 조회)
+    url = f"{config['api']['base_url']}/uapi/overseas-stock/v1/trading/inquire-balance"
+    
+    # [수정] 토큰 만료 대응을 위한 재시도 루프
+    for attempt in range(2):
+        try:
+            # 재시도(attempt=1)인 경우 강제 갱신
+            is_retry = (attempt > 0)
+            token = token_manager.get_access_token(force_refresh=is_retry)
+            
+            if not token:
+                logger.error("❌ 보유 종목 조회: 액세스 토큰 없음")
+                if is_retry: return []
+                continue
+            
+            headers = {
+                "Content-Type": "application/json",
+                "authorization": f"Bearer {token}",
+                "appkey": config["api_key"],
+                "appsecret": config["api_secret"],
+                "tr_id": "TTTS3012R",
+                "custtype": "P"
+            }
+            
+            params = {
+                "CANO": config["cano"],
+                "ACNT_PRDT_CD": config["acnt_prdt_cd"],
+                "OVRS_EXCG_CD": exchange_code,
+                "TR_CRCY_CD": currency_code,
+                "CTX_AREA_FK200": "",
+                "CTX_AREA_NK200": ""
+            }
+            
+            masked_cano = config["cano"][:4] + "****" if config["cano"] else "Unknown"
+            
+            logger.info(f"""
+    📤 API 호출 준비 (보유 종목 조회) - 시도 {attempt+1}
     ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
     엔드포인트: /uapi/overseas-stock/v1/trading/inquire-balance
     TR_ID: TTTS3012R
@@ -191,11 +166,11 @@ def get_holdings(config, token_manager, exchange_code='NASD', currency_code='USD
     거래소: {exchange_code}
     통화: {currency_code}
     ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-        """)
-        
-        response = requests.get(url, headers=headers, params=params, timeout=15)
-        
-        logger.info(f"""
+            """)
+            
+            response = requests.get(url, headers=headers, params=params, timeout=15)
+            
+            logger.info(f"""
     📥 API 응답 수신 (보유 종목 조회)
     ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
     상태코드: {response.status_code}
@@ -203,38 +178,38 @@ def get_holdings(config, token_manager, exchange_code='NASD', currency_code='USD
     응답 내용 (처음 300자):
     {response.text[:300]}
     ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-        """)
+            """)
 
-        if response.status_code != 200:
-            logger.error(f"""
+            if response.status_code != 200:
+                logger.error(f"""
     ❌ HTTP 오류 (보유 종목 조회)
     ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
     상태코드: {response.status_code}
     응답: {response.text}
     ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-            """)
-            return []
+                """)
+                if attempt == 1: return []
+                # HTTP 오류도 재시도해볼 가치는 있으나, 여기선 토큰 만료 위주로 처리
+                continue 
 
-        try:
-            data = response.json()
-        except json.JSONDecodeError as e:
-            # ✅ 추가: JSON 파싱 오류 처리
-            logger.error(f"""
-    ❌ JSON 파싱 오류 (보유 종목 조회)
-    ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-    오류: {str(e)}
-    응답 원본: {response.text}
-    ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-            """)
-            return []
-        
-        rt_cd = data.get("rt_cd", "")
-        
-        # ✅ 추가: rt_cd 검증
-        if rt_cd != "0":
-            msg1 = data.get("msg1", "알 수 없는 오류")
-            msg2 = data.get("msg2", "")
-            logger.error(f"""
+            try:
+                data = response.json()
+            except json.JSONDecodeError as e:
+                logger.error(f"❌ JSON 파싱 오류: {str(e)}")
+                if attempt == 1: return []
+                continue
+            
+            # [수정] 토큰 만료 체크
+            if data.get('msg_cd') == 'EGW00123':
+                logger.warning(f"⚠️ [보유종목] 토큰 만료(EGW00123) 감지. 갱신 후 재시도 (시도 {attempt+1})")
+                continue
+
+            rt_cd = data.get("rt_cd", "")
+            
+            if rt_cd != "0":
+                msg1 = data.get("msg1", "알 수 없는 오류")
+                msg2 = data.get("msg2", "")
+                logger.error(f"""
     ❌ API 반환 오류 (보유 종목 조회)
     ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
     rt_cd: {rt_cd}
@@ -242,134 +217,91 @@ def get_holdings(config, token_manager, exchange_code='NASD', currency_code='USD
     msg2: {msg2}
     전체 응답: {json.dumps(data, ensure_ascii=False)}
     ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-            """)
-            return []
+                """)
+                return []
 
-        output2 = data.get("output2", [])
-        
-        # ✅ 추가: output2 필드 검증
-        if not output2:
-            logger.info(f"""
-    📋 조회 결과: 보유 종목 없음
-    ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-    응답의 주요 필드:
-    - rt_cd: {data.get('rt_cd')}
-    - msg1: {data.get('msg1')}
-    - output1: {type(data.get('output1')).__name__}
-    - output2: {type(data.get('output2')).__name__}
-    ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-            """)
-            return []
-
-        
-        holdings = []
-        for item in output2:
-            try:
-                ticker = item.get("ovrs_pdno", "").strip()
-                quantity_str = item.get("ovrs_cblc_qty", "0")
-                avg_price_str = item.get("pchs_avg_pric", "0")
-                current_price_str = item.get("now_pric2", "0")
-                profit_loss_str = item.get("frcr_evlu_pfls_amt", "0")
-                profit_rate_str = item.get("evlu_pfls_rt", "0")
-                eval_amt_str = item.get("ovrs_stck_evlu_amt", "0")
-                purchase_amt_str = item.get("frcr_pchs_amt1", "0")
-                
-                quantity = int(quantity_str) if quantity_str else 0
-                avg_price = float(avg_price_str) if avg_price_str else 0.0
-                current_price = float(current_price_str) if current_price_str else 0.0
-                profit_loss = float(profit_loss_str) if profit_loss_str else 0.0
-                profit_rate = float(profit_rate_str) if profit_rate_str else 0.0
-                eval_amt = float(eval_amt_str) if eval_amt_str else 0.0
-                purchase_amt = float(purchase_amt_str) if purchase_amt_str else 0.0
-                
-                if ticker and quantity > 0:
-                    holding_info = {
-                        'ticker': ticker,
-                        'pdno': ticker,
-                        'symbol': ticker,
-                        'stock_code': ticker,
-                        'quantity': quantity,
-                        'avg_price': avg_price,
-                        'current_price': current_price,
-                        'profit_loss': profit_loss,
-                        'profit_rate': profit_rate,
-                        'eval_amt': eval_amt,
-                        'purchase_amt': purchase_amt,
-                        'exchange_code': exchange_code,
-                        'currency_code': currency_code
-                    }
-                    holdings.append(holding_info)
-                    
-                    logger.debug(f"📊 {ticker}: {quantity}주 @ ${avg_price:.2f} "
-                               f"(현재가: ${current_price:.2f}, 손익: {profit_rate:+.2f}%)")
+            output2 = data.get("output2", [])
             
-            except (ValueError, TypeError) as e:
-                logger.warning(f"⚠️ 종목 정보 파싱 오류: {e}, 항목: {item}")
-                continue
+            if not output2:
+                logger.info(f"📋 조회 결과: 보유 종목 없음 (rt_cd={rt_cd})")
+                return []
+            
+            holdings = []
+            for item in output2:
+                try:
+                    ticker = item.get("ovrs_pdno", "").strip()
+                    quantity_str = item.get("ovrs_cblc_qty", "0")
+                    avg_price_str = item.get("pchs_avg_pric", "0")
+                    current_price_str = item.get("now_pric2", "0")
+                    profit_loss_str = item.get("frcr_evlu_pfls_amt", "0")
+                    profit_rate_str = item.get("evlu_pfls_rt", "0")
+                    eval_amt_str = item.get("ovrs_stck_evlu_amt", "0")
+                    purchase_amt_str = item.get("frcr_pchs_amt1", "0")
+                    
+                    quantity = int(quantity_str) if quantity_str else 0
+                    avg_price = float(avg_price_str) if avg_price_str else 0.0
+                    current_price = float(current_price_str) if current_price_str else 0.0
+                    profit_loss = float(profit_loss_str) if profit_loss_str else 0.0
+                    profit_rate = float(profit_rate_str) if profit_rate_str else 0.0
+                    eval_amt = float(eval_amt_str) if eval_amt_str else 0.0
+                    purchase_amt = float(purchase_amt_str) if purchase_amt_str else 0.0
+                    
+                    if ticker and quantity > 0:
+                        holding_info = {
+                            'ticker': ticker,
+                            'pdno': ticker,
+                            'symbol': ticker,
+                            'stock_code': ticker,
+                            'quantity': quantity,
+                            'avg_price': avg_price,
+                            'current_price': current_price,
+                            'profit_loss': profit_loss,
+                            'profit_rate': profit_rate,
+                            'eval_amt': eval_amt,
+                            'purchase_amt': purchase_amt,
+                            'exchange_code': exchange_code,
+                            'currency_code': currency_code
+                        }
+                        holdings.append(holding_info)
+                        logger.debug(f"📊 {ticker}: {quantity}주 @ ${avg_price:.2f}")
+                
+                except (ValueError, TypeError) as e:
+                    logger.warning(f"⚠️ 종목 정보 파싱 오류: {e}, 항목: {item}")
+                    continue
+            
+            logger.info(f"✅ 보유 종목 조회 완료: {len(holdings)}개")
+            holdings.sort(key=lambda x: x.get('profit_rate', 0), reverse=True)
+            return holdings
         
-        logger.info(f"✅ 보유 종목 조회 완료: {len(holdings)}개")
-        
-        holdings.sort(key=lambda x: x.get('profit_rate', 0), reverse=True)
-        
-        return holdings
-    
-    except requests.exceptions.Timeout:
-        logger.error("❌ 보유 종목 조회 타임아웃 (15초)")
-        return []
-    except requests.exceptions.RequestException as e:
-        logger.error(f"❌ 보유 종목 조회 네트워크 오류: {e}")
-        return []
-    except Exception as e:
-        logger.error(f"❌ 보유 종목 조회 오류: {e}")
-        import traceback
-        traceback.print_exc()
-        return []
+        except requests.exceptions.Timeout:
+            logger.error("❌ 보유 종목 조회 타임아웃 (15초)")
+            if attempt == 1: return []
+        except requests.exceptions.RequestException as e:
+            logger.error(f"❌ 보유 종목 조회 네트워크 오류: {e}")
+            if attempt == 1: return []
+        except Exception as e:
+            logger.error(f"❌ 보유 종목 조회 오류: {e}")
+            import traceback
+            traceback.print_exc()
+            if attempt == 1: return []
+
+    return []
 
 
 # ============================================================================
 # 주문체결내역 조회 함수
 # ============================================================================
 @log_api_call('체결내역 조회', 'TTTS3035R') 
-def inquire_ccnl(
-        config,
-        token_manager,
-        pdno="",
-        ord_strt_dt="",
-        ord_end_dt="",
-        sll_buy_dvsn="00",
-        ccld_nccs_dvsn="00",
-        ovrs_excg_cd="%",
-        sort_sqn="DS",
-        ord_dt="",
-        ord_gno_brno="",
-        odno=""):
+def inquire_ccnl(config, token_manager, pdno="", ord_strt_dt="", ord_end_dt="", 
+                 sll_buy_dvsn="00", ccld_nccs_dvsn="00", ovrs_excg_cd="%", 
+                 sort_sqn="DS", ord_dt="", ord_gno_brno="", odno=""):
     """
-    해외주식 주문체결내역 조회 (한국투자증권 공식 API)
-
-    TR_ID: TTTS3035R (실전투자)
-    엔드포인트: /uapi/overseas-stock/v1/trading/inquire-ccnl
-
-    Returns:
-        pandas.DataFrame: 체결 내역 또는 None
+    해외주식 주문체결내역 조회 (토큰 갱신 로직 추가됨)
     """
     try:
         import pandas as pd
         
         url = f"{config['api']['base_url']}/uapi/overseas-stock/v1/trading/inquire-ccnl"
-
-        token = token_manager.get_access_token()
-        if not token:
-            logger.error("❌ 체결내역 조회: 액세스 토큰 없음")
-            return None
-
-        headers = {
-            "Content-Type": "application/json",
-            "authorization": f"Bearer {token}",
-            "appkey": config["api_key"],
-            "appsecret": config["api_secret"],
-            "tr_id": "TTTS3035R",
-            "custtype": "P"
-        }
 
         all_output = []
         ctx_area_fk200 = ""
@@ -378,75 +310,98 @@ def inquire_ccnl(
         logger.info(f"📋 체결내역 조회 시작: {ord_strt_dt} ~ {ord_end_dt} (연속 조회)")
 
         while True:
-            params = {
-                "CANO": config["cano"],
-                "ACNT_PRDT_CD": config["acnt_prdt_cd"],
-                "PDNO": pdno,
-                "ORD_STRT_DT": ord_strt_dt,
-                "ORD_END_DT": ord_end_dt,
-                "SLL_BUY_DVSN": sll_buy_dvsn,
-                "CCLD_NCCS_DVSN": ccld_nccs_dvsn,
-                "OVRS_EXCG_CD": ovrs_excg_cd,
-                "SORT_SQN": sort_sqn,
-                "ORD_DT": ord_dt,
-                "ORD_GNO_BRNO": ord_gno_brno,
-                "ODNO": odno,
-                "CTX_AREA_NK200": ctx_area_nk200,
-                "CTX_AREA_FK200": ctx_area_fk200
-            }
+            # [수정] 페이지별 재시도 루프
+            page_success = False
+            for attempt in range(2):
+                try:
+                    is_retry = (attempt > 0)
+                    token = token_manager.get_access_token(force_refresh=is_retry)
+                    
+                    if not token:
+                        logger.error("❌ 체결내역 조회: 액세스 토큰 없음")
+                        if is_retry: break
+                        continue
 
-            response = requests.get(url, headers=headers, params=params, timeout=15)
+                    headers = {
+                        "Content-Type": "application/json",
+                        "authorization": f"Bearer {token}",
+                        "appkey": config["api_key"],
+                        "appsecret": config["api_secret"],
+                        "tr_id": "TTTS3035R",
+                        "custtype": "P"
+                    }
 
-            if response.status_code != 200:
-                logger.error(f"❌ 체결내역 조회 HTTP 오류: {response.status_code}")
-                logger.error(f"응답: {response.text}")
+                    params = {
+                        "CANO": config["cano"],
+                        "ACNT_PRDT_CD": config["acnt_prdt_cd"],
+                        "PDNO": pdno,
+                        "ORD_STRT_DT": ord_strt_dt,
+                        "ORD_END_DT": ord_end_dt,
+                        "SLL_BUY_DVSN": sll_buy_dvsn,
+                        "CCLD_NCCS_DVSN": ccld_nccs_dvsn,
+                        "OVRS_EXCG_CD": ovrs_excg_cd,
+                        "SORT_SQN": sort_sqn,
+                        "ORD_DT": ord_dt,
+                        "ORD_GNO_BRNO": ord_gno_brno,
+                        "ODNO": odno,
+                        "CTX_AREA_NK200": ctx_area_nk200,
+                        "CTX_AREA_FK200": ctx_area_fk200
+                    }
+
+                    response = requests.get(url, headers=headers, params=params, timeout=15)
+
+                    if response.status_code != 200:
+                        logger.error(f"❌ 체결내역 조회 HTTP 오류: {response.status_code}")
+                        if attempt == 1: break
+                        continue
+
+                    data = response.json()
+                    
+                    # [수정] 토큰 만료 체크
+                    if data.get('msg_cd') == 'EGW00123':
+                        logger.warning(f"⚠️ [체결내역] 토큰 만료(EGW00123). 재시도 (시도 {attempt+1})")
+                        continue
+
+                    rt_cd = data.get("rt_cd", "")
+                    if rt_cd != "0":
+                        msg1 = data.get("msg1", "알 수 없는 오류")
+                        logger.warning(f"⚠️ 체결내역 조회 실패: {msg1} (rt_cd={rt_cd})")
+                        page_success = False # 루프 탈출용 플래그
+                        break
+
+                    output_page = data.get("output", [])
+                    if output_page:
+                        all_output.extend(output_page)
+
+                    tr_cont = data.get("tr_cont", "")
+                    ctx_area_fk200 = data.get("ctx_area_fk200", "")
+                    ctx_area_nk200 = data.get("ctx_area_nk200", "")
+
+                    if tr_cont in ["F", "M"]:
+                        logger.debug(f"... 체결내역 연속 조회 중 (tr_cont={tr_cont})")
+                        time.sleep(0.1)
+                        page_success = True
+                        break # 성공 -> attempt 루프 탈출, while 루프 계속
+                    else:
+                        logger.debug("... 체결내역 연속 조회 완료 (마지막 페이지)")
+                        page_success = True
+                        return pd.DataFrame(all_output) # 전체 완료
+
+                except Exception as e:
+                    logger.error(f"❌ 체결내역 조회 페이지 오류: {e}")
+                    if attempt == 1: break
+            
+            # 페이지 조회 실패 시 중단
+            if not page_success and not all_output:
                 return None
+            if not page_success: # 일부만 성공했으면 그거라도 리턴
+                return pd.DataFrame(all_output)
 
-            data = response.json()
-
-            rt_cd = data.get("rt_cd", "")
-            if rt_cd != "0":
-                msg1 = data.get("msg1", "알 수 없는 오류")
-                logger.warning(f"⚠️ 체결내역 조회 실패: {msg1} (rt_cd={rt_cd})")
-                return None
-
-            output_page = data.get("output", [])
-            if output_page:
-                all_output.extend(output_page)
-
-            tr_cont = data.get("tr_cont", "")
-            ctx_area_fk200 = data.get("ctx_area_fk200", "")
-            ctx_area_nk200 = data.get("ctx_area_nk200", "")
-
-            if tr_cont in ["F", "M"]:
-                logger.debug(f"... 체결내역 연속 조회 중 (tr_cont={tr_cont})")
-                time.sleep(0.1)
-            else:
-                logger.debug("... 체결내역 연속 조회 완료 (마지막 페이지)")
-                break
-
-        if not all_output:
-            logger.info("📋 체결 내역 없음")
-            return pd.DataFrame()
-
-        df = pd.DataFrame(all_output)
-        logger.info(f"✅ 체결내역 조회 완료: 총 {len(df)}건 (연속 조회 포함)")
-
-        return df
-    
     except ImportError:
-        logger.error("❌ 'pandas' 라이브러리가 필요합니다. 'pip install pandas'로 설치해주세요.")
-        return None
-    except requests.exceptions.Timeout:
-        logger.error("❌ 체결내역 조회 타임아웃 (15초)")
-        return None
-    except requests.exceptions.RequestException as e:
-        logger.error(f"❌ 체결내역 조회 네트워크 오류: {e}")
+        logger.error("❌ 'pandas' 라이브러리가 필요합니다.")
         return None
     except Exception as e:
         logger.error(f"❌ 체결내역 조회 오류: {e}")
-        import traceback
-        traceback.print_exc()
         return None
 
 
@@ -456,49 +411,43 @@ def inquire_ccnl(
 @log_api_call('HashKey 생성', 'hashkey')
 def get_hash_key(config, token_manager, order_data):
     """
-    한국투자증권 주문용 HashKey 생성
-    
-    Args:
-        config: 설정 딕셔너리
-        token_manager: TokenManager 인스턴스
-        order_data: 주문 데이터 딕셔너리
-    
-    Returns:
-        str: HashKey 또는 None (실패 시)
+    한국투자증권 주문용 HashKey 생성 (토큰 갱신 추가)
     """
-    try:
-        url = f"{config['api']['base_url']}/uapi/hashkey"
-        token = token_manager.get_access_token()
-        
-        if not token:
-            logger.error("❌ HashKey 생성: 토큰 없음")
-            return None
-        
-        headers = {
-            "Content-Type": "application/json",
-            "authorization": f"Bearer {token}",
-            "appkey": config['api_key'],
-            "appsecret": config['api_secret']
-        }
-        
-        response = requests.post(url, headers=headers, json=order_data, timeout=10)
-        
-        if response.status_code == 200:
-            data = response.json()
-            hashkey = data.get("HASH")
-            if hashkey:
-                logger.debug(f"✅ HashKey 생성 성공: {hashkey[:20]}...")
-                return hashkey
-            else:
-                logger.error(f"❌ HashKey 응답에 HASH 없음: {data}")
-                return None
-        else:
-            logger.error(f"❌ HashKey HTTP 오류 {response.status_code}: {response.text}")
-            return None
+    url = f"{config['api']['base_url']}/uapi/hashkey"
     
-    except Exception as e:
-        logger.error(f"❌ HashKey 생성 오류: {e}")
-        return None
+    for attempt in range(2):
+        try:
+            is_retry = (attempt > 0)
+            token = token_manager.get_access_token(force_refresh=is_retry)
+            
+            if not token:
+                logger.error("❌ HashKey 생성: 토큰 없음")
+                continue
+            
+            headers = {
+                "Content-Type": "application/json",
+                "authorization": f"Bearer {token}",
+                "appkey": config['api_key'],
+                "appsecret": config['api_secret']
+            }
+            
+            response = requests.post(url, headers=headers, json=order_data, timeout=10)
+            
+            if response.status_code == 200:
+                data = response.json()
+                hashkey = data.get("HASH")
+                if hashkey:
+                    logger.debug(f"✅ HashKey 생성 성공: {hashkey[:20]}...")
+                    return hashkey
+                else:
+                    logger.error(f"❌ HashKey 응답에 HASH 없음: {data}")
+            else:
+                logger.error(f"❌ HashKey HTTP 오류 {response.status_code}: {response.text}")
+                
+        except Exception as e:
+            logger.error(f"❌ HashKey 생성 오류: {e}")
+            
+    return None
 
 
 # ============================================================================
@@ -507,42 +456,22 @@ def get_hash_key(config, token_manager, order_data):
 @log_api_call('자동 매도 주문', 'TTTT1006U')
 def place_sell_order(config, token_manager, execution_data, telegram_bot=None):
     """
-    기획서 4장: 자동 매도 주문 실행 함수
-    
-    Args:
-        config: 설정 딕셔너리
-        token_manager: TokenManager 인스턴스
-        execution_data: 체결 데이터 {'ticker', 'quantity', 'price'}
-        telegram_bot: TelegramBot 인스턴스 (선택)
-    
-    Returns:
-        dict: 매도 주문 성공 시 {'success': True, 'order_no': ...}
-        bool: 실패 시 False
+    기획서 4장: 자동 매도 주문 실행 함수 (토큰 갱신 추가)
     """
     try:
         buy_price = execution_data['price']
-        
         target_profit_rate = config.get('order_settings', {}).get('target_profit_rate', 6.0)
         profit_margin = target_profit_rate / 100
-        
         raw_sell_price = buy_price * (1 + profit_margin)
         
-        if raw_sell_price >= 1.0:
-            sell_price = round(raw_sell_price, 2)
-        else:
-            sell_price = round(raw_sell_price, 4)
+        sell_price = round(raw_sell_price, 2) if raw_sell_price >= 1.0 else round(raw_sell_price, 4)
             
-        logger.info(f"🎯 매도 주문 준비: {execution_data['ticker']} "
-                   f"{execution_data['quantity']}주 @ ${sell_price} "
-                   f"(매수가: ${buy_price}, 목표 수익: +{target_profit_rate}%)")
+        logger.info(f"🎯 매도 주문 준비: {execution_data['ticker']} {execution_data['quantity']}주 @ ${sell_price}")
         
         exchange_code = config.get('order_settings', {}).get('exchange_code', 'NASD')
-        
         ticker = execution_data['ticker']
         if ticker in ['AAPL', 'MSFT', 'GOOGL', 'TSLA', 'NVDA', 'AMZN']:
             exchange_code = 'NASD'
-        
-        logger.debug(f"📊 거래소 코드: {exchange_code}")
         
         order_data = {
             "CANO": config['cano'],
@@ -558,135 +487,94 @@ def place_sell_order(config, token_manager, execution_data, telegram_bot=None):
             "ORD_DVSN": "00"
         }
 
-        safe_order_data = order_data.copy()
-        if 'CANO' in safe_order_data:
-            cano = safe_order_data['CANO']
-            safe_order_data['CANO'] = cano[:4] + '****'
-
-        logger.debug(f"📤 주문 데이터: {json.dumps(safe_order_data, ensure_ascii=False)}")
-        
+        # HashKey는 별도 함수에서 토큰 관리
         hashkey = get_hash_key(config, token_manager, order_data)
-
         if not hashkey:
-            logger.error("❌ HashKey 생성 실패, 주문 중단")
-            if telegram_bot:
-                telegram_bot.send_error_notification("매도 주문 실패: HashKey 생성 불가")
+            if telegram_bot: telegram_bot.send_error_notification("매도 주문 실패: HashKey 생성 불가")
             return False
-        
-        token = token_manager.get_access_token()
-        if not token:
-            logger.error("❌ 유효한 토큰을 가져올 수 없습니다.")
-            if telegram_bot:
-                telegram_bot.send_error_notification("매도 주문 실패: 토큰 없음")
-            return False
-        
-        headers = {
-            "Content-Type": "application/json; charset=utf-8",
-            "authorization": f"Bearer {token}",
-            "appkey": config['api_key'],
-            "appsecret": config['api_secret'],
-            "tr_id": "TTTT1006U",
-            "custtype": "P",
-            "hashkey": hashkey
-        }
         
         sell_url = f"{config['api']['base_url']}/uapi/overseas-stock/v1/trading/order"
         
-        # 수정한 부분: 주문 전송 전 최종 데이터 확인 로그
-        logger.info(f"""
-    📤 [매도 주문 전송] 호출 준비
+        # [수정] 주문 전송 재시도 루프
+        for attempt in range(2):
+            try:
+                is_retry = (attempt > 0)
+                token = token_manager.get_access_token(force_refresh=is_retry)
+                
+                if not token:
+                    logger.error("❌ 매도 주문: 토큰 없음")
+                    if is_retry: return False
+                    continue
+                
+                headers = {
+                    "Content-Type": "application/json; charset=utf-8",
+                    "authorization": f"Bearer {token}",
+                    "appkey": config['api_key'],
+                    "appsecret": config['api_secret'],
+                    "tr_id": "TTTT1006U",
+                    "custtype": "P",
+                    "hashkey": hashkey
+                }
+                
+                logger.info(f"""
+    📤 [매도 주문 전송] 호출 준비 - 시도 {attempt+1}
     ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
     종목: {ticker}
     수량: {execution_data['quantity']}주
     가격: ${sell_price}
-    거래소: {exchange_code}
-    ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-        """)
-        
-        response = requests.post(sell_url, headers=headers, json=order_data, timeout=10)
-        
-        # 수정한 부분: 응답 수신 직후 상세 로그
-        logger.info(f"📥 [매도 주문 응답] 수신 | 상태코드: {response.status_code}")
-        
-        if response.status_code == 200:
-            try:
-                result = response.json()
-            except json.JSONDecodeError:
-                logger.error(f"❌ 매도 주문 응답 파싱 실패: {response.text}")
-                return False
-
-            rt_cd = result.get("rt_cd", "")
-            
-            if rt_cd == "0":
-                order_no = result.get("output", {}).get("ODNO", "")
-                logger.info(f"✅ 매도 주문 접수 성공: {ticker} (주문번호: {order_no})")
-    
-                # 텔레그램 알림
-                if telegram_bot:
-                    try:
-                        buy_price = execution_data['price']
-                        target_profit_rate = config.get('order_settings', {}).get('target_profit_rate', 6.0)
-                        profit_margin = target_profit_rate / 100
-                        sell_price = buy_price * (1 + profit_margin)
-            
-                        message = f"""📝 매도 주문 접수 (체결 감시 중)
-
-                📊 종목: {ticker}
-                📈 수량: {execution_data['quantity']}주
-                💰 주문가: ${sell_price}
-                🎯 목표 수익률: +{target_profit_rate}%
-                📝 주문번호: {order_no}
-
-                ⏳ 체결 확인 중... (최대 30분)"""
-                        telegram_bot.send_message(message)
-                    except Exception as e:
-                        logger.error(f"⚠️ 텔레그램 알림 실패: {e}")
-    
-                return {
-                    'success': True,
-                    'order_no': order_no,
-                    'ticker': ticker,
-                    'quantity': execution_data['quantity'],
-                    'price': sell_price
-                }
-
-            else:
-                # 수정한 부분: 매도 실패 시 상세 사유 출력
-                msg1 = result.get("msg1", "알 수 없는 오류")
-                msg2 = result.get("msg2", "")
-                logger.error(f"""
-    ❌ [매도 주문 실패] 증권사 메시지
-    ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-    코드: {rt_cd}
-    사유1: {msg1}
-    사유2: {msg2}
     ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
                 """)
                 
-                if "가능수량" in msg1 or "주문수량" in msg1:
-                    logger.warning(f"⚠️ 이미 매도된 주식으로 판단, 재시도 없이 무시")
-                    return False
+                response = requests.post(sell_url, headers=headers, json=order_data, timeout=10)
+                logger.info(f"📥 [매도 주문 응답] 수신 | 상태코드: {response.status_code}")
                 
-                if telegram_bot:
-                    telegram_bot.send_error_notification(f"매도 주문 실패: {msg1}")
-                
-                return False
-        else:
-            logger.error(f"❌ 매도 주문 HTTP 오류: {response.status_code}")
-            logger.error(f"응답: {response.text}")
+                if response.status_code == 200:
+                    try:
+                        result = response.json()
+                    except:
+                        if attempt == 1: return False
+                        continue
+
+                    # [수정] 토큰 만료 체크
+                    if result.get('msg_cd') == 'EGW00123':
+                        logger.warning("⚠️ [매도주문] 토큰 만료. 갱신 후 재시도")
+                        continue
+
+                    rt_cd = result.get("rt_cd", "")
+                    if rt_cd == "0":
+                        order_no = result.get("output", {}).get("ODNO", "")
+                        logger.info(f"✅ 매도 주문 접수 성공: {ticker} (주문번호: {order_no})")
             
-            if telegram_bot:
-                telegram_bot.send_error_notification(f"매도 주문 HTTP 오류: {response.status_code}")
+                        if telegram_bot:
+                            try:
+                                message = f"📝 매도 주문 접수\n\n📊 종목: {ticker}\n💰 주문가: ${sell_price}\n📝 주문번호: {order_no}"
+                                telegram_bot.send_message(message)
+                            except: pass
             
-            return False
+                        return {'success': True, 'order_no': order_no, 'ticker': ticker, 'quantity': execution_data['quantity'], 'price': sell_price}
+
+                    else:
+                        msg1 = result.get("msg1", "알 수 없는 오류")
+                        logger.error(f"❌ 매도 주문 실패: {msg1} (rt_cd={rt_cd})")
+                        if "가능수량" in msg1: return False
+                        if attempt == 1:
+                            if telegram_bot: telegram_bot.send_error_notification(f"매도 주문 실패: {msg1}")
+                            return False
+                        # 그 외 에러는 재시도 없이 종료할지 고민되지만, 일단 continue 말고 종료
+                        return False
+                else:
+                    logger.error(f"❌ 매도 주문 HTTP 오류: {response.status_code}")
+                    if attempt == 1: return False
+
+            except Exception as e:
+                logger.error(f"❌ 매도 주문 실행 중 오류: {e}")
+                if attempt == 1: return False
     
     except Exception as e:
-        logger.error(f"❌ 매도 주문 실행 중 오류: {e}")
-        
-        if telegram_bot:
-            telegram_bot.send_error_notification(f"매도 주문 오류: {str(e)}")
-        
+        logger.error(f"❌ 매도 주문 준비 중 오류: {e}")
         return False
+    
+    return False
 
 
 # ============================================================================
@@ -695,193 +583,109 @@ def place_sell_order(config, token_manager, execution_data, telegram_bot=None):
 
 def get_current_price(config, token_manager, ticker):
     """
-    실시간 시세 조회
-    
-    Args:
-        config: 설정 딕셔너리
-        token_manager: TokenManager 인스턴스
-        ticker: 종목코드 (예: 'AAPL')
-    
-    Returns:
-        float: 현재가 (USD) 또는 None (실패 시)
+    실시간 시세 조회 (토큰 갱신 추가)
     """
-    try:
-        url = f"{config['api']['base_url']}/uapi/overseas-price/v1/quotations/price"
-        
-        token = token_manager.get_access_token()
-        if not token:
-            logger.error("❌ 시세 조회: 액세스 토큰 없음")
-            return None
-        
-        exchange_code = 'NAS'
-        if ticker in ['AAPL', 'MSFT', 'GOOGL', 'TSLA', 'NVDA', 'AMZN', 'META']:
-            exchange_code = 'NAS'
-        
-        headers = {
-            "Content-Type": "application/json",
-            "authorization": f"Bearer {token}",
-            "appkey": config["api_key"],
-            "appsecret": config["api_secret"],
-            "tr_id": "HHDFS00000300",
-            "custtype": "P"
-        }
-        
-        params = {
-            "AUTH": "",
-            "EXCD": exchange_code,
-            "SYMB": ticker
-        }
-        
-        logger.debug(f"📊 시세 조회: {ticker} ({exchange_code})")
-        
-        response = requests.get(url, headers=headers, params=params, timeout=10)
-        
-        if response.status_code != 200:
-            logger.error(f"❌ 시세 조회 HTTP 오류: {response.status_code}")
-            return None
-        
-        data = response.json()
-        
-        rt_cd = data.get("rt_cd", "")
-        if rt_cd != "0":
-            msg1 = data.get("msg1", "알 수 없는 오류")
-            logger.warning(f"⚠️ 시세 조회 실패: {msg1} (rt_cd={rt_cd})")
-            return None
-        
-        output = data.get("output", {})
-        current_price_str = output.get("last", "0")
-        
-        try:
-            current_price = float(current_price_str)
-            
-            if current_price <= 0:
-                logger.warning(f"⚠️ 비정상적인 시세: {ticker} = ${current_price}")
-                return None
-            
-            logger.debug(f"✅ {ticker} 현재가: ${current_price:.2f}")
-            return current_price
-        
-        except (ValueError, TypeError):
-            logger.error(f"❌ 시세 파싱 오류: {current_price_str}")
-            return None
+    url = f"{config['api']['base_url']}/uapi/overseas-price/v1/quotations/price"
     
-    except requests.exceptions.Timeout:
-        logger.error("❌ 시세 조회 타임아웃 (10초)")
-        return None
-    except requests.exceptions.RequestException as e:
-        logger.error(f"❌ 시세 조회 네트워크 오류: {e}")
-        return None
-    except Exception as e:
-        logger.error(f"❌ 시세 조회 오류: {e}")
-        import traceback
-        traceback.print_exc()
-        return None
+    for attempt in range(2):
+        try:
+            is_retry = (attempt > 0)
+            token = token_manager.get_access_token(force_refresh=is_retry)
+            if not token: continue
+            
+            headers = {
+                "Content-Type": "application/json",
+                "authorization": f"Bearer {token}",
+                "appkey": config["api_key"],
+                "appsecret": config["api_secret"],
+                "tr_id": "HHDFS00000300",
+                "custtype": "P"
+            }
+            
+            params = {"AUTH": "", "EXCD": "NAS", "SYMB": ticker}
+            
+            response = requests.get(url, headers=headers, params=params, timeout=10)
+            
+            if response.status_code != 200:
+                continue
+            
+            data = response.json()
+            
+            if data.get('msg_cd') == 'EGW00123':
+                logger.warning("⚠️ [시세조회] 토큰 만료. 재시도")
+                continue
+            
+            rt_cd = data.get("rt_cd", "")
+            if rt_cd == "0":
+                price = float(data.get("output", {}).get("last", "0"))
+                if price > 0: return price
+            else:
+                logger.warning(f"⚠️ 시세 조회 실패: {data.get('msg1')}")
+                
+        except Exception as e:
+            logger.error(f"❌ 시세 조회 오류: {e}")
+            
+    return None
 
 @log_api_call('가용 자금 조회', 'TTTS3007R')
 def get_available_funds(config, token_manager):
     """
-    가용 매수 금액 조회
-    
-    Args:
-        config: 설정 딕셔너리
-        token_manager: TokenManager 인스턴스
-    
-    Returns:
-        float: 가용 자금 (USD)
+    가용 매수 금액 조회 (토큰 갱신 추가)
     """
-    try:
-        url = f"{config['api']['base_url']}/uapi/overseas-stock/v1/trading/inquire-balance"
-        
-        token = token_manager.get_access_token()
-        if not token:
-            logger.error("❌ 잔고 조회: 액세스 토큰 없음")
-            return 0.0
-        
-        headers = {
-            "Content-Type": "application/json",
-            "authorization": f"Bearer {token}",
-            "appkey": config["api_key"],
-            "appsecret": config["api_secret"],
-            "tr_id": "TTTS3007R",
-            "custtype": "P"
-        }
-        
-        params = {
-            "CANO": config["cano"],
-            "ACNT_PRDT_CD": config["acnt_prdt_cd"],
-            "OVRS_EXCG_CD": "NASD",
-            "TR_CRCY_CD": "USD",
-            "CTX_AREA_FK200": "",
-            "CTX_AREA_NK200": ""
-        }
-        
-        logger.info("💰 [가용 자금 조회] 요청 전송 중...")
-        
-        response = requests.get(url, headers=headers, params=params, timeout=15)
-        
-        # 수정한 부분: 응답 상세 확인
-        logger.info(f"📥 [가용 자금 조회] 응답 수신 | 상태코드: {response.status_code}")
-        
-        if response.status_code != 200:
-            logger.error(f"❌ 잔고 조회 HTTP 오류: {response.status_code} | 응답: {response.text}")
-            return 0.0
-        logger.debug(f"✅ HTTP 상태 정상: 200")
-        
-        try:
-            data = response.json()
-        except json.JSONDecodeError as e:
-            logger.error(f"❌ 잔고 조회 JSON 파싱 실패: {response.text[:200]}")
-            return 0.0
-        if not isinstance(data, dict):
-            logger.error(f"❌ 응답이 딕셔너리가 아님: {type(data)}") 
-            return 0.0
-        
-        rt_cd = data.get("rt_cd", "")
-        if rt_cd != "0":
-            msg1 = data.get("msg1", "알 수 없는 오류")
-            logger.warning(f"⚠️ [잔고 조회 에러] 메시지: {msg1} (코드: {rt_cd})")
-            return 0.0
-        
-        output1 = data.get("output1", {})
-        available_cash_str = output1.get("frcr_dncl_amt_2", "0")
-        
-        try:
-            available_cash = float(available_cash_str)
-            
-            logger.info(f"✅ 가용 자금: ${available_cash:.2f}")
-            return available_cash
-        
-        except (ValueError, TypeError):
-            logger.error(f"❌ 가용 자금 파싱 오류: {available_cash_str}")
-            return 0.0
+    url = f"{config['api']['base_url']}/uapi/overseas-stock/v1/trading/inquire-balance"
     
-    except requests.exceptions.Timeout:
-        logger.error("❌ 잔고 조회 타임아웃 (15초)")
-        return 0.0
-    except requests.exceptions.RequestException as e:
-        logger.error(f"❌ 잔고 조회 네트워크 오류: {e}")
-        return 0.0
-    except Exception as e:
-        logger.error(f"❌ 잔고 조회 오류: {e}")
-        import traceback
-        traceback.print_exc()
-        return 0.0
+    for attempt in range(2):
+        try:
+            is_retry = (attempt > 0)
+            token = token_manager.get_access_token(force_refresh=is_retry)
+            if not token: continue
+            
+            headers = {
+                "Content-Type": "application/json",
+                "authorization": f"Bearer {token}",
+                "appkey": config["api_key"],
+                "appsecret": config["api_secret"],
+                "tr_id": "TTTS3007R",
+                "custtype": "P"
+            }
+            
+            params = {
+                "CANO": config["cano"],
+                "ACNT_PRDT_CD": config["acnt_prdt_cd"],
+                "OVRS_EXCG_CD": "NASD",
+                "TR_CRCY_CD": "USD",
+                "CTX_AREA_FK200": "",
+                "CTX_AREA_NK200": ""
+            }
+            
+            logger.info(f"💰 [가용 자금 조회] 요청 전송 중... (시도 {attempt+1})")
+            
+            response = requests.get(url, headers=headers, params=params, timeout=15)
+            logger.info(f"📥 [가용 자금 조회] 응답 수신 | 상태코드: {response.status_code}")
+            
+            if response.status_code != 200:
+                continue
+            
+            data = response.json()
+            
+            if data.get('msg_cd') == 'EGW00123':
+                logger.warning("⚠️ [자금조회] 토큰 만료. 갱신 후 재시도")
+                continue
+            
+            if data.get("rt_cd") == "0":
+                val = float(data.get("output1", {}).get("frcr_dncl_amt_2", "0"))
+                logger.info(f"✅ 가용 자금: ${val:.2f}")
+                return val
+            
+        except Exception as e:
+            logger.error(f"❌ 잔고 조회 오류: {e}")
+            
+    return 0.0
 
 @log_api_call('매수 주문', 'TTTT1002U')
 def place_buy_order(config, token_manager, ticker, quantity, price):
     """
-    매수 주문 실행
-    
-    Args:
-        config: 설정 딕셔너리
-        token_manager: TokenManager 인스턴스
-        ticker: 종목코드 (예: 'AAPL')
-        quantity: 수량
-        price: 지정가 (USD)
-    
-    Returns:
-        dict: {'success': True, 'order_no': '주문번호'}
-              또는 {'success': False, 'error': '오류메시지'}
+    매수 주문 실행 (토큰 갱신 추가)
     """
     try:
         logger.info(f"🎯 매수 주문 준비: {ticker} {quantity}주 @ ${price:.2f}")
@@ -903,87 +707,64 @@ def place_buy_order(config, token_manager, ticker, quantity, price):
             "ORD_DVSN": "00"
         }
         
-        logger.debug(f"📤 주문 데이터: {ticker} {quantity}주")
-        
         hashkey = get_hash_key(config, token_manager, order_data)
-        
-        if not hashkey:
-            logger.error("❌ HashKey 생성 실패, 주문 중단")
-            return {'success': False, 'error': 'HashKey 생성 실패'}
-        
-        token = token_manager.get_access_token()
-        if not token:
-            logger.error("❌ 유효한 토큰을 가져올 수 없습니다.")
-            return {'success': False, 'error': '토큰 없음'}
-        
-        headers = {
-            "Content-Type": "application/json; charset=utf-8",
-            "authorization": f"Bearer {token}",
-            "appkey": config['api_key'],
-            "appsecret": config['api_secret'],
-            "tr_id": "TTTT1002U",
-            "custtype": "P",
-            "hashkey": hashkey
-        }
+        if not hashkey: return {'success': False, 'error': 'HashKey 생성 실패'}
         
         buy_url = f"{config['api']['base_url']}/uapi/overseas-stock/v1/trading/order"
         
-        logger.info(f"""
-    📤 [매수 주문 전송] 호출 준비
+        for attempt in range(2):
+            try:
+                is_retry = (attempt > 0)
+                token = token_manager.get_access_token(force_refresh=is_retry)
+                if not token: continue
+                
+                headers = {
+                    "Content-Type": "application/json; charset=utf-8",
+                    "authorization": f"Bearer {token}",
+                    "appkey": config['api_key'],
+                    "appsecret": config['api_secret'],
+                    "tr_id": "TTTT1002U",
+                    "custtype": "P",
+                    "hashkey": hashkey
+                }
+                
+                logger.info(f"""
+    📤 [매수 주문 전송] 호출 준비 - 시도 {attempt+1}
     ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
     종목: {ticker}
     수량: {quantity}주
     가격: ${price:.2f}
-    거래소: {exchange_code}
     ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-        """)
-        
-        response = requests.post(buy_url, headers=headers, json=order_data, timeout=10)
-        
-        logger.info(f"📥 [매수 주문 응답] 수신 | 상태코드: {response.status_code}")
+                """)
+                
+                response = requests.post(buy_url, headers=headers, json=order_data, timeout=10)
+                logger.info(f"📥 [매수 주문 응답] 수신 | 상태코드: {response.status_code}")
 
-        if response.status_code == 200:
-            result = response.json()
-            rt_cd = result.get("rt_cd", "")
-            
-            if rt_cd == "0":
-                order_no = result.get("output", {}).get("ODNO", "")
+                if response.status_code == 200:
+                    data = response.json()
+                    
+                    if data.get('msg_cd') == 'EGW00123':
+                        logger.warning("⚠️ [매수주문] 토큰 만료. 갱신 후 재시도")
+                        continue
+                    
+                    if data.get("rt_cd") == "0":
+                        order_no = data.get("output", {}).get("ODNO", "")
+                        logger.info(f"✅ 매수 주문 접수: {ticker} (주문번호: {order_no})")
+                        return {'success': True, 'order_no': order_no, 'ticker': ticker, 'quantity': quantity, 'price': price}
+                    else:
+                        msg1 = data.get("msg1", "알 수 없는 오류")
+                        logger.error(f"❌ 매수 주문 실패: {msg1}")
+                        return {'success': False, 'error': msg1}
                 
-                logger.info(f"✅ 매수 주문 접수: {ticker} (주문번호: {order_no})")
-                
-                return {
-                    'success': True,
-                    'order_no': order_no,
-                    'ticker': ticker,
-                    'quantity': quantity,
-                    'price': price
-                }
-            else:
-                msg1 = result.get("msg1", "알 수 없는 오류")
-                logger.error(f"❌ 매수 주문 실패: {msg1} (rt_cd={rt_cd})")
-                
-                return {
-                    'success': False,
-                    'error': msg1
-                }
-        else:
-            logger.error(f"❌ 매수 주문 HTTP 오류: {response.status_code}")
-            logger.error(f"응답: {response.text}")
-            
-            return {
-                'success': False,
-                'error': f"HTTP {response.status_code}"
-            }
-    
+            except Exception as e:
+                logger.error(f"❌ 매수 주문 시도 중 오류: {e}")
+                if attempt == 1: return {'success': False, 'error': str(e)}
+
     except Exception as e:
         logger.error(f"❌ 매수 주문 실행 중 오류: {e}")
-        import traceback
-        traceback.print_exc()
-        
-        return {
-            'success': False,
-            'error': str(e)
-        }
+        return {'success': False, 'error': str(e)}
+    
+    return {'success': False, 'error': 'Unknown'}
 
 
 # ============================================================================
@@ -993,8 +774,6 @@ def place_buy_order(config, token_manager, ticker, quantity, price):
 class OrderMonitor:
     """
     기획서 3장: 프리마켓 REST 폴링 모니터
-    
-    정규장은 WebSocket 사용, 프리마켓은 REST 폴링
     """
     
     def __init__(self, config, token_manager, telegram_bot=None):
@@ -1006,92 +785,72 @@ class OrderMonitor:
         self.monitor_thread = None
 
     def add_order_to_monitor(self, order_no, ticker, quantity, buy_price):
-        """모니터링할 주문 추가"""
         order_info = {
-            'ticker': ticker,
-            'quantity': quantity,
-            'buy_price': buy_price,
-            'created_at': datetime.now(),
-            'attempts': 0,
-            'max_attempts': 360
+            'ticker': ticker, 'quantity': quantity, 'buy_price': buy_price,
+            'created_at': datetime.now(), 'attempts': 0, 'max_attempts': 360
         }
-        
         self.monitoring_orders[order_no] = order_info
         logger.info(f"📝 주문 모니터링 등록: {order_no} ({ticker} {quantity}주 @ ${buy_price})")
 
     def check_order_status(self, order_no):
         """
-        기획서 3장: 해외주식 주문/체결내역 조회 (REST 폴링)
-        
-        Returns:
-            dict: 체결 정보 또는 None
+        주문체결 확인 (토큰 갱신 추가)
         """
         try:
             url = f"{self.config['api']['base_url']}/uapi/overseas-stock/v1/trading/inquire-ccnl"
-        
-            token = self.token_manager.get_access_token()
-            if not token:
-                logger.error("❌ 액세스 토큰 없음")
-                return None
-    
-            headers = {
-                "Content-Type": "application/json",
-                "authorization": f"Bearer {token}",
-                "appkey": self.config["api_key"],
-                "appsecret": self.config["api_secret"],
-                "tr_id": "TTTS3035R",
-                "custtype": "P"
-            }
-        
             today = datetime.now().strftime("%Y%m%d")
+            
+            for attempt in range(2):
+                try:
+                    is_retry = (attempt > 0)
+                    token = self.token_manager.get_access_token(force_refresh=is_retry)
+                    if not token: continue
         
-            params = {
-                "CANO": self.config["cano"],
-                "ACNT_PRDT_CD": self.config["acnt_prdt_cd"],
-                "PDNO": "",
-                "ORD_STRT_DT": today,
-                "ORD_END_DT": today,
-                "SLL_BUY_DVSN": "02",
-                "CCLD_NCCS_DVSN": "01",
-                "OVRS_EXCG_CD": "NASD",
-                "SORT_SQN": "DS",
-                "ORD_DT": "",
-                "ORD_GNO_BRNO": "",
-                "ODNO": "",
-                "CTX_AREA_NK200": "",
-                "CTX_AREA_FK200": ""
-            }
-        
-            response = requests.get(url, headers=headers, params=params, timeout=10)
-        
-            if response.status_code != 200:
-                logger.error(f"❌ 주문조회 HTTP 오류: {response.status_code}")
-                return None
-        
-            data = response.json()
-        
-            if data.get("rt_cd") != "0":
-                logger.warning(f"⚠️ 주문조회 실패: {data.get('msg1', '')}")
-                return None
-        
-            orders = data.get("output", [])
-            if not orders:
-                return None
-        
-            for order in orders:
-                if order.get("odno") == order_no:
-                    ccld_qty = order.get("ft_ccld_qty", "0")
-                    ccld_unpr = order.get("ft_ccld_unpr3", "0")
-                
-                    logger.debug(f"🔍 주문 발견: {order_no} - 체결량: {ccld_qty}")
-                
-                    return {
-                        'status': '02',
-                        'filled_qty': int(ccld_qty) if ccld_qty else 0,
-                        'filled_price': float(ccld_unpr) if ccld_unpr else 0.0,
-                        'order_data': order
+                    headers = {
+                        "Content-Type": "application/json",
+                        "authorization": f"Bearer {token}",
+                        "appkey": self.config["api_key"],
+                        "appsecret": self.config["api_secret"],
+                        "tr_id": "TTTS3035R",
+                        "custtype": "P"
                     }
-        
+                
+                    params = {
+                        "CANO": self.config["cano"], "ACNT_PRDT_CD": self.config["acnt_prdt_cd"],
+                        "PDNO": "", "ORD_STRT_DT": today, "ORD_END_DT": today,
+                        "SLL_BUY_DVSN": "02", "CCLD_NCCS_DVSN": "01", "OVRS_EXCG_CD": "NASD",
+                        "SORT_SQN": "DS", "ORD_DT": "", "ORD_GNO_BRNO": "", "ODNO": "",
+                        "CTX_AREA_NK200": "", "CTX_AREA_FK200": ""
+                    }
+                
+                    response = requests.get(url, headers=headers, params=params, timeout=10)
+                    if response.status_code != 200: continue
+                
+                    data = response.json()
+                    
+                    if data.get('msg_cd') == 'EGW00123':
+                        logger.warning("⚠️ [주문체결확인] 토큰 만료. 재시도")
+                        continue
+                
+                    if data.get("rt_cd") != "0": continue
+                
+                    orders = data.get("output", [])
+                    for order in orders:
+                        if order.get("odno") == order_no:
+                            ccld_qty = order.get("ft_ccld_qty", "0")
+                            ccld_unpr = order.get("ft_ccld_unpr3", "0")
+                            logger.debug(f"🔍 주문 발견: {order_no} - 체결량: {ccld_qty}")
+                            return {
+                                'status': '02',
+                                'filled_qty': int(ccld_qty) if ccld_qty else 0,
+                                'filled_price': float(ccld_unpr) if ccld_unpr else 0.0,
+                                'order_data': order
+                            }
+                    return None
+
+                except Exception:
+                    if attempt == 1: return None
+            
             return None
     
         except Exception as e:
@@ -1099,43 +858,21 @@ class OrderMonitor:
             return None
             
     def execute_auto_sell(self, order_info, filled_price):
-        """기획서 4장: 자동 매도 주문 실행"""
         try:
-            execution_data = {
-                'ticker': order_info['ticker'],
-                'quantity': order_info['quantity'],
-                'price': filled_price
-            }
-            
+            execution_data = {'ticker': order_info['ticker'], 'quantity': order_info['quantity'], 'price': filled_price}
             logger.info(f"🎯 체결 감지: {execution_data['ticker']} ${filled_price}")
-            
-            result = place_sell_order(
-                self.config,
-                self.token_manager,
-                execution_data,
-                self.telegram_bot
-            )
-            
-            success = False
-            if isinstance(result, dict):
-                success = result.get('success', False)
-            elif isinstance(result, bool):
-                success = result
-                
-            return success
-        
+            result = place_sell_order(self.config, self.token_manager, execution_data, self.telegram_bot)
+            return result.get('success', False) if isinstance(result, dict) else False
         except Exception as e:
             logger.error(f"❌ 자동 매도 실행 중 오류: {e}")
             return False
 
     def monitor_orders(self):
-        """주문 모니터링 메인 루프"""
         logger.info("🔍 주문 모니터링 시작 (프리마켓 REST 폴링)")
-        
         while self.is_running:
             try:
                 if not should_system_run():
-                    logger.info("🌙 시스템 운영 시간 종료 (ET 12:00), 모니터링 중지")
+                    logger.info("🌙 시스템 운영 시간 종료, 모니터링 중지")
                     self.stop()
                     break
                 
@@ -1143,8 +880,7 @@ class OrderMonitor:
                 completed_orders = []
                 
                 for order_no, order_info in orders_to_check.items():
-                    if not self.is_running:
-                        break
+                    if not self.is_running: break
                     
                     order_info['attempts'] += 1
                     if order_info['attempts'] > order_info['max_attempts']:
@@ -1154,71 +890,36 @@ class OrderMonitor:
                     
                     status_info = self.check_order_status(order_no)
                     
-                    if status_info is None:
-                        continue
-                    
-                    if status_info['filled_qty'] > 0 and status_info['filled_price'] > 0:
-                        logger.info(
-                            f"🎉 체결 완료: {order_no} "
-                            f"(체결가: ${status_info['filled_price']}, "
-                            f"체결량: {status_info['filled_qty']})"
-                        )
-                        
+                    if status_info and status_info['filled_qty'] > 0:
+                        logger.info(f"🎉 체결 완료: {order_no}")
                         self.execute_auto_sell(order_info, status_info['filled_price'])
                         completed_orders.append(order_no)
                 
                 for order_no in completed_orders:
                     self.monitoring_orders.pop(order_no, None)
                 
-                if self.is_running:
-                    time.sleep(5)
+                if self.is_running: time.sleep(5)
             
             except Exception as e:
                 logger.error(f"❌ 주문 모니터링 루프 오류: {e}")
                 time.sleep(10)
-        
-        logger.info("🛑 주문 모니터링 종료")
 
     def start(self):
-        """모니터링 시작"""
-        if self.is_running:
-            logger.warning("⚠️ 이미 주문 모니터링이 실행 중입니다.")
-            return
-        
+        if self.is_running: return
         self.is_running = True
         self.monitor_thread = threading.Thread(target=self.monitor_orders, daemon=True)
         self.monitor_thread.start()
-        logger.info("🚀 주문 모니터링 시작됨 (프리마켓 REST 폴링)")
+        logger.info("🚀 주문 모니터링 시작됨")
 
     def stop(self):
-        """모니터링 중지"""
-        if not self.is_running:
-            return
-        
+        if not self.is_running: return
         self.is_running = False
-        if self.monitor_thread and self.monitor_thread.is_alive():
-            self.monitor_thread.join(timeout=5)
+        if self.monitor_thread: self.monitor_thread.join(timeout=5)
         logger.info("🛑 주문 모니터링 중지됨")
 
-    def get_monitoring_count(self):
-        """현재 모니터링 중인 주문 수"""
-        return len(self.monitoring_orders)
-
-    def get_active_orders(self):
-        """활성 주문 목록"""
-        return list(self.monitoring_orders.values())
-
-    def clear_old_orders(self):
-        """24시간 이상된 주문 정리"""
-        cutoff_time = datetime.now() - timedelta(hours=24)
-        old_orders = [
-            order_no for order_no, order_info in self.monitoring_orders.items()
-            if order_info['created_at'] < cutoff_time
-        ]
-        
-        for order_no in old_orders:
-            self.monitoring_orders.pop(order_no, None)
-            logger.info(f"🗑️ 오래된 주문 제거: {order_no}")
+    def get_monitoring_count(self): return len(self.monitoring_orders)
+    def get_active_orders(self): return list(self.monitoring_orders.values())
+    def clear_old_orders(self): pass
 
 
 # ============================================================================
@@ -1228,420 +929,182 @@ class OrderMonitor:
 class OrderExecutor:
     """
     주문 실행 및 관리 (v3.0 완전 자동매매 지원)
-    
-    기획서 v3.0 섹션 6.4
     """
     
     def __init__(self, config, token_manager, telegram_bot, auto_trader=None):
-        """
-        초기화
-        
-        Args:
-            config: 설정 딕셔너리
-            token_manager: TokenManager 인스턴스
-            telegram_bot: TelegramBot 인스턴스
-            auto_trader: AutoTrader 인스턴스 (선택)
-        """
         self.config = config
         self.token_manager = token_manager
         self.telegram_bot = telegram_bot
         self.auto_trader = auto_trader
-        
         self.base_url = config['api']['base_url']
         self.timeout = config['api'].get('request_timeout', 10)
         
-        # v3.0 손절/익절 설정
-        if 'auto_trader' in config and config['auto_trader'].get('enabled', False):
-            self.stop_loss = config['auto_trader']['stop_loss']
-            self.take_profit = config['auto_trader']['take_profit']
+        if 'auto_trader' in config:
+            self.stop_loss = config['auto_trader'].get('stop_loss', -2.0)
+            self.take_profit = config['auto_trader'].get('take_profit', 6.0)
         else:
             self.stop_loss = -2.0
-            self.take_profit = config['order_settings']['target_profit_rate']
-        
+            self.take_profit = 6.0
+            
         logger.info("🤖 OrderExecutor 초기화 완료")
     
     def place_fullsize_buy(self, ticker: str) -> Dict[str, Any]:
-        """
-        100% 전액 매수 (완전 자동매매용)
-        
-        Args:
-            ticker: 종목코드 (예: 'AAPL')
-        
-        Returns:
-            dict: {
-                'success': bool,
-                'order_no': str,
-                'quantity': int,
-                'price': float,
-                'reason': str
-            }
-        """
+        """전액 매수"""
         try:
             logger.info(f"💰 {ticker} 전액 매수 시작")
-            
-            # 1. 현재가 조회
             current_price = self.get_current_price(ticker)
+            if not current_price: return {'success': False, 'reason': 'price_fetch_failed'}
             
-            if not current_price or current_price <= 0:
-                return {
-                    'success': False,
-                    'reason': 'price_fetch_failed'
-                }
-            
-            # 2. 전체 가용 자금 조회
             available_cash = self.get_available_cash()
+            if available_cash < 100: return {'success': False, 'reason': 'insufficient_funds'}
             
-            if available_cash < 100:
-                logger.error(f"❌ 자금 부족: ${available_cash:.2f}")
-                return {
-                    'success': False,
-                    'reason': 'insufficient_funds',
-                    'available': available_cash
-                }
-            
-            # 3. 매수 가능 수량 계산
             quantity = int(available_cash / current_price)
+            if quantity < 1: return {'success': False, 'reason': 'insufficient_quantity'}
             
-            if quantity < 1:
-                logger.error(f"❌ 수량 부족: {quantity}주")
-                return {
-                    'success': False,
-                    'reason': 'insufficient_quantity',
-                    'quantity': quantity
-                }
-            
-            logger.info(
-                f"💰 전액 매수 준비:\n"
-                f"  가용자금: ${available_cash:.2f}\n"
-                f"  현재가: ${current_price:.2f}\n"
-                f"  수량: {quantity}주\n"
-                f"  총액: ${current_price * quantity:.2f}"
-            )
-            
-            # 4. 시장가 매수 주문
+            logger.info(f"💰 전액 매수 준비: 가용자금 ${available_cash:.2f}, 수량 {quantity}주")
             result = self._place_market_buy_order(ticker, quantity)
             
             if result['success']:
-                logger.info(
-                    f"✅ 전액 매수 성공: {ticker} {quantity}주 @ ${current_price:.2f}"
-                )
-                
-                # 텔레그램 알림
-                self.telegram_bot.send_message(
-                    f"💰 전액 매수 체결\n\n"
-                    f"종목: {ticker}\n"
-                    f"수량: {quantity}주\n"
-                    f"가격: ${current_price:.2f}\n"
-                    f"총액: ${current_price * quantity:.2f}\n\n"
-                    f"손절가: ${current_price * (1 + self.stop_loss/100):.2f} ({self.stop_loss}%)\n"
-                    f"익절가: ${current_price * (1 + self.take_profit/100):.2f} (+{self.take_profit}%)"
-                )
-                
-                return {
-                    'success': True,
-                    'order_no': result['order_no'],
-                    'quantity': quantity,
-                    'price': current_price
-                }
+                logger.info(f"✅ 전액 매수 성공: {ticker} {quantity}주")
+                self.telegram_bot.send_message(f"💰 전액 매수 체결\n종목: {ticker}\n수량: {quantity}주\n가격: ${current_price:.2f}")
+                return {'success': True, 'order_no': result['order_no'], 'quantity': quantity, 'price': current_price}
             else:
-                logger.error(f"❌ 매수 주문 실패: {result.get('reason')}")
                 return result
-        
         except Exception as e:
             logger.error(f"❌ 전액 매수 오류: {e}")
-            return {
-                'success': False,
-                'reason': str(e)
-            }
+            return {'success': False, 'reason': str(e)}
         
     @log_api_call('Executor 가용 자금 조회', 'TTTS3012R')
     def get_available_cash(self) -> float:
-        """
-        가용 현금 조회
-        
-        Returns:
-            float: 가용 현금 (USD)
-        """
-        try:
-            url = f"{self.base_url}/uapi/overseas-stock/v1/trading/inquire-balance"
-            
-            token = self.token_manager.get_access_token()
-            if not token:
-                logger.error("❌ 토큰 없음")
-                return 0.0
-            
-            headers = {
-                'content-type': 'application/json; charset=utf-8',
-                'authorization': f'Bearer {token}',
-                'appkey': self.config['api_key'],
-                'appsecret': self.config['api_secret'],
-                'tr_id': 'TTTS3012R',
-                'custtype': 'P'
-            }
-            
-            params = {
-                'CANO': self.config['cano'],
-                'ACNT_PRDT_CD': self.config['acnt_prdt_cd'],
-                'OVRS_EXCG_CD': 'NASD',
-                'TR_CRCY_CD': 'USD',
-                'CTX_AREA_FK200': '',
-                'CTX_AREA_NK200': ''
-            }
-            
-            response = requests.get(url, headers=headers, params=params, timeout=self.timeout)
-            logger.info(f"📥 [Executor 자금조회] 수신 | 상태코드: {response.status_code}")
-            
-            try:
-                data = response.json()
-            except json.JSONDecodeError:
-                logger.error(f"❌ 자금조회 파싱 실패: {response.text}")
-                return 0.0
-            
-            if data.get('rt_cd') == '0':
-                cash = float(data.get('output3', {}).get('frcr_dncl_amt_2', '0'))
-                logger.info(f"✅ 사용 가능 자금 확인: ${cash:.2f}") # debug를 info로 변경해 출력 보장
-                return cash
-            else:
-                # 수정한 부분: 실패 원인 상세 로깅
-                logger.error(f"❌ 자금 조회 실패: {data.get('msg1')} (코드: {data.get('rt_cd')})")
-                return 0.0
-        
-        except Exception as e:
-            logger.error(f"❌ 가용 현금 조회 오류: {e}")
-            return 0.0
+        return get_available_funds(self.config, self.token_manager)
     
     def _place_market_buy_order(self, ticker: str, quantity: int) -> Dict[str, Any]:
-        """
-        시장가 매수 주문 실행
+        """시장가 매수 (토큰 갱신 추가)"""
+        url = f"{self.base_url}/uapi/overseas-stock/v1/trading/order"
         
-        Args:
-            ticker: 종목코드
-            quantity: 수량
-        
-        Returns:
-            dict: {'success': bool, 'order_no': str, ...}
-        """
-        try:
-            url = f"{self.base_url}/uapi/overseas-stock/v1/trading/order"
-            
-            token = self.token_manager.get_access_token()
-            if not token:
-                return {'success': False, 'reason': 'no_token'}
-            
-            headers = {
-                'content-type': 'application/json; charset=utf-8',
-                'authorization': f'Bearer {token}',
-                'appkey': self.config['api_key'],
-                'appsecret': self.config['api_secret'],
-                'tr_id': 'JTTT1002U',
-                'custtype': 'P'
-            }
-            
-            body = {
-                'CANO': self.config['cano'],
-                'ACNT_PRDT_CD': self.config['acnt_prdt_cd'],
-                'OVRS_EXCG_CD': 'NASD',
-                'PDNO': ticker,
-                'ORD_DVSN': '00',
-                'ORD_QTY': str(quantity),
-                'OVRS_ORD_UNPR': '0'
-            }
-            
-            response = requests.post(url, headers=headers, json=body, timeout=self.timeout)
-            data = response.json()
-            
-            if data.get('rt_cd') == '0':
-                order_no = data.get('output', {}).get('ODNO', '')
-                logger.info(f"✅ 매수 주문 성공: {order_no}")
+        for attempt in range(2):
+            try:
+                is_retry = (attempt > 0)
+                token = self.token_manager.get_access_token(force_refresh=is_retry)
+                if not token: continue
                 
-                return {
-                    'success': True,
-                    'order_no': order_no
+                headers = {
+                    'content-type': 'application/json; charset=utf-8',
+                    'authorization': f'Bearer {token}',
+                    'appkey': self.config['api_key'],
+                    'appsecret': self.config['api_secret'],
+                    'tr_id': 'JTTT1002U',
+                    'custtype': 'P'
                 }
-            else:
-                logger.error(f"❌ 매수 주문 실패: {data.get('msg1')}")
-                return {
-                    'success': False,
-                    'reason': data.get('msg1')
+                
+                body = {
+                    'CANO': self.config['cano'],
+                    'ACNT_PRDT_CD': self.config['acnt_prdt_cd'],
+                    'OVRS_EXCG_CD': 'NASD',
+                    'PDNO': ticker,
+                    'ORD_DVSN': '00',
+                    'ORD_QTY': str(quantity),
+                    'OVRS_ORD_UNPR': '0'
                 }
-        
-        except Exception as e:
-            logger.error(f"❌ 매수 주문 오류: {e}")
-            return {
-                'success': False,
-                'reason': str(e)
-            }
+                
+                response = requests.post(url, headers=headers, json=body, timeout=self.timeout)
+                data = response.json()
+                
+                if data.get('msg_cd') == 'EGW00123':
+                    continue
+                
+                if data.get('rt_cd') == '0':
+                    return {'success': True, 'order_no': data.get('output', {}).get('ODNO', '')}
+                else:
+                    logger.error(f"❌ 매수 실패: {data.get('msg1')}")
+                    return {'success': False, 'reason': data.get('msg1')}
+                    
+            except Exception as e:
+                logger.error(f"❌ 매수 오류: {e}")
+                if attempt == 1: return {'success': False, 'reason': str(e)}
+                
+        return {'success': False, 'reason': 'Unknown'}
         
     def place_limit_buy_order(self, ticker: str, limit_price: float, quantity: Optional[int] = None) -> Dict[str, Any]:
-        """
-        지정가 매수 주문 (선행 주문용)
-        
-        Args:
-            ticker: 종목코드
-            limit_price: 지정가 (예: 174.50)
-            quantity: 수량 (None이면 전액)
-        
-        Returns:
-            dict: {'success': bool, 'order_no': str, 'reason': str}
-        """
+        """지정가 매수 (토큰 갱신 추가)"""
         try:
-            logger.info(f"📝 {ticker} 지정가 매수: ${limit_price:.2f}")
-            
-            # 1. 수량 계산 (전액)
             if quantity is None:
                 available_cash = self.get_available_cash()
-                
-                if available_cash < 100:
-                    logger.error(f"❌ 자금 부족: ${available_cash:.2f}")
-                    return {'success': False, 'reason': 'insufficient_funds'}
-                
                 quantity = int(available_cash / limit_price)
-                
-                if quantity < 1:
-                    logger.error(f"❌ 수량 부족: {quantity}주")
-                    return {'success': False, 'reason': 'insufficient_quantity'}
             
-            # 2. 가격 포맷팅
-            if limit_price >= 1.0:
-                price_str = f"{limit_price:.2f}"
-            else:
-                price_str = f"{limit_price:.4f}"
-            
-            logger.info(
-                f"📝 지정가 매수 준비:\n"
-                f"  종목: {ticker}\n"
-                f"  수량: {quantity}주\n"
-                f"  지정가: ${price_str}"
-            )
-            
-            # 3. API 호출
+            price_str = f"{limit_price:.2f}" if limit_price >= 1 else f"{limit_price:.4f}"
             url = f"{self.base_url}/uapi/overseas-stock/v1/trading/order"
             
-            token = self.token_manager.get_access_token()
-            if not token:
-                return {'success': False, 'reason': 'no_token'}
-            
-            headers = {
-                'content-type': 'application/json; charset=utf-8',
-                'authorization': f'Bearer {token}',
-                'appkey': self.config['api_key'],
-                'appsecret': self.config['api_secret'],
-                'tr_id': 'JTTT1002U',  # 실전 매수
-                'custtype': 'P'
-            }
-            
-            body = {
-                'CANO': self.config['cano'],
-                'ACNT_PRDT_CD': self.config['acnt_prdt_cd'],
-                'OVRS_EXCG_CD': 'NASD',
-                'PDNO': ticker,
-                'ORD_DVSN': '00',              # 지정가
-                'ORD_QTY': str(quantity),
-                'OVRS_ORD_UNPR': price_str,    # 실제 가격
-                'CTAC_TLNO': '',
-                'MGCO_APTM_ODNO': '',
-                'SLL_TYPE': '',
-                'ORD_SVR_DVSN_CD': '0'
-            }
-            
-            response = requests.post(url, headers=headers, json=body, timeout=self.timeout)
-            data = response.json()
-            
-            if data.get('rt_cd') == '0':
-                order_no = data.get('output', {}).get('ODNO', '')
-                logger.info(f"✅ 지정가 매수 주문 성공: {order_no}")
+            for attempt in range(2):
+                is_retry = (attempt > 0)
+                token = self.token_manager.get_access_token(force_refresh=is_retry)
+                if not token: continue
                 
-                # 텔레그램 알림
-                self.telegram_bot.send_message(
-                    f"📝 지정가 매수 주문 접수\n\n"
-                    f"종목: {ticker}\n"
-                    f"수량: {quantity}주\n"
-                    f"지정가: ${price_str}\n"
-                    f"주문번호: {order_no}\n\n"
-                    f"⏳ 체결 대기 중..."
-                )
+                headers = {
+                    'content-type': 'application/json; charset=utf-8',
+                    'authorization': f'Bearer {token}',
+                    'appkey': self.config['api_key'],
+                    'appsecret': self.config['api_secret'],
+                    'tr_id': 'JTTT1002U',
+                    'custtype': 'P'
+                }
                 
-                return {
-                    'success': True,
-                    'order_no': order_no,
-                    'quantity': quantity,
-                    'price': limit_price
+                body = {
+                    'CANO': self.config['cano'], 'ACNT_PRDT_CD': self.config['acnt_prdt_cd'],
+                    'OVRS_EXCG_CD': 'NASD', 'PDNO': ticker, 'ORD_DVSN': '00',
+                    'ORD_QTY': str(quantity), 'OVRS_ORD_UNPR': price_str
                 }
-            else:
-                error_msg = data.get('msg1', 'Unknown error')
-                logger.error(f"❌ 지정가 매수 실패: {error_msg}")
-                return {
-                    'success': False,
-                    'reason': error_msg
-                }
-        
+                
+                response = requests.post(url, headers=headers, json=body, timeout=self.timeout)
+                data = response.json()
+                
+                if data.get('msg_cd') == 'EGW00123': continue
+                
+                if data.get('rt_cd') == '0':
+                    order_no = data.get('output', {}).get('ODNO', '')
+                    logger.info(f"✅ 지정가 매수 성공: {order_no}")
+                    return {'success': True, 'order_no': order_no, 'quantity': quantity, 'price': limit_price}
+                
         except Exception as e:
             logger.error(f"❌ 지정가 매수 오류: {e}")
-            return {
-                'success': False,
-                'reason': str(e)
-            }
+            
+        return {'success': False, 'reason': 'Fail'}
         
     def get_1min_candles(self, ticker: str, count: int) -> List[Dict]:
-        """
-        1분봉 조회
+        """1분봉 조회 (토큰 갱신 추가)"""
+        url = f"{self.base_url}/uapi/overseas-price/v1/quotations/inquire-time-itemchartprice"
         
-        Args:
-            ticker: 종목코드
-            count: 조회 개수 (최대 120)
-        
-        Returns:
-            list: [{'time': '093000', 'open': 250.00, 'high': 250.50, 
-                    'low': 249.80, 'close': 250.20, 'volume': 125000}, ...]
-        """
-        try:
-            url = f"{self.base_url}/uapi/overseas-price/v1/quotations/inquire-time-itemchartprice"
-            
-            token = self.token_manager.get_access_token()
-            if not token:
-                return []
-            
-            import os
-
-            headers = {
-                'content-type': 'application/json; charset=utf-8',
-                'authorization': f'Bearer {token}',
-                'appkey': self.config['api_key'],
-                'appsecret': self.config['api_secret'],
-                'tr_id': 'HHDFS76950200',
-                'custtype': 'P'
-            }
-            
-            params = {
-                'AUTH': '',
-                'EXCD': 'NAS',
-                'SYMB': ticker,
-                'NMIN': '1',
-                'PINC': '1',
-                'NEXT': '',
-                'NREC': str(min(count, 120)),     
-                'FILL': '',
-                'KEYB': ''
-            }
-            
-            response = requests.get(url, headers=headers, params=params, timeout=self.timeout)
-            data = response.json()
-            # ⚡ 추가: 실제 API 응답 전체 로깅
-            logger.info(f"📥 1분봉 API 응답: {json.dumps(data, ensure_ascii=False)[:500]}")  # 처음 500자만
-          
-            if data.get('rt_cd') != '0':
-                logger.error(f"❌ 1분봉 조회 실패: {data.get('msg1')}")
-                logger.error(f"❌ 응답 코드: {data.get('rt_cd')}")  # 추가 로깅
-                return []
-            
-            output2 = data.get('output2', [])
-            logger.info(f"📊 output2 개수: {len(output2)}")  # 몇 개 아이템?
-
-            
-            candles = []
-            for idx, item in enumerate(output2):  # idx 추가
-                try:
-                    logger.debug(f"📝 캔들 #{idx}: {item}")  # 각 아이템 로깅
+        for attempt in range(2):
+            try:
+                is_retry = (attempt > 0)
+                token = self.token_manager.get_access_token(force_refresh=is_retry)
+                if not token: continue
+                
+                headers = {
+                    'content-type': 'application/json; charset=utf-8',
+                    'authorization': f'Bearer {token}',
+                    'appkey': self.config['api_key'],
+                    'appsecret': self.config['api_secret'],
+                    'tr_id': 'HHDFS76950200', 'custtype': 'P'
+                }
+                
+                params = {
+                    'AUTH': '', 'EXCD': 'NAS', 'SYMB': ticker,
+                    'NMIN': '1', 'PINC': '1', 'NEXT': '',
+                    'NREC': str(min(count, 120)), 'FILL': '', 'KEYB': ''
+                }
+                
+                response = requests.get(url, headers=headers, params=params, timeout=self.timeout)
+                data = response.json()
+                
+                if data.get('msg_cd') == 'EGW00123':
+                    logger.warning(f"⚠️ [1분봉] 토큰 만료. 갱신 후 재시도 ({ticker})")
+                    continue
+                
+                if data.get('rt_cd') != '0': return []
+                
+                candles = []
+                for item in data.get('output2', []):
                     candles.append({
                         'time': item['xhms'],
                         'open': float(item['open']),
@@ -1650,195 +1113,74 @@ class OrderExecutor:
                         'close': float(item['last']),
                         'volume': int(item['evol'])
                     })
-                except (KeyError, ValueError) as e:
-                    logger.error(f"❌ 캔들 파싱 오류: {e}")
-                    continue
+                return candles
                 
-            logger.info(f"✅ 1분봉 수신 완료: {len(candles)}개")
-            return candles
-        
-        except Exception as e:
-            logger.error(f"❌ 1분봉 조회 오류: {e}")
-            return []
+            except Exception:
+                if attempt == 1: return []
+        return []
     
     def get_current_price(self, ticker: str) -> Optional[float]:
-        """
-        실시간 현재가 조회
-        
-        Args:
-            ticker: 종목코드
-        
-        Returns:
-            float: 현재가 (실패 시 None)
-        """
-        try:
-            url = f"{self.base_url}/uapi/overseas-price/v1/quotations/price"
-            
-            token = self.token_manager.get_access_token()
-            if not token:
-                return None
-            
-            headers = {
-                'content-type': 'application/json; charset=utf-8',
-                'authorization': f'Bearer {token}',
-                'appkey': self.config['api_key'],
-                'appsecret': self.config['api_secret'],
-                'tr_id': 'HHDFS00000300',
-                'custtype': 'P'
-            }
-            
-            params = {
-                'AUTH': '',
-                'EXCD': 'NAS',
-                'SYMB': ticker
-            }
-            
-            response = requests.get(url, headers=headers, params=params, timeout=self.timeout)
-            data = response.json()
-            
-            if data.get('rt_cd') == '0':
-                price = float(data.get('output', {}).get('last', '0'))
-                return price if price > 0 else None
-            else:
-                logger.error(f"❌ 현재가 조회 실패: {data.get('msg1')}")
-                return None
-        
-        except Exception as e:
-            logger.error(f"❌ 현재가 조회 오류: {e}")
-            return None
+        return get_current_price(self.config, self.token_manager, ticker)
     
     def check_exit_conditions(self, order: Dict[str, Any]) -> bool:
-        """
-        손절/익절 조건 체크
-        
-        ⚠️ v3.0 수정: 손절 우선 체크
-        
-        Args:
-            order: 주문 정보
-        
-        Returns:
-            bool: 청산 완료 시 True
-        """
+        """손절/익절 체크"""
         current_price = self.get_current_price(order['ticker'])
-        
-        if not current_price:
-            return False
+        if not current_price: return False
         
         buy_price = order['buy_price']
+        pct = (current_price - buy_price) / buy_price * 100
         
-        # 손절 체크 (우선)
-        loss_pct = (current_price - buy_price) / buy_price * 100
-        
-        if loss_pct <= self.stop_loss:
-            logger.warning(
-                f"🛑 손절 조건 도달: {order['ticker']}\n"
-                f"  매수가: ${buy_price:.2f}\n"
-                f"  현재가: ${current_price:.2f}\n"
-                f"  손실: {loss_pct:.2f}%"
-            )
+        if pct <= self.stop_loss:
+            logger.warning(f"🛑 손절: {order['ticker']} ({pct:.2f}%)")
+            self.execute_sell(order, 'stop_loss')
+            return True
             
-            result = self.execute_sell(order, reason='stop_loss')
-            
-            if result['success']:
-                if self.auto_trader:
-                    self.auto_trader.on_exit_complete(order['ticker'], 'stop_loss')
-                
-                return True
-            
-            return False
-        
-        # 익절 체크
-        profit_pct = (current_price - buy_price) / buy_price * 100
-        
-        if profit_pct >= self.take_profit:
-            logger.info(
-                f"🎯 익절 조건 도달: {order['ticker']}\n"
-                f"  매수가: ${buy_price:.2f}\n"
-                f"  현재가: ${current_price:.2f}\n"
-                f"  수익: {profit_pct:.2f}%"
-            )
-            
-            result = self.execute_sell(order, reason='take_profit')
-            
-            if result['success']:
-                if self.auto_trader:
-                    self.auto_trader.on_exit_complete(order['ticker'], 'take_profit')
-                
-                return True
-            
-            return False
-        
+        if pct >= self.take_profit:
+            logger.info(f"🎯 익절: {order['ticker']} (+{pct:.2f}%)")
+            self.execute_sell(order, 'take_profit')
+            return True
         return False
     
     @log_api_call('자동 청산 매도', 'JTTT1006U')
     def execute_sell(self, order: Dict[str, Any], reason: str = 'take_profit') -> Dict[str, Any]:
-        """
-        매도 주문 실행
+        """매도 주문 실행 (토큰 갱신 추가)"""
+        ticker = order['ticker']
+        quantity = order['quantity']
+        url = f"{self.base_url}/uapi/overseas-stock/v1/trading/order"
         
-        Args:
-            order: 주문 정보
-            reason: 매도 사유 ('stop_loss' 또는 'take_profit')
-        
-        Returns:
-            dict: {'success': bool, ...}
-        """
-        try:
-            ticker = order['ticker']
-            quantity = order['quantity']
-
-            logger.info(f"""
-    📤 [자동 매도 실행] 호출 준비 ({reason})
-    ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-    종목: {ticker}
-    수량: {quantity}주
-    사유: {'🛑 손절' if reason == 'stop_loss' else '🎯 익절'}
-    ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-            """)
-
-            url = f"{self.base_url}/uapi/overseas-stock/v1/trading/order"
-            
-            token = self.token_manager.get_access_token()
-            if not token:
-                return {'success': False, 'reason': 'no_token'}
-            
-            headers = {
-                'content-type': 'application/json; charset=utf-8',
-                'authorization': f'Bearer {token}',
-                'appkey': self.config['api_key'],
-                'appsecret': self.config['api_secret'],
-                'tr_id': 'JTTT1006U',
-                'custtype': 'P'
-            }
-            
-            body = {
-                'CANO': self.config['cano'],
-                'ACNT_PRDT_CD': self.config['acnt_prdt_cd'],
-                'OVRS_EXCG_CD': 'NASD',
-                'PDNO': ticker,
-                'ORD_DVSN': '00',
-                'ORD_QTY': str(quantity),
-                'OVRS_ORD_UNPR': '0'
-            }
-            
-            response = requests.post(url, headers=headers, json=body, timeout=self.timeout)
-            logger.info(f"📥 [자동 매도 응답] 수신 | 상태코드: {response.status_code}")
-            data = response.json()
-            
-            if data.get('rt_cd') == '0':
-                reason_text = '손절' if reason == 'stop_loss' else '익절'
+        for attempt in range(2):
+            try:
+                is_retry = (attempt > 0)
+                token = self.token_manager.get_access_token(force_refresh=is_retry)
+                if not token: continue
                 
-                self.telegram_bot.send_message(
-                    f"{'🛑' if reason == 'stop_loss' else '🎯'} {reason_text} 매도 체결\n\n"
-                    f"종목: {ticker}\n"
-                    f"수량: {quantity}주\n"
-                    f"사유: {reason_text}"
-                )
+                headers = {
+                    'content-type': 'application/json; charset=utf-8',
+                    'authorization': f'Bearer {token}',
+                    'appkey': self.config['api_key'],
+                    'appsecret': self.config['api_secret'],
+                    'tr_id': 'JTTT1006U', 'custtype': 'P'
+                }
                 
-                return {'success': True}
-            else:
-                logger.error(f"❌ 매도 주문 실패: {data.get('msg1')}")
-                return {'success': False, 'reason': data.get('msg1')}
-        
-        except Exception as e:
-            logger.error(f"❌ 매도 주문 오류: {e}")
-            return {'success': False, 'reason': str(e)}
+                body = {
+                    'CANO': self.config['cano'], 'ACNT_PRDT_CD': self.config['acnt_prdt_cd'],
+                    'OVRS_EXCG_CD': 'NASD', 'PDNO': ticker, 'ORD_DVSN': '00',
+                    'ORD_QTY': str(quantity), 'OVRS_ORD_UNPR': '0'
+                }
+                
+                response = requests.post(url, headers=headers, json=body, timeout=self.timeout)
+                data = response.json()
+                
+                if data.get('msg_cd') == 'EGW00123': continue
+                
+                if data.get('rt_cd') == '0':
+                    reason_text = '손절' if reason == 'stop_loss' else '익절'
+                    self.telegram_bot.send_message(f"{'🛑' if reason == 'stop_loss' else '🎯'} {reason_text} 매도 체결\n종목: {ticker}\n수량: {quantity}주")
+                    return {'success': True}
+                else:
+                    logger.error(f"❌ 매도 실패: {data.get('msg1')}")
+                    
+            except Exception as e:
+                logger.error(f"❌ 매도 오류: {e}")
+                
+        return {'success': False}

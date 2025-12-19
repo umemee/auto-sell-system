@@ -4,8 +4,8 @@ auto_trader.py
 완전 자동매매 시스템 - 50MA 터치 전략
 
 작성일: 2025-12-06
-버전: 1.0
-기획서: v3.0 섹션 6.3
+버전: 1.1 (수동 추가 기능 및 터치 이력 체크 로직 수정)
+기획서: v3.0 섹션 6.3 + 명령어추가기획서 v1.1
 """
 
 import time
@@ -27,6 +27,7 @@ class AutoTrader:
         touched_but_skipped (Set[str]): 터치했지만 못 산 종목
         permanently_excluded (Set[str]): 손절/익절 완료 종목
         ranking_history (Dict[str, List[int]]): 순위 이력
+        manual_watch_list (Set[str]): 수동으로 추가한 감시 종목
     """
     
     def __init__(
@@ -73,6 +74,9 @@ class AutoTrader:
         self.touched_but_skipped: Set[str] = set()
         self.permanently_excluded: Set[str] = set()
         self.ranking_history: Dict[str, List[int]] = {}
+        
+        # ✨ [v1.1 신규] 수동 추가 종목 추적
+        self.manual_watch_list: Set[str] = set()
         
         # 타이밍
         self.last_ranking_update: Optional[datetime] = None
@@ -182,7 +186,13 @@ class AutoTrader:
             
             # 3. 신규 종목 추가
             for item in current_top3:
-                self._add_if_new(item['ticker'])
+                ticker = item['ticker']
+                
+                # ✨ [v1.1 수정] 수동 추가 종목은 업데이트 로직 스킵 (이미 감시 중이므로)
+                if ticker in self.manual_watch_list:
+                    continue
+                    
+                self._add_if_new(ticker)
             
             # 4. 순위 이탈 종목 제거
             logger.info("🔧 [DEBUG] _remove_rank_out_tickers 시작")
@@ -233,11 +243,12 @@ class AutoTrader:
             logger.debug(f"{ticker} 이미 감시 중")
             return
         
-        # 최근 1시간 터치 확인
-        if self._check_recent_touch(ticker):
-            logger.warning(f"⚠️ {ticker} 이미 50선 터치 (최근 1시간)")
-            self.touched_but_skipped.add(ticker)
-            return
+        # 최근 1시간 터치 확인 (비활성화)
+        # 이유: 프리마켓 시작 시 과거(18:00 이전) 기록 때문에 제외되는 것을 방지
+        # if self._check_recent_touch(ticker):
+        #     logger.warning(f"⚠️ {ticker} 이미 50선 터치 (최근 1시간)")
+        #     self.touched_but_skipped.add(ticker)
+        #     return
         
         # 추가
         self.watch_list.append(ticker)
@@ -287,6 +298,11 @@ class AutoTrader:
         top3_tickers = [item['ticker'] for item in current_top3]
         
         for ticker in list(self.watch_list):
+            # ✨ [v1.1 수정] 수동 추가 종목은 순위 이탈해도 제거하지 않음
+            if ticker in self.manual_watch_list:
+                logger.debug(f"🔵 {ticker} 수동 추가 종목, 제거 안 함")
+                continue
+
             if ticker not in self.ranking_history:
                 continue
             
@@ -315,6 +331,10 @@ class AutoTrader:
         top3_tickers = [item['ticker'] for item in current_top3]
         candidates = [t for t in self.watch_list if t not in top3_tickers]
         
+        if candidates:
+            # 수동 추가 종목은 제거 대상에서 제외
+            candidates = [t for t in candidates if t not in self.manual_watch_list]
+
         if candidates:
             removed = candidates[0]
             self.watch_list.remove(removed)
@@ -666,12 +686,66 @@ class AutoTrader:
         """
         return self.order_executor.get_current_price(ticker)
     
+    # ✨ [v1.1 신규] 수동 티커 추가 메서드
+    def add_manual_ticker(self, ticker: str) -> Dict[str, Any]:
+        """수동 티커 추가 (텔레그램 명령어용)"""
+        ticker = ticker.upper().strip()
+        logger.info(f"👤 수동 티커 추가 요청: {ticker}")
+        
+        # 1. 입력 검증
+        if not ticker or len(ticker) > 5:
+            return {'success': False, 'message': '❌ 잘못된 티커 형식 (1-5글자)'}
+        
+        # 2. 중복 체크
+        if ticker in self.watch_list:
+            source = '수동' if ticker in self.manual_watch_list else '자동'
+            return {'success': False, 'message': f'❌ 이미 감시 중입니다 ({source})'}
+        
+        # 3. MAX_WATCH_LIST 체크
+        if len(self.watch_list) >= self.MAX_WATCH_LIST:
+            return {'success': False, 'message': f'❌ 감시 목록 가득 참 ({self.MAX_WATCH_LIST}개)'}
+        
+        # 4. 제외 목록에서 강제 제거 (재진입 허용)
+        if ticker in self.touched_but_skipped:
+            self.touched_but_skipped.discard(ticker)
+        if ticker in self.permanently_excluded:
+            self.permanently_excluded.discard(ticker)
+        
+        # 5. 추가
+        self.watch_list.append(ticker)
+        self.manual_watch_list.add(ticker)
+        
+        logger.info(f"✅ {ticker} 수동 추가 완료")
+        self._save_state()
+        
+        return {
+            'success': True, 
+            'message': f'✅ {ticker} 감시 시작\n전략: 50MA 터치\n목표: +{self.TAKE_PROFIT}%'
+        }
+
+    def remove_manual_ticker(self, ticker: str) -> Dict[str, Any]:
+        """수동 티커 제거"""
+        ticker = ticker.upper().strip()
+        
+        if ticker not in self.manual_watch_list:
+            return {'success': False, 'message': '❌ 수동 추가된 종목이 아닙니다'}
+            
+        if ticker in self.watch_list:
+            self.watch_list.remove(ticker)
+            
+        self.manual_watch_list.discard(ticker)
+        self._save_state()
+        
+        return {'success': True, 'message': f'✅ {ticker} 감시 중지'}
+
     def _save_state(self):
         """상태 파일 저장"""
         try:
             state = {
                 'date': datetime.now().strftime('%Y-%m-%d'),
                 'watch_list': self.watch_list,
+                # ✨ [v1.1 신규] 수동 추가 종목 저장
+                'manual_watch_list': list(self.manual_watch_list),
                 'touched_but_skipped': list(self.touched_but_skipped),
                 'permanently_excluded': list(self.permanently_excluded),
                 'ranking_history': self.ranking_history,
@@ -707,6 +781,7 @@ class AutoTrader:
             self.touched_but_skipped = set(state.get('touched_but_skipped', []))
             self.permanently_excluded = set(state.get('permanently_excluded', []))
             self.ranking_history = state.get('ranking_history', {})
+            self.manual_watch_list = set(state.get('manual_watch_list', []))
             
             # 마지막 업데이트 시각 복구
             last_update_str = state.get('last_ranking_update')
@@ -750,13 +825,18 @@ class AutoTrader:
             self.touched_but_skipped = set(state.get('touched_but_skipped', []))
             self.permanently_excluded = set(state.get('permanently_excluded', []))
             
-            excluded_count = len(self.touched_but_skipped) + len(self.permanently_excluded)
+            # ✨ [v1.1 신규] 수동 추가 종목 복구
+            self.manual_watch_list = set(state.get('manual_watch_list', []))
             
-            if excluded_count > 0:
+            excluded_count = len(self.touched_but_skipped) + len(self.permanently_excluded)
+            manual_count = len(self.manual_watch_list)
+            
+            if manual_count > 0 or excluded_count > 0:
                 logger.info(
-                    f"✅ 재진입 제외 정보 복구 완료\n"
-                    f"  터치 후 제외: {len(self.touched_but_skipped)}개\n"
-                    f"  손절/익절 완료: {len(self.permanently_excluded)}개\n"
+                    f"✅ 상태 복구 완료\n"
+                    f"  👤 수동 추가: {manual_count}개\n"
+                    f"  🔴 터치 후 제외: {len(self.touched_but_skipped)}개\n"
+                    f"  🚫 손절/익절 완료: {len(self.permanently_excluded)}개\n"
                     f"  📋 감시 목록은 최신 TOP 3으로 새로 구성합니다"
                 )
             else:

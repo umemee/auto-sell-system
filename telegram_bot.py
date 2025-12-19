@@ -1,4 +1,4 @@
-# telegram_bot.py - v2.0 기획서 준수 (대화형 명령어 추가)
+# telegram_bot.py - v2.0 기획서 준수 (대화형 명령어 추가) + Phase 2 수정 (수동 감시)
 
 import requests
 import logging
@@ -7,6 +7,7 @@ import time
 import os
 import signal
 import threading
+import re  # ✨ [Phase 2] 정규표현식 모듈 (티커 감지용)
 from datetime import datetime, timedelta
 from collections import defaultdict
 
@@ -19,6 +20,7 @@ class TelegramBot:
     - [v2.0 신규] /buy : 대화형 목표가 매수 주문
     - [v2.0 신규] /orders : 대기 중인 텔레그램 주문 조회
     - [v2.0 신규] /cancel : 대기 중인 텔레그램 주문 취소
+    - [Phase 2] /watch 또는 티커 입력 : 수동 감시 종목 추가
     """
     
     # (수정 1) __init__ 에 order_manager 와 conversation_states 추가
@@ -32,6 +34,9 @@ class TelegramBot:
         
         # (신규) 텔레그램 주문 관리자 (Phase 1, 2에서 구현)
         self.order_manager = order_manager
+
+        # ✨ [Phase 2] AutoTrader 참조 (수동 티커 추가용)
+        self.auto_trader = None
         
         # (신규) 대화형 명령어 상태 관리
         # 예: { 1234567: {'type': 'buy', 'step': 'awaiting_ticker', 'data': {}} }
@@ -612,6 +617,55 @@ class TelegramBot:
             self.logger.error(f"메시지 큐 정리 오류: {e}")
             return False
 
+    # ✨ [Phase 2 신규] /watch 명령어 처리 핸들러 (v1.1)
+    def handle_watch_command(self, message_text: str, chat_id: int):
+        """
+        수동 감시 추가 처리
+        사용법: '/watch TSLA' 또는 'TSLA'
+        """
+        # 1. 티커 추출
+        text = message_text.strip()
+        if text.startswith('/watch'):
+            text = text[6:].strip()
+        
+        # 정규식으로 대문자 티커 추출
+        tickers = re.findall(r'[A-Z]{1,5}', text.upper())
+        
+        if not tickers:
+            self.send_message(
+                "❌ 티커를 입력하세요\n예: <code>/watch TSLA</code> 또는 <code>TSLA</code>", 
+                chat_id=chat_id
+            )
+            return
+        
+        # 2. AutoTrader 연결 확인
+        if not self.auto_trader:
+            self.send_message("❌ AutoTrader가 연결되지 않았습니다.", chat_id=chat_id)
+            return
+
+        # 3. 각 티커 추가 요청
+        results = []
+        for ticker in tickers:
+            # AutoTrader의 메서드 호출
+            result = self.auto_trader.add_manual_ticker(ticker)
+            results.append(result)
+
+        # 4. 결과 메시지 생성
+        response = ""
+        for res in results:
+            response += f"{res['message']}\n\n"
+        
+        # 5. 현재 감시 현황 요약
+        watch_list = self.auto_trader.watch_list
+        manual_cnt = len(self.auto_trader.manual_watch_list)
+        auto_cnt = len(watch_list) - manual_cnt
+        
+        response += f"📊 <b>현재 감시 목록</b> ({len(watch_list)}/{self.auto_trader.MAX_WATCH_LIST}개)\n"
+        response += f"• 🤖 자동 감지: {auto_cnt}개\n"
+        response += f"• 👤 수동 추가: {manual_cnt}개"
+        
+        self.send_message(response.strip(), chat_id=chat_id)
+
     # 
     # ↓↓↓ (수정 3) handle_command: v2.0 신규 명령어 추가 ↓↓↓
     #
@@ -703,6 +757,7 @@ v2.0 기획서에 따라 업그레이드되었습니다.
 • /buy - 목표가 매수 주문 시작
 • /orders - 대기 중인 텔레그램 주문
 • /cancel - 텔레그램 주문 취소
+• /watch - 수동 감시 종목 추가
 • /status - 시스템 상태 확인
 • /stats - 실시간 통계
 • /stop - 시스템 종료
@@ -777,6 +832,7 @@ v2.0 기획서에 따라 업그레이드되었습니다.
 • /buy - 대화형 목표가 매수 주문
 • /orders - 대기 중인 주문 목록
 • /cancel - 대기 중인 주문 취소
+• /watch - 수동 감시 종목 추가
 • /status - 현재 시스템 상태 확인
 • /stats - 실시간 거래 통계
 • /stop - 시스템 안전 종료
@@ -913,15 +969,25 @@ v2.0 기획서에 따라 업그레이드되었습니다.
                                 text = message['text'].strip()
                                 self.logger.info(f"텔레그램 메시지 수신 (from {chat_id}): {text}")
 
-                                # (수정) 1순위: 대화 상태 확인
+                                # 1순위: 대화 상태 확인
                                 if chat_id in self.conversation_states:
                                     self.handle_conversation(chat_id, text, message_date)
                                 
-                                # 2순위: 새 명령어 확인
+                                # 2순위: 명령어 처리
                                 elif text.startswith('/'):
-                                    self.handle_command(text, chat_id, message_date)
+                                    # ✨ [Phase 2] /watch 명령어는 인자 파싱이 필요하므로 여기서 직접 처리
+                                    if text.startswith('/watch'):
+                                        self.handle_watch_command(text, chat_id)
+                                    else:
+                                        # 명령어만 추출 (예: /start param -> /start)
+                                        command = text.split()[0]
+                                        self.handle_command(command, chat_id, message_date)
                                 
-                                # 3순위: 그 외 (무시)
+                                # ✨ [Phase 2] 3순위: 단순 티커 입력 감지 (예: "TSLA")
+                                elif re.match(r'^[A-Z]{1,5}$', text.upper()):
+                                    self.handle_watch_command(text, chat_id)
+                                
+                                # 4순위: 그 외 (무시)
                                 else:
                                     self.logger.debug(f"명령어 또는 대화가 아닌 메시지 무시: {text}")
 
