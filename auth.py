@@ -1,12 +1,16 @@
-# auth.py - 한국투자증권 API 인증/토큰 관리 (기획서 v1.1 완전 준수 버전)
+# auth.py - 한국투자증권 API 인증/토큰 관리 (파일 공유 기능 추가 및 기획서 v1.1 준수)
 
 import requests
 import json
 import logging
 import time
+import os
 from datetime import datetime, timedelta
 
 logger = logging.getLogger(__name__)
+
+# ✅ 토큰을 저장할 파일 경로 (모든 스크립트가 이 파일을 공유함)
+TOKEN_FILE_PATH = "token_store.json"
 
 
 class KISAPIError(Exception):
@@ -31,13 +35,12 @@ class NetworkError(KISAPIError):
 
 class TokenManager:
     """
-    한국투자증권 API용 TokenManager (기획서 v1.1 완전 준수)
+    한국투자증권 API용 TokenManager (기획서 v1.1 완전 준수 + 토큰 파일 공유)
     
     주요 기능:
-    - REST 액세스 토큰 자동 갱신
-    - WebSocket Approval Key 자동 갱신
+    - REST 액세스 토큰 자동 갱신 및 파일 공유 (token_store.json)
+    - WebSocket Approval Key 자동 갱신 및 파일 공유
     - Rate Limit 고려한 재시도 로직 (기획서 5.1절)
-      * REST: 50건/초 (2025년 11월 1일부터)
     - 오류 유형별 처리 (기획서 8.1절)
     - 텔레그램 알림 (기획서 6.1절)
     """
@@ -53,24 +56,89 @@ class TokenManager:
         # ✅ 토큰 만료 마진 (토큰 만료 전 재갱신)
         self.token_refresh_margin = config.get('system', {}).get('token_refresh_margin_minutes', 5)
         
-        # ✅ Approval Key 만료 간격: 실제 만료 시간 추정 (한투증권 문서 기준 24시간)
-        # 하지만 안전을 위해 30분마다 갱신하는 것은 너무 빈번함
-        # 12시간(43200초)으로 설정하고, 만료 1시간 전에 갱신
+        # ✅ Approval Key 만료 간격 설정
         self.approval_validity_seconds = config.get('system', {}).get('approval_validity_seconds', 43200)  # 12시간
         self.approval_refresh_margin = config.get('system', {}).get('approval_refresh_margin_seconds', 3600)  # 1시간 전 갱신
         
-        # ✅ 추가: 재시도 설정 (기획서 8.1절)
+        # ✅ 재시도 설정 (기획서 8.1절)
         self.max_retries = 3
         self.retry_delays = [1, 3, 5]  # 초 단위
         
-        # ✅ 추가: Rate Limit 추적
+        # ✅ Rate Limit 추적
         self.last_token_request_time = None
         self.last_approval_request_time = None
         self.min_request_interval = 1.0  # 최소 1초 간격
 
+        # ✅ 초기화 시 파일에서 토큰 로드 시도
+        self._load_token_from_file()
+
+    def _load_token_from_file(self):
+        """
+        ✅ 추가: 파일에서 토큰 정보를 불러옵니다. (프로세스 간 공유)
+        """
+        if not os.path.exists(TOKEN_FILE_PATH):
+            return
+
+        try:
+            with open(TOKEN_FILE_PATH, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+                now = datetime.now()
+                
+                # Access Token 복구
+                if 'access_token' in data and 'expires_at' in data:
+                    expires_str = data.get('expires_at')
+                    if expires_str:
+                        expires = datetime.fromisoformat(expires_str)
+                        if expires > now:
+                            self.access_token = data['access_token']
+                            self.token_expires_at = expires
+                            logger.info(f"📂 파일에서 Access Token 로드 완료 (만료: {expires})")
+                
+                # Approval Key 복구
+                if 'approval_key' in data and 'approval_expires_at' in data:
+                    app_expires_str = data.get('approval_expires_at')
+                    if app_expires_str:
+                        app_expires = datetime.fromisoformat(app_expires_str)
+                        if app_expires > now:
+                            self.approval_key = data['approval_key']
+                            self.approval_expires_at = app_expires
+                            logger.info(f"📂 파일에서 Approval Key 로드 완료 (만료: {app_expires})")
+
+        except Exception as e:
+            logger.warning(f"⚠️ 토큰 파일 로드 실패 (무시하고 새로 발급): {e}")
+
+    def _save_token_to_file(self):
+        """
+        ✅ 추가: 현재 토큰 정보를 파일에 저장합니다.
+        """
+        try:
+            data = {}
+            # 기존 파일 내용 읽기 (기존 정보를 덮어쓰지 않기 위해)
+            if os.path.exists(TOKEN_FILE_PATH):
+                try:
+                    with open(TOKEN_FILE_PATH, 'r', encoding='utf-8') as f:
+                        data = json.load(f)
+                except Exception:
+                    data = {}
+
+            # 현재 메모리에 있는 유효한 정보 업데이트
+            if self.access_token and self.token_expires_at:
+                data['access_token'] = self.access_token
+                data['expires_at'] = self.token_expires_at.isoformat()
+            
+            if self.approval_key and self.approval_expires_at:
+                data['approval_key'] = self.approval_key
+                data['approval_expires_at'] = self.approval_expires_at.isoformat()
+            
+            with open(TOKEN_FILE_PATH, 'w', encoding='utf-8') as f:
+                json.dump(data, f, indent=2)
+            # logger.debug("💾 토큰 정보 파일 저장 완료")
+        except Exception as e:
+            logger.error(f"❌ 토큰 파일 저장 실패: {e}")
+
     def _wait_for_rate_limit(self, last_request_time):
         """
-        ✅ 추가: Rate Limit 고려한 대기 (기획서 5.1절)
+        Rate Limit 고려한 대기 (기획서 5.1절)
         """
         if last_request_time:
             elapsed = time.time() - last_request_time
@@ -81,7 +149,7 @@ class TokenManager:
 
     def _send_telegram_alert(self, message, level="warning"):
         """
-        ✅ 추가: 텔레그램 알림 전송 (기획서 6.1절)
+        텔레그램 알림 전송 (기획서 6.1절)
         """
         if self.telegram_bot and hasattr(self.telegram_bot, 'send_message'):
             try:
@@ -93,8 +161,6 @@ class TokenManager:
     def _request_access_token(self):
         """
         REST API용 Access Token 요청 (재시도 로직 포함)
-        
-        ✅ 개선: 기획서 8.1절 "오류 유형별 처리" 준수
         """
         url = f"{self.config['api']['base_url']}/oauth2/tokenP"
         headers = {"Content-Type": "application/json"}
@@ -104,10 +170,10 @@ class TokenManager:
             "appsecret": self.config['api_secret']
         }
         
-        # ✅ Rate Limit 보호
+        # Rate Limit 보호
         self._wait_for_rate_limit(self.last_token_request_time)
         
-        # ✅ 재시도 로직
+        # 재시도 로직
         for attempt in range(self.max_retries):
             try:
                 logger.info(f"🔑 Access Token 요청 중... (시도 {attempt + 1}/{self.max_retries})")
@@ -115,7 +181,7 @@ class TokenManager:
                 resp = requests.post(url, headers=headers, json=body, timeout=10)
                 self.last_token_request_time = time.time()
                 
-                # ✅ Rate Limit 오류 처리
+                # Rate Limit 오류 처리
                 if resp.status_code == 429:
                     retry_after = int(resp.headers.get('Retry-After', 60))
                     logger.warning(f"⚠️ Rate Limit 초과 (429), {retry_after}초 후 재시도")
@@ -123,7 +189,7 @@ class TokenManager:
                     time.sleep(retry_after)
                     continue
                 
-                # ✅ 인증 오류 처리
+                # 인증 오류 처리
                 if resp.status_code in [401, 403]:
                     logger.error(f"❌ 인증 실패 (HTTP {resp.status_code})")
                     self._send_telegram_alert(f"Access Token 인증 실패\nHTTP {resp.status_code}\n설정 확인 필요", "critical")
@@ -139,6 +205,9 @@ class TokenManager:
                     self.access_token = token
                     self.token_expires_at = datetime.now() + timedelta(seconds=expires_in)
                     logger.info(f"✅ Access Token 발급 성공 (만료: {self.token_expires_at.strftime('%Y-%m-%d %H:%M:%S')})")
+                    
+                    # ✅ 성공 시 파일 저장
+                    self._save_token_to_file()
                     return token
                 else:
                     logger.error(f"❌ Access Token 응답 누락: {data}")
@@ -161,7 +230,6 @@ class TokenManager:
                     raise NetworkError(f"네트워크 오류: {e}")
                     
             except AuthenticationError:
-                # 인증 오류는 재시도하지 않음
                 raise
                 
             except Exception as e:
@@ -176,70 +244,64 @@ class TokenManager:
 
     def get_access_token(self, force_refresh=False):
         """
-        유효한 Access Token 반환
-        
-        - 토큰 만료 5분 전이면 자동 갱신 (기본값)
-        - force_refresh=True 시 즉시 갱신
+        유효한 Access Token 반환 (파일 확인 -> 메모리 확인 -> 갱신)
         """
         now = datetime.now()
+
+        # ✅ 1. 강제 갱신이 아니면 파일 내용을 먼저 최신화
+        if not force_refresh:
+            self._load_token_from_file()
         
-        # 강제 갱신 또는 토큰 없음
-        if force_refresh or not self.access_token or not self.token_expires_at:
-            logger.info("🔄 Access Token 발급/갱신 시작")
-            return self._request_access_token()
-        
-        # ✅ 만료 전 마진 체크
-        time_until_expiry = (self.token_expires_at - now).total_seconds()
-        margin_seconds = self.token_refresh_margin * 60
-        
-        if time_until_expiry <= margin_seconds:
-            logger.info(f"🔄 Access Token 만료 임박 ({time_until_expiry:.0f}초 남음), 자동 갱신")
-            return self._request_access_token()
-        
-        # 유효한 토큰 반환
-        logger.debug(f"✅ Access Token 유효 ({time_until_expiry:.0f}초 남음)")
-        return self.access_token
+        # ✅ 2. 메모리/파일에 유효한 토큰이 있는지 확인
+        if not force_refresh and self.access_token and self.token_expires_at:
+            time_until_expiry = (self.token_expires_at - now).total_seconds()
+            margin_seconds = self.token_refresh_margin * 60
+            
+            # 만료 시간과 마진을 비교하여 유효하면 반환
+            if time_until_expiry > margin_seconds:
+                # logger.debug(f"✅ Access Token 유효 ({time_until_expiry:.0f}초 남음)")
+                return self.access_token
+
+        # ✅ 3. 없거나 만료 임박이면 새로 발급
+        logger.info("🔄 Access Token 신규 발급/갱신 시작")
+        return self._request_access_token()
 
     def _request_approval_key(self):
         """
         WebSocket용 Approval Key 요청 (재시도 로직 포함)
-        
-        ✅ 개선: 기획서 8.1절 "오류 유형별 처리" 준수
         """
         url = f"{self.config['api']['base_url']}/oauth2/Approval"
         
-        # ✅ Access Token 확보
+        # Access Token 확보
         token = self.get_access_token()
         if not token:
             logger.error("❌ Approval Key 요청 시 Access Token 없음")
             self._send_telegram_alert("Approval Key 발급 불가\nAccess Token 없음", "critical")
             return None
 
-        # ✅ 공식 GitHub 코드 기준 헤더
         headers = {
             "Content-Type": "application/json",
             "Accept": "text/plain",
             "charset": "UTF-8"
         }
         
-        # ✅ Body 데이터 (GitHub 공식 스펙)
         data = {
             "grant_type": "client_credentials",
             "appkey": self.config['api_key'],
             "secretkey": self.config['api_secret']
         }
         
-        # ✅ Rate Limit 보호
+        # Rate Limit 보호
         self._wait_for_rate_limit(self.last_approval_request_time)
         
-        # ✅ 재시도 로직
+        # 재시도 로직
         for attempt in range(self.max_retries):
             try:
                 logger.info(f"🔐 Approval Key 요청 중... (시도 {attempt + 1}/{self.max_retries})")
                 resp = requests.post(url, data=json.dumps(data), headers=headers, timeout=10)
                 self.last_approval_request_time = time.time()
                 
-                # ✅ Rate Limit 오류 처리
+                # Rate Limit 오류 처리
                 if resp.status_code == 429:
                     retry_after = int(resp.headers.get('Retry-After', 60))
                     logger.warning(f"⚠️ Rate Limit 초과 (429), {retry_after}초 후 재시도")
@@ -247,10 +309,9 @@ class TokenManager:
                     time.sleep(retry_after)
                     continue
                 
-                # ✅ 인증 오류 처리
+                # 인증 오류 처리
                 if resp.status_code in [401, 403]:
                     logger.error(f"❌ 인증 실패 (HTTP {resp.status_code}), Access Token 갱신 시도")
-                    # Access Token 갱신 후 재시도
                     token = self.get_access_token(force_refresh=True)
                     if token:
                         continue
@@ -265,9 +326,11 @@ class TokenManager:
                 
                 if key:
                     self.approval_key = key
-                    # ✅ 개선: 실제 만료 시간 계산
                     self.approval_expires_at = datetime.now() + timedelta(seconds=self.approval_validity_seconds)
                     logger.info(f"✅ Approval Key 발급 성공 (만료: {self.approval_expires_at.strftime('%Y-%m-%d %H:%M:%S')})")
+                    
+                    # ✅ 성공 시 파일 저장
+                    self._save_token_to_file()
                     return key
                 else:
                     logger.error(f"❌ Approval Key 응답 누락: {data}")
@@ -290,7 +353,6 @@ class TokenManager:
                     raise NetworkError(f"네트워크 오류: {e}")
                     
             except AuthenticationError:
-                # 인증 오류는 재시도하지 않음
                 raise
                 
             except Exception as e:
@@ -305,35 +367,34 @@ class TokenManager:
 
     def get_approval_key(self, force_refresh=False):
         """
-        유효한 Approval Key 반환
-        
-        ✅ 개선: 만료 시간 계산 로직 개선
-        - Approval Key 만료 1시간 전이면 자동 갱신 (기본값)
-        - force_refresh=True 시 즉시 갱신
+        유효한 Approval Key 반환 (파일 확인 -> 메모리 확인 -> 갱신)
         """
         now = datetime.now()
         
-        # 강제 갱신 또는 키 없음
-        if force_refresh or not self.approval_key or not self.approval_expires_at:
-            logger.info("🔄 Approval Key 발급/갱신 시작")
-            return self._request_approval_key()
+        # ✅ 1. 강제 갱신이 아니면 파일 내용을 먼저 최신화
+        if not force_refresh:
+            self._load_token_from_file()
+
+        # ✅ 2. 메모리/파일에 유효한 키가 있는지 확인
+        if not force_refresh and self.approval_key and self.approval_expires_at:
+            time_until_expiry = (self.approval_expires_at - now).total_seconds()
+            
+            if time_until_expiry > self.approval_refresh_margin:
+                # logger.debug(f"✅ Approval Key 유효 ({time_until_expiry:.0f}초 남음)")
+                return self.approval_key
         
-        # ✅ 만료 전 마진 체크
-        time_until_expiry = (self.approval_expires_at - now).total_seconds()
-        
-        if time_until_expiry <= self.approval_refresh_margin:
-            logger.info(f"🔄 Approval Key 만료 임박 ({time_until_expiry:.0f}초 남음), 자동 갱신")
-            return self._request_approval_key()
-        
-        # 유효한 키 반환
-        logger.debug(f"✅ Approval Key 유효 ({time_until_expiry:.0f}초 남음)")
-        return self.approval_key
+        # ✅ 3. 없거나 만료 임박이면 새로 발급
+        logger.info("🔄 Approval Key 신규 발급/갱신 시작")
+        return self._request_approval_key()
 
     def get_token_status(self):
         """
-        ✅ 추가: 토큰 상태 확인 (디버깅/모니터링용)
+        토큰 상태 확인 (디버깅/모니터링용)
         """
         now = datetime.now()
+        
+        # 파일 최신 상태 한번 더 확인
+        self._load_token_from_file()
         
         access_status = {
             'exists': bool(self.access_token),
@@ -364,13 +425,13 @@ if __name__ == "__main__":
     from config import load_config
 
     print("=" * 80)
-    print("🧪 TokenManager 테스트 (기획서 v1.1 준수 버전)")
+    print("🧪 TokenManager 테스트 (파일 공유 기능 추가 버전)")
     print("=" * 80)
     
     cfg = load_config('production')
     tm = TokenManager(cfg)
 
-    print("\n1️⃣ Access Token 발급 테스트")
+    print("\n1️⃣ Access Token 발급/로드 테스트")
     print("-" * 80)
     try:
         token = tm.get_access_token()
@@ -383,7 +444,7 @@ if __name__ == "__main__":
     except Exception as e:
         print(f"❌ 실패: {e}")
 
-    print("\n2️⃣ Approval Key 발급 테스트")
+    print("\n2️⃣ Approval Key 발급/로드 테스트")
     print("-" * 80)
     try:
         key = tm.get_approval_key()
@@ -396,16 +457,15 @@ if __name__ == "__main__":
     except Exception as e:
         print(f"❌ 실패: {e}")
     
-    print("\n3️⃣ 자동 갱신 테스트")
+    print("\n3️⃣ 파일 저장 확인")
     print("-" * 80)
-    try:
-        # 강제 갱신 테스트
-        print("🔄 강제 갱신 시도...")
-        token = tm.get_access_token(force_refresh=True)
-        print(f"✅ 갱신된 Access Token: {token[:30]}...")
-    except Exception as e:
-        print(f"❌ 실패: {e}")
-    
+    if os.path.exists(TOKEN_FILE_PATH):
+        print(f"✅ {TOKEN_FILE_PATH} 파일이 존재합니다.")
+        with open(TOKEN_FILE_PATH, 'r', encoding='utf-8') as f:
+            print(f"📄 파일 내용: {f.read()[:100]}...")
+    else:
+        print(f"❌ {TOKEN_FILE_PATH} 파일이 없습니다.")
+
     print("\n" + "=" * 80)
     print("✅ 테스트 완료")
     print("=" * 80)
