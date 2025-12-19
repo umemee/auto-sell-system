@@ -1,10 +1,11 @@
-# auth.py - 한국투자증권 API 인증/토큰 관리 (파일 공유 기능 추가 및 기획서 v1.1 준수)
+# auth.py - 한국투자증권 API 인증/토큰 관리 (파일 공유 기능 + 스레드 Lock 적용 버전)
 
 import requests
 import json
 import logging
 import time
 import os
+import threading  # ✅ [추가] 스레드 락 기능을 위해 추가
 from datetime import datetime, timedelta
 
 logger = logging.getLogger(__name__)
@@ -35,14 +36,13 @@ class NetworkError(KISAPIError):
 
 class TokenManager:
     """
-    한국투자증권 API용 TokenManager (기획서 v1.1 완전 준수 + 토큰 파일 공유)
+    한국투자증권 API용 TokenManager (기획서 v1.1 완전 준수 + 토큰 파일 공유 + 스레드 안전)
     
     주요 기능:
     - REST 액세스 토큰 자동 갱신 및 파일 공유 (token_store.json)
     - WebSocket Approval Key 자동 갱신 및 파일 공유
-    - Rate Limit 고려한 재시도 로직 (기획서 5.1절)
-    - 오류 유형별 처리 (기획서 8.1절)
-    - 텔레그램 알림 (기획서 6.1절)
+    - Rate Limit 고려한 재시도 로직
+    - 멀티스레드 환경에서의 충돌 방지 (Lock)
     """
 
     def __init__(self, config, telegram_bot=None):
@@ -53,6 +53,9 @@ class TokenManager:
         self.approval_key = None
         self.approval_expires_at = None
 
+        # ✅ [추가] 스레드 충돌 방지용 락 생성 (RLock 사용으로 데드락 방지)
+        self.lock = threading.RLock()
+
         # ✅ 토큰 만료 마진 (토큰 만료 전 재갱신)
         self.token_refresh_margin = config.get('system', {}).get('token_refresh_margin_minutes', 5)
         
@@ -60,7 +63,7 @@ class TokenManager:
         self.approval_validity_seconds = config.get('system', {}).get('approval_validity_seconds', 43200)  # 12시간
         self.approval_refresh_margin = config.get('system', {}).get('approval_refresh_margin_seconds', 3600)  # 1시간 전 갱신
         
-        # ✅ 재시도 설정 (기획서 8.1절)
+        # ✅ 재시도 설정
         self.max_retries = 3
         self.retry_delays = [1, 3, 5]  # 초 단위
         
@@ -74,7 +77,7 @@ class TokenManager:
 
     def _load_token_from_file(self):
         """
-        ✅ 추가: 파일에서 토큰 정보를 불러옵니다. (프로세스 간 공유)
+        파일에서 토큰 정보를 불러옵니다. (프로세스 간 공유)
         """
         if not os.path.exists(TOKEN_FILE_PATH):
             return
@@ -109,7 +112,7 @@ class TokenManager:
 
     def _save_token_to_file(self):
         """
-        ✅ 추가: 현재 토큰 정보를 파일에 저장합니다.
+        현재 토큰 정보를 파일에 저장합니다.
         """
         try:
             data = {}
@@ -138,7 +141,7 @@ class TokenManager:
 
     def _wait_for_rate_limit(self, last_request_time):
         """
-        Rate Limit 고려한 대기 (기획서 5.1절)
+        Rate Limit 고려한 대기
         """
         if last_request_time:
             elapsed = time.time() - last_request_time
@@ -149,7 +152,7 @@ class TokenManager:
 
     def _send_telegram_alert(self, message, level="warning"):
         """
-        텔레그램 알림 전송 (기획서 6.1절)
+        텔레그램 알림 전송
         """
         if self.telegram_bot and hasattr(self.telegram_bot, 'send_message'):
             try:
@@ -244,27 +247,28 @@ class TokenManager:
 
     def get_access_token(self, force_refresh=False):
         """
-        유효한 Access Token 반환 (파일 확인 -> 메모리 확인 -> 갱신)
+        유효한 Access Token 반환 (스레드 안전)
         """
-        now = datetime.now()
+        # ✅ [수정] 스레드 Lock을 걸어 동시 접근 제어
+        with self.lock:
+            now = datetime.now()
 
-        # ✅ 1. 강제 갱신이 아니면 파일 내용을 먼저 최신화
-        if not force_refresh:
-            self._load_token_from_file()
-        
-        # ✅ 2. 메모리/파일에 유효한 토큰이 있는지 확인
-        if not force_refresh and self.access_token and self.token_expires_at:
-            time_until_expiry = (self.token_expires_at - now).total_seconds()
-            margin_seconds = self.token_refresh_margin * 60
+            # ✅ 1. 강제 갱신이 아니면 파일 내용을 먼저 최신화
+            if not force_refresh:
+                self._load_token_from_file()
             
-            # 만료 시간과 마진을 비교하여 유효하면 반환
-            if time_until_expiry > margin_seconds:
-                # logger.debug(f"✅ Access Token 유효 ({time_until_expiry:.0f}초 남음)")
-                return self.access_token
+            # ✅ 2. 메모리/파일에 유효한 토큰이 있는지 확인
+            if not force_refresh and self.access_token and self.token_expires_at:
+                time_until_expiry = (self.token_expires_at - now).total_seconds()
+                margin_seconds = self.token_refresh_margin * 60
+                
+                # 만료 시간과 마진을 비교하여 유효하면 반환
+                if time_until_expiry > margin_seconds:
+                    return self.access_token
 
-        # ✅ 3. 없거나 만료 임박이면 새로 발급
-        logger.info("🔄 Access Token 신규 발급/갱신 시작")
-        return self._request_access_token()
+            # ✅ 3. 없거나 만료 임박이면 새로 발급
+            logger.info("🔄 Access Token 신규 발급/갱신 시작")
+            return self._request_access_token()
 
     def _request_approval_key(self):
         """
@@ -367,25 +371,26 @@ class TokenManager:
 
     def get_approval_key(self, force_refresh=False):
         """
-        유효한 Approval Key 반환 (파일 확인 -> 메모리 확인 -> 갱신)
+        유효한 Approval Key 반환 (스레드 안전)
         """
-        now = datetime.now()
-        
-        # ✅ 1. 강제 갱신이 아니면 파일 내용을 먼저 최신화
-        if not force_refresh:
-            self._load_token_from_file()
-
-        # ✅ 2. 메모리/파일에 유효한 키가 있는지 확인
-        if not force_refresh and self.approval_key and self.approval_expires_at:
-            time_until_expiry = (self.approval_expires_at - now).total_seconds()
+        # ✅ [수정] 스레드 Lock을 걸어 동시 접근 제어
+        with self.lock:
+            now = datetime.now()
             
-            if time_until_expiry > self.approval_refresh_margin:
-                # logger.debug(f"✅ Approval Key 유효 ({time_until_expiry:.0f}초 남음)")
-                return self.approval_key
-        
-        # ✅ 3. 없거나 만료 임박이면 새로 발급
-        logger.info("🔄 Approval Key 신규 발급/갱신 시작")
-        return self._request_approval_key()
+            # ✅ 1. 강제 갱신이 아니면 파일 내용을 먼저 최신화
+            if not force_refresh:
+                self._load_token_from_file()
+
+            # ✅ 2. 메모리/파일에 유효한 키가 있는지 확인
+            if not force_refresh and self.approval_key and self.approval_expires_at:
+                time_until_expiry = (self.approval_expires_at - now).total_seconds()
+                
+                if time_until_expiry > self.approval_refresh_margin:
+                    return self.approval_key
+            
+            # ✅ 3. 없거나 만료 임박이면 새로 발급
+            logger.info("🔄 Approval Key 신규 발급/갱신 시작")
+            return self._request_approval_key()
 
     def get_token_status(self):
         """
@@ -425,7 +430,7 @@ if __name__ == "__main__":
     from config import load_config
 
     print("=" * 80)
-    print("🧪 TokenManager 테스트 (파일 공유 기능 추가 버전)")
+    print("🧪 TokenManager 테스트 (파일 공유 + 스레드 안전 버전)")
     print("=" * 80)
     
     cfg = load_config('production')
