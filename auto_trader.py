@@ -68,7 +68,13 @@ class AutoTrader:
         self.TOUCH_THRESHOLD = auto_config['touch_threshold']
         self.VOLUME_MULTIPLIER = auto_config['volume_multiplier']
         self.STOP_LOSS = auto_config['stop_loss']
-        self.TAKE_PROFIT = auto_config['take_profit']
+        self.TAKE_PROFIT_TIER1 = auto_config.get('take_profit_tier1', 3)
+        self.TAKE_PROFIT_TIER2 = auto_config.get('take_profit_tier2', 6)
+        self.TRAILING_STOP = auto_config.get('trailing_stop_distance', 2)
+
+        # 추적 손절용 변수 추가
+        self.position_peak_profit: Dict[str, float] = {}  # 종목별 최고 수익률
+        self.position_partial_sold: Dict[str, bool] = {}  # 종목별 분할 익절 여부
         
         # 상태 변수
         self.watch_list: List[str] = []
@@ -565,13 +571,25 @@ class AutoTrader:
                     'created_at': datetime.now().isoformat()
                 }
     
-                if hasattr(self, 'order_monitor') and self.order_monitor:
-                    self.order_monitor.register_order(
-                        result['order_no'], 
+                # ✨ v3.0: OrderExecutor에 등록 (3단계 출구 전략 사용)
+                if hasattr(self, 'order_executor') and self.order_executor:
+                    self.order_executor.register_order(
+                        result['order_no'],
                         order_info
                     )
-                    logger.info(f"✅ {ticker} OrderMonitor 등록 완료 (손절/익절 감시 시작)")
-    
+                    logger.info(f"✅ {ticker} OrderExecutor 등록 완료 (3단계 출구 전략 시작)")
+
+                # v1.x/v2.0: SmartOrderMonitor에도 등록 (백업 감시)
+                if hasattr(self, 'order_monitor') and self.order_monitor:
+                    self.order_monitor.add_order_to_monitor(
+                        order_no=result['order_no'],
+                        ticker=ticker,
+                        quantity=result['quantity'],
+                        buy_price=result['price'],
+                        source='v3_agg'
+                    )
+                    logger.info(f"✅ {ticker} SmartOrderMonitor 등록 완료 (백업 감시)")
+                
                 logger.info(
                     f"✅ {ticker} 매수 성공\n"
                     f"  수량: {result['quantity']}주\n"
@@ -810,7 +828,40 @@ class AutoTrader:
         
         except Exception as e:
             logger.error(f"❌ 상태 로드 오류: {e}")
-
+    def _check_exit_conditions(self, ticker: str, current_price: float, buy_price: float) -> tuple[bool, str]:
+        """
+        3단계 출구 전략 체크
+    
+        Returns:
+            (매도 여부, 매도 사유)
+        """
+        profit_rate = ((current_price - buy_price) / buy_price) * 100
+    
+        # 티어별 최고 수익률 추적
+        if ticker not in self.position_peak_profit:
+            self.position_peak_profit[ticker] = profit_rate
+        else:
+            self.position_peak_profit[ticker] = max(self.position_peak_profit[ticker], profit_rate)
+    
+        # Tier 1: 초기 손절 (-3%)
+        if profit_rate <= self.STOP_LOSS:
+            return (True, f"초기 손절 ({profit_rate:.2f}%)")
+    
+        # Tier 2: 1차 익절 (3% 도달 시 50% 매도)
+        if profit_rate >= self.TAKE_PROFIT_TIER1 and not self.position_partial_sold.get(ticker, False):
+            self.position_partial_sold[ticker] = True
+            return (True, f"1차 익절 50% ({profit_rate:.2f}%)")
+    
+        # Tier 3: 추적 손절 (1차 익절 후 활성화)
+        if self.position_partial_sold.get(ticker, False):
+            if profit_rate < self.position_peak_profit[ticker] - self.TRAILING_STOP:
+                return (True, f"추적 손절 (최고 {self.position_peak_profit[ticker]:.1f}% → 현재 {profit_rate:.1f}%)")
+    
+        # Tier 4: 최종 익절 (6%)
+        if profit_rate >= self.TAKE_PROFIT_TIER2:
+            return (True, f"최종 익절 ({profit_rate:.2f}%)")
+    
+        return (False, "")
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # 테스트 코드
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━

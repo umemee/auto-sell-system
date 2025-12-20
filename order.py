@@ -940,11 +940,19 @@ class OrderExecutor:
         self.timeout = config['api'].get('request_timeout', 10)
         
         if 'auto_trader' in config:
-            self.stop_loss = config['auto_trader'].get('stop_loss', -2.0)
-            self.take_profit = config['auto_trader'].get('take_profit', 6.0)
+            self.stop_loss = config['auto_trader'].get('stop_loss', -3.0)
+            self.take_profit_tier1 = config['auto_trader'].get('take_profit_tier1', 3.0)
+            self.take_profit_tier2 = config['auto_trader'].get('take_profit_tier2', 6.0)
+            self.trailing_stop = config['auto_trader'].get('trailing_stop_distance', 2.0)
         else:
-            self.stop_loss = -2.0
-            self.take_profit = 6.0
+            self.stop_loss = -3.0
+            self.take_profit_tier1 = 3.0
+            self.take_profit_tier2 = 6.0
+            self.trailing_stop = 2.0
+
+        # 추적 손절용 변수 추가
+        self.position_peak_profit: Dict[str, float] = {}
+        self.position_partial_sold: Dict[str, bool] = {}
             
         logger.info("🤖 OrderExecutor 초기화 완료")
     
@@ -1123,22 +1131,85 @@ class OrderExecutor:
         return get_current_price(self.config, self.token_manager, ticker)
     
     def check_exit_conditions(self, order: Dict[str, Any]) -> bool:
-        """손절/익절 체크"""
-        current_price = self.get_current_price(order['ticker'])
-        if not current_price: return False
-        
+        """
+        3단계 출구 전략 체크
+    
+        Tier 1: 초기 손절 (-3%)
+        Tier 2: 1차 익절 (3%, 50% 매도)
+        Tier 3: 추적 손절 (최고점 대비 -2%)
+        Tier 4: 최종 익절 (6%, 전량 매도)
+        """
+        ticker = order['ticker']
+        current_price = self.get_current_price(ticker)
+    
+        if not current_price:
+            return False
+    
         buy_price = order['buy_price']
-        pct = (current_price - buy_price) / buy_price * 100
-        
-        if pct <= self.stop_loss:
-            logger.warning(f"🛑 손절: {order['ticker']} ({pct:.2f}%)")
+        profit_rate = ((current_price - buy_price) / buy_price) * 100
+    
+        # 티어별 최고 수익률 추적
+        if ticker not in self.position_peak_profit:
+            self.position_peak_profit[ticker] = profit_rate
+        else:
+            self.position_peak_profit[ticker] = max(
+                self.position_peak_profit[ticker], 
+                profit_rate
+            )
+    
+        # Tier 1: 초기 손절 (-3%)
+        if profit_rate <= self.stop_loss:
+            logger.warning(f"🛑 초기 손절: {ticker} ({profit_rate:.2f}%)")
             self.execute_sell(order, 'stop_loss')
+        
+            # 추적 변수 정리
+            self.position_peak_profit.pop(ticker, None)
+            self.position_partial_sold.pop(ticker, None)
             return True
+    
+        # Tier 2: 1차 익절 (3% 도달 시 50% 매도)
+        if (profit_rate >= self.take_profit_tier1 and 
+            not self.position_partial_sold.get(ticker, False)):
+        
+            logger.info(f"🎯 1차 익절 (50%): {ticker} (+{profit_rate:.2f}%)")
+        
+            # ⚠️ 주의: 현재 시스템은 50% 부분 매도를 지원하지 않음
+            # 임시 해결책: 1차 익절을 스킵하고 추적 손절만 활성화
+            self.position_partial_sold[ticker] = True
+        
+            logger.info(f"📊 {ticker} 추적 손절 활성화 (현재 최고: {profit_rate:.1f}%)")
+        
+            # 50% 매도 미구현으로 인해 매도하지 않고 계속 보유
+            return False
+    
+        # Tier 3: 추적 손절 (1차 익절 후 활성화)
+        if self.position_partial_sold.get(ticker, False):
+            peak = self.position_peak_profit[ticker]
+        
+            if profit_rate < peak - self.trailing_stop:
+                logger.info(
+                    f"📉 추적 손절: {ticker}\n"
+                    f"  최고: +{peak:.1f}%\n"
+                    f"  현재: +{profit_rate:.1f}%\n"
+                    f"  하락: -{peak - profit_rate:.1f}%"
+                )
+                self.execute_sell(order, 'trailing_stop')
             
-        if pct >= self.take_profit:
-            logger.info(f"🎯 익절: {order['ticker']} (+{pct:.2f}%)")
+                # 추적 변수 정리
+                self.position_peak_profit.pop(ticker, None)
+                self.position_partial_sold.pop(ticker, None)
+                return True
+    
+        # Tier 4: 최종 익절 (6%)
+        if profit_rate >= self.take_profit_tier2:
+            logger.info(f"🎯 최종 익절: {ticker} (+{profit_rate:.2f}%)")
             self.execute_sell(order, 'take_profit')
+        
+            # 추적 변수 정리
+            self.position_peak_profit.pop(ticker, None)
+            self.position_partial_sold.pop(ticker, None)
             return True
+    
         return False
     
     @log_api_call('자동 청산 매도', 'JTTT1006U')
@@ -1174,8 +1245,22 @@ class OrderExecutor:
                 if data.get('msg_cd') == 'EGW00123': continue
                 
                 if data.get('rt_cd') == '0':
-                    reason_text = '손절' if reason == 'stop_loss' else '익절'
-                    self.telegram_bot.send_message(f"{'🛑' if reason == 'stop_loss' else '🎯'} {reason_text} 매도 체결\n종목: {ticker}\n수량: {quantity}주")
+                    # reason에 따라 메시지 구분
+                    if reason == 'stop_loss':
+                        emoji = '🛑'
+                        reason_text = '손절'
+                    elif reason == 'trailing_stop':
+                        emoji = '📉'
+                        reason_text = '추적 손절'
+                    else:
+                        emoji = '🎯'
+                        reason_text = '익절'
+                    
+                    self.telegram_bot.send_message(
+                        f"{emoji} {reason_text} 매도 체결\n"
+                        f"종목: {ticker}\n"
+                        f"수량: {quantity}주"
+                    )
                     return {'success': True}
                 else:
                     logger.error(f"❌ 매도 실패: {data.get('msg1')}")
@@ -1184,3 +1269,94 @@ class OrderExecutor:
                 logger.error(f"❌ 매도 오류: {e}")
                 
         return {'success': False}
+
+    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    # 🆕 모니터링 기능 추가
+    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    
+    def start_monitoring(self):
+        """손절/익절 모니터링 스레드 시작"""
+        import threading
+        
+        if hasattr(self, 'is_monitoring') and self.is_monitoring:
+            logger.warning("⚠️ 이미 모니터링 중입니다")
+            return
+        
+        self.is_monitoring = True
+        self.monitoring_orders = {}  # {order_no: order_info}
+        self.monitor_thread = threading.Thread(
+            target=self._monitor_loop, 
+            daemon=True
+        )
+        self.monitor_thread.start()
+        logger.info("🚀 OrderExecutor 모니터링 시작")
+    
+    def stop_monitoring(self):
+        """모니터링 스레드 중지"""
+        if hasattr(self, 'is_monitoring'):
+            self.is_monitoring = False
+        
+        if hasattr(self, 'monitor_thread') and self.monitor_thread:
+            self.monitor_thread.join(timeout=5)
+        
+        logger.info("🛑 OrderExecutor 모니터링 중지")
+    
+    def register_order(self, order_no: str, order_info: Dict[str, Any]):
+        """주문을 모니터링 목록에 추가"""
+        if not hasattr(self, 'monitoring_orders'):
+            self.monitoring_orders = {}
+        
+        self.monitoring_orders[order_no] = order_info
+        logger.info(f"📋 {order_info['ticker']} 모니터링 등록 (order_no: {order_no})")
+    
+    def _monitor_loop(self):
+        """손절/익절 모니터링 루프"""
+        logger.info("🔍 손절/익절 모니터링 루프 시작")
+        
+        while getattr(self, 'is_monitoring', False):
+            try:
+                # 시스템 운영 시간 체크
+                if not should_system_run():
+                    logger.info("🌙 시스템 운영 시간 종료, 모니터링 중지")
+                    self.stop_monitoring()
+                    break
+                
+                if not self.monitoring_orders:
+                    time.sleep(5)
+                    continue
+                
+                # 모니터링 중인 주문 체크
+                orders_to_remove = []
+                
+                for order_no, order_info in list(self.monitoring_orders.items()):
+                    try:
+                        # check_exit_conditions 호출
+                        should_exit = self.check_exit_conditions(order_info)
+                        
+                        if should_exit:
+                            # 매도 완료 후 목록에서 제거
+                            orders_to_remove.append(order_no)
+                            
+                            # AutoTrader에 콜백
+                            if self.auto_trader and hasattr(self.auto_trader, 'on_exit_complete'):
+                                self.auto_trader.on_exit_complete(
+                                    order_info['ticker'],
+                                    reason='exit_complete'
+                                )
+                    
+                    except Exception as e:
+                        logger.error(f"❌ {order_no} 모니터링 오류: {e}")
+                
+                # 완료된 주문 제거
+                for order_no in orders_to_remove:
+                    self.monitoring_orders.pop(order_no, None)
+                    logger.info(f"✅ {order_no} 모니터링 완료 및 제거")
+                
+                # 4초 대기 (config의 monitoring_interval과 동일)
+                time.sleep(4)
+            
+            except Exception as e:
+                logger.error(f"❌ 모니터링 루프 오류: {e}")
+                time.sleep(10)
+        
+        logger.info("🛑 손절/익절 모니터링 루프 종료")

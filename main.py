@@ -362,10 +362,14 @@ def main():
                 config=config,
                 token_manager=token_manager,
                 telegram_bot=telegram_bot,
-                auto_trader=None  # 나중에 주입
+                auto_trader=None
             )
             logging.info("✅ OrderExecutor 초기화 완료")
-            
+
+            # ✨ 모니터링 시작
+            order_executor.start_monitoring()
+            logging.info("✅ OrderExecutor 모니터링 활성화")
+
             # 5-2. RankingUpdater 초기화
             ranking_updater = RankingUpdater(
                 config=config,
