@@ -12,6 +12,7 @@ import logging
 import time
 import threading
 import os
+import signal
 import fcntl
 import sys
 from datetime import datetime, timedelta, time as dtime
@@ -723,6 +724,12 @@ class SmartOrderMonitor:
                 if not order_no or order_no in self.processed_orders or order_no in self.monitoring_orders:
                     continue
                 
+                # ✅ [재수정] v3.0(OrderExecutor)이 관리 중인 주문은 건너뛰기 (이중 매도 및 로직 충돌 방지)
+                # 이렇게 해야 order.py에 구현한 '50% 분할 매도'가 정상 작동합니다.
+                if hasattr(self, 'order_executor') and self.order_executor:
+                    if order_no in self.order_executor.monitoring_orders:
+                        continue
+
                 ticker = row.get('pdno', '').strip()
                 filled_qty_str = row.get('ft_ccld_qty', '0')
                 filled_price_str = row.get('ft_ccld_unpr3', '0')
@@ -791,8 +798,10 @@ class SmartOrderMonitor:
                 self.send_daily_trades_csv()
 
                 # 4. 시스템 완전 종료
-                logger.info("🛑 주말 슬립 모드: 시스템 완전 종료 (sys.exit(0))")
-                sys.exit(0)  # ✅ 완전 종료
+                logger.info("🛑 주말 슬립 모드: 메인 프로세스 종료 시그널 전송 (SIGINT)")
+                # ✅ [수정] 좀비 프로세스 방지를 위해 os.kill 사용하여 안전하게 종료
+                os.kill(os.getpid(), signal.SIGINT)
+                return
 
         except SystemExit:
             raise # sys.exit()은 다시 던져야 함
@@ -925,15 +934,12 @@ class SmartOrderMonitor:
             logger.error(f"❌ 당일 매매 내역 전송 오류: {e}")
 
     def start_websocket_mode(self):
-        # 🔴 [v2.0] WebSocket 미사용
-        logger.info("❌ WebSocket은 v2.0에서 사용되지 않습니다.")
-        return
+        # WebSocket 미사용
+        pass
 
     def stop_websocket_mode(self):
-        if self.ws_client:
-            logger.info("⏸️ Stopping WebSocket mode...")
-            self.ws_client.stop()
-        self.ws_client = None
+        # WebSocket 미사용
+        pass
 
     def calculate_polling_interval(self, order_info):
         if self.current_mode == 'closed':
@@ -1153,8 +1159,10 @@ class SmartOrderMonitor:
                         level="critical"
                     )
                 self.stop()
-                import sys
-                sys.exit(1)
+                
+                # ✅ [수정] 안전한 전체 프로세스 종료
+                import os, signal
+                os.kill(os.getpid(), signal.SIGINT)
             return None
 
     def execute_auto_sell(self, order_info, filled_price, order_no=None):

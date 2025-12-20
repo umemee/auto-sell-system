@@ -22,6 +22,7 @@ import threading
 import os
 from datetime import datetime
 from pytz import timezone
+import logging.handlers
 from logging.handlers import RotatingFileHandler
 from dotenv import load_dotenv
 
@@ -48,7 +49,7 @@ except ImportError as e:
 shutdown_requested = False
 telegram_bot = None
 smart_monitor = None
-telegram_order_manager = None
+# telegram_order_manager = None
 
 # 🆕 v3.0 전역 변수
 ranking_updater = None
@@ -56,47 +57,67 @@ auto_trader = None
 order_executor = None
 
 def setup_logging(debug=False, config=None):
-    """로깅 설정 (v3.0)"""
-    log_level = logging.DEBUG if debug else logging.INFO
-    formatter = logging.Formatter(
-        '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-    )
-    
-    # config.yaml에서 로그 파일 경로 읽기
-    if config:
-        log_file_path = config.get('logging', {}).get('file', {}).get('path', 'trading.log')
-    else:
-        log_file_path = 'trading.log'
-
-    # 로그 디렉토리 자동 생성
-    try:
-        log_dir = os.path.dirname(log_file_path)
-        if log_dir and not os.path.exists(log_dir):
-            os.makedirs(log_dir, exist_ok=True)
-            print(f"Log directory created: {log_dir}")
-    except Exception as e:
-        print(f"Warning: Failed to create log directory {log_dir}: {e}", file=sys.stderr)
-            
-    file_handler = RotatingFileHandler(
-        log_file_path, maxBytes=10*1024*1024, backupCount=5, encoding='utf-8'
-    )
-    file_handler.setLevel(log_level)
-    file_handler.setFormatter(formatter)
-    
-    console_handler = logging.StreamHandler()
-    console_handler.setLevel(log_level)
-    console_handler.setFormatter(formatter)
-    
+    """로깅 설정 (v3.0 - 구조화 및 한국 시간 적용)"""
+    # 1. 로거 초기화
     root_logger = logging.getLogger()
+    if root_logger.handlers:
+        root_logger.handlers = [] # 기존 핸들러 제거
+    
+    log_level = logging.DEBUG if debug else logging.INFO
     root_logger.setLevel(log_level)
-    root_logger.addHandler(file_handler)
-    root_logger.addHandler(console_handler)
+
+    # 한국 시간 포매터 정의
+    class KSTFormatter(logging.Formatter):
+        def converter(self, timestamp):
+            return datetime.fromtimestamp(timestamp, timezone('Asia/Seoul'))
+        def formatTime(self, record, datefmt=None):
+            dt = self.converter(record.created)
+            if datefmt: return dt.strftime(datefmt)
+            return dt.strftime('%Y-%m-%d %H:%M:%S')
+
+    fmt = KSTFormatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+
+    # 2. 경로 설정 (항상 logs 폴더 사용)
+    log_dir = 'logs'
+    if not os.path.exists(log_dir):
+        os.makedirs(log_dir, exist_ok=True)
+
+    # 3. 핸들러 생성 함수
+    def create_handler(filename, level, filter_func=None):
+        path = os.path.join(log_dir, filename)
+        handler = RotatingFileHandler(path, maxBytes=10*1024*1024, backupCount=5, encoding='utf-8')
+        handler.setFormatter(fmt)
+        handler.setLevel(level)
+        if filter_func: handler.addFilter(filter_func)
+        return handler
+
+    # [1] 전체 로그 (trading.log)
+    root_logger.addHandler(create_handler('trading.log', log_level))
+
+    # [2] 에러 로그 (error.log - 빨간색 경고만)
+    root_logger.addHandler(create_handler('error.log', logging.ERROR))
+
+    # [3] 전략 로그 (strategy.log - 매매 판단 로직)
+    root_logger.addHandler(create_handler('strategy.log', logging.INFO, 
+        lambda r: any(k in r.name for k in ['auto_trader', 'ranking'])))
+
+    # [4] API 로그 (api.log - 주문 및 인증)
+    root_logger.addHandler(create_handler('api.log', logging.INFO, 
+        lambda r: any(k in r.name for k in ['order', 'auth', 'smart'])))
+
+    # [5] 콘솔 출력
+    console = logging.StreamHandler(sys.stdout)
+    console.setFormatter(fmt)
+    console.setLevel(log_level)
+    root_logger.addHandler(console)
+    
+    print(f"✅ Log System Initialized: KST Timezone, Split Files (trading/error/strategy/api)")
 
 def emergency_stop(reason):
     """
     비상 정지 함수 (v3.0)
     """
-    global shutdown_requested, telegram_bot, smart_monitor, telegram_order_manager
+    global shutdown_requested, telegram_bot, smart_monitor
     global ranking_updater, auto_trader, order_executor
     
     logging.critical(f"🚨 긴급 시스템 종지 발동!")
@@ -128,10 +149,7 @@ def emergency_stop(reason):
             smart_monitor.stop()
             logging.info("✅ 스마트 모니터 (시스템 A) 정리 완료")
 
-        if telegram_order_manager and hasattr(telegram_order_manager, 'stop'):
-            telegram_order_manager.stop()
-            logging.info("✅ 텔레그램 주문 관리자 (시스템 B) 정리 완료")
-            
+        # 텔레그램 봇 정리
         if telegram_bot and hasattr(telegram_bot, 'stop'):
             telegram_bot.stop()
             logging.info("✅ 텔레그램 봇 정리 완료")
@@ -144,7 +162,7 @@ def emergency_stop(reason):
 
 def signal_handler(signum, frame):
     """안전한 종료 처리 (v3.0)"""
-    global shutdown_requested, telegram_bot, smart_monitor, telegram_order_manager
+    global shutdown_requested, telegram_bot, smart_monitor
     global ranking_updater, auto_trader, order_executor
     
     shutdown_requested = True
@@ -165,10 +183,6 @@ def signal_handler(signum, frame):
             smart_monitor.stop()
             logging.info("스마트 모니터(A)가 안전하게 종료되었습니다.")
 
-        if telegram_order_manager and hasattr(telegram_order_manager, 'stop'):
-            telegram_order_manager.stop()
-            logging.info("텔레그램 주문 관리자(B)가 안전하게 종료되었습니다.")
-            
         if telegram_bot and hasattr(telegram_bot, 'stop'):
             # 종료 시 통계 전달 시도
             trade_stats = None
@@ -248,7 +262,7 @@ def adaptive_market_monitor(config, token_manager, telegram_bot):
             time.sleep(60)
 
 def main():
-    global shutdown_requested, telegram_bot, smart_monitor, telegram_order_manager
+    global shutdown_requested, telegram_bot, smart_monitor
     global ranking_updater, auto_trader, order_executor
     
     # 1. 환경변수 로드
@@ -342,16 +356,17 @@ def main():
         smart_monitor = SmartOrderMonitor(config, token_manager, telegram_bot)
         shared_trade_counter = smart_monitor.trade_counter
         
-        # 4. v2.0: 텔레그램 주문 관리자 (시스템 B) 초기화
-        logging.info("🔧 텔레그램 주문 관리자(B) 초기화...")
-        telegram_order_manager = TelegramOrderManager(
-            config=config,
-            token_manager=token_manager,
-            telegram_bot=telegram_bot,
-            order_monitor=smart_monitor,
-            trade_counter=shared_trade_counter
-        )
-        logging.info("✅ [A] <-> [B] 통합 제어(TradeCounter) 연결 완료")
+        # 4. v2.0: 텔레그램 주문 관리자 (시스템 B) 초기화 -> [수정] 비활성화
+        # logging.info("🔧 텔레그램 주문 관리자(B) 초기화...")
+        # telegram_order_manager = TelegramOrderManager(
+        #     config=config,
+        #     token_manager=token_manager,
+        #     telegram_bot=telegram_bot,
+        #     order_monitor=smart_monitor,
+        #     trade_counter=shared_trade_counter
+        # )
+        # logging.info("✅ [A] <-> [B] 통합 제어(TradeCounter) 연결 완료")
+        telegram_order_manager = None 
         
         # 🆕 5. v3.0 컴포넌트 초기화 (enabled=true인 경우만)
         if v3_enabled:
@@ -396,23 +411,28 @@ def main():
             if telegram_bot:
                 telegram_bot.auto_trader = auto_trader
                 logging.info("✅ TelegramBot <-> AutoTrader 연결 완료 (수동 티커 추가 활성화)")
-        
-        # 6. 텔레그램 봇 시작 (OrderManager 주입)
+            
+            # 🟢 [수정] 이중 매도 방지를 위해 시스템 A와 B를 연결
+            smart_monitor.order_executor = order_executor
+            logging.info("✅ SmartOrderMonitor <-> OrderExecutor 연결 완료")
+
+        # 6. 텔레그램 봇 시작 (OrderManager 주입) -> [수정] v2.0 제거
         if telegram_bot:
             logging.info("🚀 텔레그램 봇 시작...")
-            telegram_bot.start(order_manager=telegram_order_manager)
+            # telegram_bot.start(order_manager=telegram_order_manager)
+            telegram_bot.start(order_manager=None) 
         
-        # 7. 텔레그램 주문 관리자 (시스템 B) 스레드 시작
-        logging.info("🚀 텔레그램 주문 관리자 (시스템 B) 시작...")
-        telegram_order_manager.start()
+        # 7. 텔레그램 주문 관리자 (시스템 B) 스레드 시작 -> [수정] 비활성화
+        # logging.info("🚀 텔레그램 주문 관리자 (시스템 B) 시작...")
+        # telegram_order_manager.start()
         
         # 8. 스마트 모니터 (시스템 A) 스레드 시작
         logging.info("🧠 스마트 오더 모니터 (시스템 A) 시작...")
         
-        # A-B 시스템 연동
-        if hasattr(smart_monitor, 'set_telegram_order_manager'):
-            smart_monitor.set_telegram_order_manager(telegram_order_manager)
-            logging.info("✅ [A] -> [B] 수면 모드 연동 완료")
+        # A-B 시스템 연동 -> [수정] 비활성화
+        # if hasattr(smart_monitor, 'set_telegram_order_manager'):
+        #     smart_monitor.set_telegram_order_manager(telegram_order_manager)
+        #     logging.info("✅ [A] -> [B] 수면 모드 연동 완료")
 
         smart_monitor.start()
         logging.info("✅ SmartOrderMonitor가 모든 시장 상태를 전담합니다.")
@@ -506,28 +526,23 @@ def main():
                         daily_calls = stats.get('daily_api_calls', 0)
                         hourly_calls = stats.get('hourly_api_calls', 0)
                         
-                        # 텔레그램 주문 건수
-                        tg_order_count = 0
-                        if telegram_order_manager and hasattr(telegram_order_manager, 'get_pending_orders'):
-                            tg_order_count = len(telegram_order_manager.get_pending_orders())
-                        
                         # 🆕 v3.0: AutoTrader 상태
                         if v3_enabled and auto_trader:
                             watch_count = len(auto_trader.watch_list) if hasattr(auto_trader, 'watch_list') else 0
                             excluded_count = len(auto_trader.permanently_excluded) if hasattr(auto_trader, 'permanently_excluded') else 0
                             
-                            # ✅ 수정됨: 로그 맨 앞에 실행 시간(Uptime) 추가
+                            # [수정] B시스템(텔레그램) 통계 제거
                             logging.info(
                                 f"⏱️ [실행 {uptime_str}] 📊 [v3.0] {current_mode} | "
                                 f"감시: {watch_count}개 | 제외: {excluded_count}개 | "
-                                f"[A]감시: {monitor_count}건 | [B]대기: {tg_order_count}건 | "
+                                f"[A]감시: {monitor_count}건 | "
                                 f"API(시간): {hourly_calls} | API(일일): {daily_calls}"
                             )
                         else:
-                            # ✅ 수정됨: 로그 맨 앞에 실행 시간(Uptime) 추가
+                            # [수정] B시스템(텔레그램) 통계 제거
                             logging.info(
                                 f"⏱️ [실행 {uptime_str}] 📊 상태: {current_mode} | "
-                                f"[A]감시: {monitor_count}건 | [B]대기: {tg_order_count}건 | "
+                                f"[A]감시: {monitor_count}건 | "
                                 f"API(시간): {hourly_calls} | API(일일): {daily_calls}"
                             )
                         
@@ -598,9 +613,6 @@ def main():
 
             if smart_monitor and hasattr(smart_monitor, 'stop'):
                 smart_monitor.stop()
-                
-            if telegram_order_manager and hasattr(telegram_order_manager, 'stop'):
-                telegram_order_manager.stop()
                 
             if telegram_bot and hasattr(telegram_bot, 'stop'):
                 # 종료 시 통계 전달

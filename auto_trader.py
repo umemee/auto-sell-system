@@ -90,7 +90,7 @@ class AutoTrader:
         self.is_running = False
         
         # 상태 파일 경로
-        self.state_file = '/tmp/auto_trader_state.json'
+        self.state_file = 'auto_trader_state.json'
         
         logger.info("🤖 AutoTrader (Aggressive Mode) 초기화 완료")
     
@@ -556,7 +556,12 @@ class AutoTrader:
                 return
             
             # 2. 전액 매수
-            result = self.order_executor.place_fullsize_buy(ticker)
+            # 🟢 [수정] 거래소 코드 매핑 (NAS -> NASD, NYS -> NYSE)
+            ranking_exchange = self.config.get('auto_trader', {}).get('ranking_api', {}).get('exchange', 'NAS')
+            exchange_map = {'NAS': 'NASD', 'NYS': 'NYSE', 'AMS': 'AMEX'}
+            target_exchange = exchange_map.get(ranking_exchange, 'NASD')
+
+            result = self.order_executor.place_fullsize_buy(ticker, exchange_code=target_exchange)
             
             if result['success']:
                 # 진입 카운트 증가
@@ -571,25 +576,25 @@ class AutoTrader:
                     'created_at': datetime.now().isoformat()
                 }
     
-                # ✨ v3.0: OrderExecutor에 등록 (3단계 출구 전략 사용)
+                # ✅ v3.0 OrderExecutor 등록 활성화 (익절 +6%, 손절 -4% 모두 감시)
                 if hasattr(self, 'order_executor') and self.order_executor:
                     self.order_executor.register_order(
                         result['order_no'],
                         order_info
                     )
-                    logger.info(f"✅ {ticker} OrderExecutor 등록 완료 (3단계 출구 전략 시작)")
-
-                # v1.x/v2.0: SmartOrderMonitor에도 등록 (백업 감시)
-                if hasattr(self, 'order_monitor') and self.order_monitor:
-                    self.order_monitor.add_order_to_monitor(
-                        order_no=result['order_no'],
-                        ticker=ticker,
-                        quantity=result['quantity'],
-                        buy_price=result['price'],
-                        source='v3_agg'
-                    )
-                    logger.info(f"✅ {ticker} SmartOrderMonitor 등록 완료 (백업 감시)")
-                
+                    logger.info(f"✅ {ticker} 실시간 감시 시작 (손절 -4% / 익절 +6%)")
+             
+                # ❌ v1.0 SmartOrderMonitor 등록 비활성화 (이중 주문 및 손절 불가 방지)
+                # if hasattr(self, 'order_monitor') and self.order_monitor:
+                #    self.order_monitor.add_order_to_monitor(
+                #        order_no=result['order_no'],
+                #        ticker=ticker,
+                #        quantity=result['quantity'],
+                #        buy_price=result['price'],
+                #        source='v3_auto'
+                #    )
+                #    logger.info(f"✅ {ticker} SmartOrderMonitor 등록 완료 (v1.0 +6% 매도 로직 사용)")
+                            
                 logger.info(
                     f"✅ {ticker} 매수 성공\n"
                     f"  수량: {result['quantity']}주\n"

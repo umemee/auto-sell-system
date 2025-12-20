@@ -5,6 +5,7 @@ import json
 import logging
 import time
 import threading
+import os
 from datetime import datetime, time as dtime, timedelta
 from typing import Dict, List, Any, Optional
 from pytz import timezone
@@ -468,10 +469,9 @@ def place_sell_order(config, token_manager, execution_data, telegram_bot=None):
             
         logger.info(f"🎯 매도 주문 준비: {execution_data['ticker']} {execution_data['quantity']}주 @ ${sell_price}")
         
-        exchange_code = config.get('order_settings', {}).get('exchange_code', 'NASD')
+        # [수정] 거래소 정보 유동적 처리 (기본값 NASD)
+        exchange_code = execution_data.get('exchange_code', config.get('order_settings', {}).get('exchange_code', 'NASD'))
         ticker = execution_data['ticker']
-        if ticker in ['AAPL', 'MSFT', 'GOOGL', 'TSLA', 'NVDA', 'AMZN']:
-            exchange_code = 'NASD'
         
         order_data = {
             "CANO": config['cano'],
@@ -683,16 +683,14 @@ def get_available_funds(config, token_manager):
     return 0.0
 
 @log_api_call('매수 주문', 'TTTT1002U')
-def place_buy_order(config, token_manager, ticker, quantity, price):
+def place_buy_order(config, token_manager, ticker, quantity, price, exchange_code='NASD'):
     """
     매수 주문 실행 (토큰 갱신 추가)
     """
     try:
-        logger.info(f"🎯 매수 주문 준비: {ticker} {quantity}주 @ ${price:.2f}")
+        logger.info(f"🎯 매수 주문 준비: {ticker} {quantity}주 @ ${price:.2f} (거래소: {exchange_code})")
         
-        exchange_code = 'NASD'
-        if ticker in ['AAPL', 'MSFT', 'GOOGL', 'TSLA', 'NVDA', 'AMZN', 'META']:
-            exchange_code = 'NASD'
+        # [수정] exchange_code는 인자로 받은 값을 사용 (기본값 NASD)
         
         order_data = {
             "CANO": config['cano'],
@@ -953,13 +951,62 @@ class OrderExecutor:
         # 추적 손절용 변수 추가
         self.position_peak_profit: Dict[str, float] = {}
         self.position_partial_sold: Dict[str, bool] = {}
+        
+        # ✅ 상태 파일 경로 정의 및 복구
+        self.state_file = 'executor_state.json'
+        self.monitoring_orders = {}
+        self.load_state()
             
-        logger.info("🤖 OrderExecutor 초기화 완료")
-    
-    def place_fullsize_buy(self, ticker: str) -> Dict[str, Any]:
+        logger.info("🤖 OrderExecutor 초기화 완료 (상태 복구 포함)")
+        # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    # 🆕 상태 저장/로드 메서드 (핵심 추가 사항)
+    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    def save_state(self):
+        """현재 감시 중인 주문 정보를 파일로 저장"""
+        try:
+            serializable_data = {}
+            for order_no, info in self.monitoring_orders.items():
+                info_copy = info.copy()
+                # datetime 객체는 JSON 저장 불가하므로 문자열로 변환
+                if isinstance(info_copy.get('created_at'), datetime):
+                    info_copy['created_at'] = info_copy['created_at'].isoformat()
+                serializable_data[order_no] = info_copy
+
+            with open(self.state_file, 'w', encoding='utf-8') as f:
+                json.dump(serializable_data, f, indent=4, ensure_ascii=False)
+        except Exception as e:
+            logger.error(f"❌ Executor 상태 저장 실패: {e}")
+
+    def load_state(self):
+        """파일에서 감시 중인 주문 정보를 복구"""
+        if not os.path.exists(self.state_file):
+            return
+
+        try:
+            with open(self.state_file, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+            
+            count = 0
+            for order_no, info in data.items():
+                # 문자열을 datetime 객체로 복구
+                if 'created_at' in info:
+                    try:
+                        info['created_at'] = datetime.fromisoformat(info['created_at'])
+                    except:
+                        pass
+                self.monitoring_orders[order_no] = info
+                count += 1
+            
+            if count > 0:
+                logger.info(f"📂 OrderExecutor: 지난 세션에서 주문 {count}건 복구 완료")
+        
+        except Exception as e:
+            logger.error(f"❌ Executor 상태 로드 실패: {e}")
+
+    def place_fullsize_buy(self, ticker: str, exchange_code: str = 'NASD') -> Dict[str, Any]:
         """전액 매수"""
         try:
-            logger.info(f"💰 {ticker} 전액 매수 시작")
+            logger.info(f"💰 {ticker} 전액 매수 시작 (거래소: {exchange_code})")
             current_price = self.get_current_price(ticker)
             if not current_price: return {'success': False, 'reason': 'price_fetch_failed'}
             
@@ -970,7 +1017,7 @@ class OrderExecutor:
             if quantity < 1: return {'success': False, 'reason': 'insufficient_quantity'}
             
             logger.info(f"💰 전액 매수 준비: 가용자금 ${available_cash:.2f}, 수량 {quantity}주")
-            result = self._place_market_buy_order(ticker, quantity)
+            result = self._place_market_buy_order(ticker, quantity, exchange_code)
             
             if result['success']:
                 logger.info(f"✅ 전액 매수 성공: {ticker} {quantity}주")
@@ -986,7 +1033,7 @@ class OrderExecutor:
     def get_available_cash(self) -> float:
         return get_available_funds(self.config, self.token_manager)
     
-    def _place_market_buy_order(self, ticker: str, quantity: int) -> Dict[str, Any]:
+    def _place_market_buy_order(self, ticker: str, quantity: int, exchange_code: str = 'NASD') -> Dict[str, Any]:
         """시장가 매수 (토큰 갱신 추가)"""
         url = f"{self.base_url}/uapi/overseas-stock/v1/trading/order"
         
@@ -1008,7 +1055,7 @@ class OrderExecutor:
                 body = {
                     'CANO': self.config['cano'],
                     'ACNT_PRDT_CD': self.config['acnt_prdt_cd'],
-                    'OVRS_EXCG_CD': 'NASD',
+                    'OVRS_EXCG_CD': exchange_code,
                     'PDNO': ticker,
                     'ORD_DVSN': '00',
                     'ORD_QTY': str(quantity),
@@ -1168,18 +1215,36 @@ class OrderExecutor:
             return True
     
         # Tier 2: 1차 익절 (3% 도달 시 50% 매도)
+        # Tier 2: 1차 익절 (3% 도달 시 50% 매도)
         if (profit_rate >= self.take_profit_tier1 and 
             not self.position_partial_sold.get(ticker, False)):
         
             logger.info(f"🎯 1차 익절 (50%): {ticker} (+{profit_rate:.2f}%)")
-        
-            # ⚠️ 주의: 현재 시스템은 50% 부분 매도를 지원하지 않음
-            # 임시 해결책: 1차 익절을 스킵하고 추적 손절만 활성화
+            
+            # 1. 50% 수량 계산 (소수점 버림)
+            current_qty = order['quantity']
+            sell_qty = int(current_qty * 0.5)
+            
+            # 2. 매도 실행 (수량이 1주 이상일 때만)
+            if sell_qty > 0:
+                partial_order = order.copy()
+                partial_order['quantity'] = sell_qty
+                
+                # 매도 주문 요청
+                result = self.execute_sell(partial_order, reason='take_profit_partial')
+                
+                if result.get('success'):
+                    # 3. 잔여 수량 업데이트 및 저장
+                    order['quantity'] -= sell_qty
+                    self.save_state()
+                    
+                    logger.info(f"✅ {ticker} 50% 분할 매도 완료 ({sell_qty}주). 잔여: {order['quantity']}주")
+            
+            # 3. 추적 손절 활성화 (매도 여부와 상관없이 도달하면 활성화)
             self.position_partial_sold[ticker] = True
-        
             logger.info(f"📊 {ticker} 추적 손절 활성화 (현재 최고: {profit_rate:.1f}%)")
         
-            # 50% 매도 미구현으로 인해 매도하지 않고 계속 보유
+            # 전량 매도가 아니므로 모니터링 유지 (False 반환)
             return False
     
         # Tier 3: 추적 손절 (1차 익절 후 활성화)
@@ -1252,6 +1317,9 @@ class OrderExecutor:
                     elif reason == 'trailing_stop':
                         emoji = '📉'
                         reason_text = '추적 손절'
+                    elif reason == 'take_profit_partial':
+                        emoji = '✂️'
+                        reason_text = '부분 익절(50%)'
                     else:
                         emoji = '🎯'
                         reason_text = '익절'
@@ -1308,6 +1376,9 @@ class OrderExecutor:
         
         self.monitoring_orders[order_no] = order_info
         logger.info(f"📋 {order_info['ticker']} 모니터링 등록 (order_no: {order_no})")
+        
+        # ✅ 저장 추가
+        self.save_state()
     
     def _monitor_loop(self):
         """손절/익절 모니터링 루프"""
@@ -1348,9 +1419,13 @@ class OrderExecutor:
                         logger.error(f"❌ {order_no} 모니터링 오류: {e}")
                 
                 # 완료된 주문 제거
-                for order_no in orders_to_remove:
-                    self.monitoring_orders.pop(order_no, None)
-                    logger.info(f"✅ {order_no} 모니터링 완료 및 제거")
+                if orders_to_remove:
+                    for order_no in orders_to_remove:
+                        self.monitoring_orders.pop(order_no, None)
+                        logger.info(f"✅ {order_no} 모니터링 완료 및 제거")
+                    
+                    # ✅ 상태 변경 시 저장
+                    self.save_state()
                 
                 # 4초 대기 (config의 monitoring_interval과 동일)
                 time.sleep(4)

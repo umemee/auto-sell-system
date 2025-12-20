@@ -41,7 +41,7 @@ system:
   graceful_shutdown_timeout: 30
   
   # 상태 파일 (기획서 7.1)
-  state_file: "/tmp/auto-sell-order-state.json"
+  state_file: "auto_sell_state.json"  
   
   # 토큰 관리
   token_refresh_margin_minutes: 5
@@ -196,7 +196,7 @@ backup:
   # 기획서 7.1: 상태 파일 백업
   state_files:
     enabled: true
-    path: "/home/ec2-user/backups/states/"
+    path: "backups/states/"  # ✅ 상대 경로로 수정
     retention_days: 7
     auto_backup_on_sell: true
     daily_backup_time: "01:00"  # 한국시간 (시스템 종료 시)
@@ -204,7 +204,7 @@ backup:
   # 기획서 7.2: 로그 파일 백업
   log_files:
     enabled: true
-    path: "/home/ec2-user/backups/logs/"
+    path: "backups/logs/"    # ✅ 상대 경로로 수정
     retention_days: 30
     compress: true
 
