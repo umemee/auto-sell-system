@@ -344,12 +344,14 @@ def main():
             access_token = token_manager.get_access_token(force_refresh=True)
             
             if not access_token:
-                logging.error("❌ 토큰 발급 실패, 시스템 종료")
+                logging.error("❌ 토큰 발급 실패, 1분 대기 후 재시도")
+                time.sleep(60) # 안전장치: 1분 대기
                 sys.exit(1)
             
             logging.info("✅ Access Token 발급 완료")
         except Exception as e:
             logging.error(f"❌ 토큰 발급 오류: {e}")
+            time.sleep(60) # 안전장치: 1분 대기
             sys.exit(1)
 
         # 🟢 [안전장치 추가] 계좌 접속 스모크 테스트

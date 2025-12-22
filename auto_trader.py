@@ -67,7 +67,9 @@ class AutoTrader:
         self.MA_PERIOD = auto_config['ma_period']
         self.TOUCH_THRESHOLD = auto_config['touch_threshold']
         self.VOLUME_MULTIPLIER = auto_config['volume_multiplier']
+        
         # [수정] 설정값 로드 안전장치 추가 (기본값 강제 할당)
+        # ⚠️ v3.0 필수 변수 추가 (이게 없어서 오류가 발생했습니다)
         self.STOP_LOSS = auto_config.get('stop_loss', -4.0)
         self.TAKE_PROFIT = auto_config.get('take_profit', 6.0)
         self.TAKE_PROFIT_TIER1 = auto_config.get('take_profit_tier1', 3.0)
