@@ -249,14 +249,20 @@ class TokenManager:
         return None
 
     def get_access_token(self, force_refresh=False):
-        """
-        유효한 Access Token 반환 (스레드 안전)
-        """
-        # ✅ [수정] 스레드 Lock을 걸어 동시 접근 제어
         with self.lock:
-            now = datetime.now()
+            # 🔴 [안전장치] 과속 방지 (1분 쿨타임)
+            # 서버가 '1분당 1회' 제한이 있으므로, 발급 직후에는 재요청을 무시합니다.
+            if force_refresh and self.access_token and self.token_expires_at:
+                try:
+                    # 토큰 발급 시점 = 만료시간 - 24시간
+                    issued_time = self.token_expires_at - timedelta(hours=24)
+                    # 발급 후 60초가 지나지 않았다면
+                    if datetime.now() < issued_time + timedelta(seconds=60):
+                        logger.warning("⚠️ 토큰 발급 1분 내 재요청 감지 -> API 보호를 위해 갱신 스킵")
+                        return self.access_token
+                except Exception:
+                    pass
 
-            # ✅ 1. 강제 갱신이 아니면 파일 내용을 먼저 최신화
             if not force_refresh:
                 self._load_token_from_file()
             

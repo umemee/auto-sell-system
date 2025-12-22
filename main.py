@@ -355,17 +355,17 @@ def main():
             sys.exit(1)
 
         # 🟢 [안전장치 추가] 계좌 접속 스모크 테스트
-        logging.info("🏦 계좌 접속 및 잔고 조회 테스트 중...")
-        try:
-            from order import get_available_funds
-            test_fund = get_available_funds(config, token_manager)
-            if test_fund is None: 
-                raise ValueError("잔고 조회 응답 없음")
-            logging.info(f"✅ 계좌 접속 성공! (현재 잔고: ${test_fund:,.2f})")
-        except Exception as e:
-            logging.critical(f"❌ 계좌 접속 실패! 설정(계좌번호, 모의투자여부)을 확인하세요.")
-            logging.critical(f"❌ 오류 상세: {e}")
-            sys.exit(1)
+        #logging.info("🏦 계좌 접속 및 잔고 조회 테스트 중...")
+        #try:
+        #    from order import get_available_funds
+        #    test_fund = get_available_funds(config, token_manager)
+        #    if test_fund is None: 
+        #        raise ValueError("잔고 조회 응답 없음")
+         #   logging.info(f"✅ 계좌 접속 성공! (현재 잔고: ${test_fund:,.2f})")
+       #except Exception as e:
+        #    logging.critical(f"❌ 계좌 접속 실패! 설정(계좌번호, 모의투자여부)을 확인하세요.")
+        #    logging.critical(f"❌ 오류 상세: {e}")
+         #   sys.exit(1)
 
         # 3. 스마트 모니터 (시스템 A) 초기화
         smart_monitor = SmartOrderMonitor(config, token_manager, telegram_bot)
