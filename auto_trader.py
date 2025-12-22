@@ -68,6 +68,7 @@ class AutoTrader:
         self.TOUCH_THRESHOLD = auto_config['touch_threshold']
         self.VOLUME_MULTIPLIER = auto_config['volume_multiplier']
         self.STOP_LOSS = auto_config['stop_loss']
+        self.TAKE_PROFIT = auto_config.get('take_profit', 6.0)
         self.TAKE_PROFIT_TIER1 = auto_config.get('take_profit_tier1', 3)
         self.TAKE_PROFIT_TIER2 = auto_config.get('take_profit_tier2', 6)
         self.TRAILING_STOP = auto_config.get('trailing_stop_distance', 2)
