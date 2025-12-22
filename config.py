@@ -156,25 +156,23 @@ def load_config(mode='development'):
             f"   - 목표 수익률: {config.get('order_settings', {}).get('target_profit_rate', 'N/A')}%\n"
             f"   - Rate Limit: {config['rate_limit']['daily_limit']}회/일"
         )
-        # 🔴 [긴급 패치] 인증 정보 강제 주입 (403 에러 방지용 최종 안전장치)
-        # YAML 파일에서 ${...} 치환이 안 되었거나 변수명이 달라도 무조건 환경변수 값으로 덮어씁니다.
-    
-        # 1. 앱키/시크릿 주입
+        # 🔴 [최종 패치] 인증 정보 강제 주입 (403 방지)
+        # 엉뚱한 변수명이나 YAML 로딩 실패를 무시하고 환경변수 값을 직접 꽂아넣습니다.
         if 'auth' not in config: config['auth'] = {}
-    
-        # KIS_APP_KEY(파일) 또는 KIS_APPKEY(코드) 둘 중 하나라도 있으면 사용
-        real_appkey = os.environ.get('KIS_APPKEY') or os.environ.get('KIS_APP_KEY')
-        real_secret = os.environ.get('KIS_APPSECRET') or os.environ.get('KIS_APP_SECRET')
-    
-        if real_appkey: config['auth']['appkey'] = real_appkey
-        if real_secret: config['auth']['appsecret'] = real_secret
-    
-        # 2. 계좌번호 주입
         if 'account' not in config: config['account'] = {}
-        real_account = os.environ.get('ACCOUNT_NO') or os.environ.get('KIS_ACCOUNT_NO')
-        if real_account: config['account']['account_no'] = real_account
 
-        logging.info(f"✅ 인증 정보 강제 주입 완료 (AppKey 앞 5자리: {str(config['auth'].get('appkey'))[:5]})")
+        # 매핑된 환경변수 가져오기
+        ak = os.environ.get('KIS_APPKEY')
+        ask = os.environ.get('KIS_APPSECRET')
+        ano = os.environ.get('ACCOUNT_NO')
+
+        # 설정에 강제 적용
+        if ak: config['auth']['appkey'] = ak
+        if ask: config['auth']['appsecret'] = ask
+        if ano: config['account']['account_no'] = ano
+    
+        # 디버깅용 로그 (키 앞 4자리만 출력)
+        if ak: logging.info(f"✅ Key Injection: {ak[:4]}****")
 
         return config
         
