@@ -28,13 +28,12 @@ def load_config(mode='development'):
             if os.path.exists('.env.production'):
                 load_dotenv('.env.production', override=True)
                 
-                # 🔴 [긴급 수정] .env 변수명 불일치 해결 (매핑 어댑터)
-                # 파일에 있는(KIS_APP_KEY) 값을 코드가 찾는(KIS_APPKEY) 이름으로 복사
-                if os.getenv('KIS_APP_KEY'): os.environ['KIS_APPKEY'] = os.getenv('KIS_APP_KEY')
-                if os.getenv('KIS_APP_SECRET'): os.environ['KIS_APPSECRET'] = os.getenv('KIS_APP_SECRET')
-                if os.getenv('KIS_ACCOUNT_NO'): os.environ['ACCOUNT_NO'] = os.getenv('KIS_ACCOUNT_NO')
+                # 🔴 [재적용] 변수명 강제 변환 (이 코드가 꼭 있어야 합니다!)
+                if os.environ.get('KIS_APP_KEY'): os.environ['KIS_APPKEY'] = os.environ.get('KIS_APP_KEY')
+                if os.environ.get('KIS_APP_SECRET'): os.environ['KIS_APPSECRET'] = os.environ.get('KIS_APP_SECRET')
+                if os.environ.get('KIS_ACCOUNT_NO'): os.environ['ACCOUNT_NO'] = os.environ.get('KIS_ACCOUNT_NO')
                 
-                logging.info("✅ 프로덕션 환경 설정을 로드했습니다. (변수명 매핑 완료)")
+                logging.info("✅ 프로덕션 설정 로드 완료 (변수명 패치 적용됨)")
             else:
                 logging.warning("⚠️ .env.production 파일이 없습니다. 기본 .env 사용")
         
