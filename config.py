@@ -156,9 +156,28 @@ def load_config(mode='development'):
             f"   - 목표 수익률: {config.get('order_settings', {}).get('target_profit_rate', 'N/A')}%\n"
             f"   - Rate Limit: {config['rate_limit']['daily_limit']}회/일"
         )
-        
-        return config
+        # 🔴 [긴급 패치] 인증 정보 강제 주입 (403 에러 방지용 최종 안전장치)
+        # YAML 파일에서 ${...} 치환이 안 되었거나 변수명이 달라도 무조건 환경변수 값으로 덮어씁니다.
     
+        # 1. 앱키/시크릿 주입
+        if 'auth' not in config: config['auth'] = {}
+    
+        # KIS_APP_KEY(파일) 또는 KIS_APPKEY(코드) 둘 중 하나라도 있으면 사용
+        real_appkey = os.environ.get('KIS_APPKEY') or os.environ.get('KIS_APP_KEY')
+        real_secret = os.environ.get('KIS_APPSECRET') or os.environ.get('KIS_APP_SECRET')
+    
+        if real_appkey: config['auth']['appkey'] = real_appkey
+        if real_secret: config['auth']['appsecret'] = real_secret
+    
+        # 2. 계좌번호 주입
+        if 'account' not in config: config['account'] = {}
+        real_account = os.environ.get('ACCOUNT_NO') or os.environ.get('KIS_ACCOUNT_NO')
+        if real_account: config['account']['account_no'] = real_account
+
+        logging.info(f"✅ 인증 정보 강제 주입 완료 (AppKey 앞 5자리: {str(config['auth'].get('appkey'))[:5]})")
+
+        return config
+        
     except FileNotFoundError as e:
         logging.error(f"❌ 파일 오류: {e}")
         raise
