@@ -251,12 +251,9 @@ class TokenManager:
     def get_access_token(self, force_refresh=False):
         with self.lock:
             # 🔴 [안전장치] 과속 방지 (1분 쿨타임)
-            # 서버가 '1분당 1회' 제한이 있으므로, 발급 직후에는 재요청을 무시합니다.
             if force_refresh and self.access_token and self.token_expires_at:
                 try:
-                    # 토큰 발급 시점 = 만료시간 - 24시간
                     issued_time = self.token_expires_at - timedelta(hours=24)
-                    # 발급 후 60초가 지나지 않았다면
                     if datetime.now() < issued_time + timedelta(seconds=60):
                         logger.warning("⚠️ 토큰 발급 1분 내 재요청 감지 -> API 보호를 위해 갱신 스킵")
                         return self.access_token
