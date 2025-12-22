@@ -27,15 +27,16 @@ def load_config(mode='development'):
         if mode == 'production':
             if os.path.exists('.env.production'):
                 load_dotenv('.env.production', override=True)
-                logging.info("✅ 프로덕션 환경 설정을 로드했습니다.")
+                
+                # 🔴 [긴급 수정] .env 변수명 불일치 해결 (매핑 어댑터)
+                # 파일에 있는(KIS_APP_KEY) 값을 코드가 찾는(KIS_APPKEY) 이름으로 복사
+                if os.getenv('KIS_APP_KEY'): os.environ['KIS_APPKEY'] = os.getenv('KIS_APP_KEY')
+                if os.getenv('KIS_APP_SECRET'): os.environ['KIS_APPSECRET'] = os.getenv('KIS_APP_SECRET')
+                if os.getenv('KIS_ACCOUNT_NO'): os.environ['ACCOUNT_NO'] = os.getenv('KIS_ACCOUNT_NO')
+                
+                logging.info("✅ 프로덕션 환경 설정을 로드했습니다. (변수명 매핑 완료)")
             else:
                 logging.warning("⚠️ .env.production 파일이 없습니다. 기본 .env 사용")
-        elif mode == 'development':
-            if os.path.exists('.env.development'):
-                load_dotenv('.env.development', override=True)
-                logging.info("✅ 개발 환경 설정을 로드했습니다.")
-            else:
-                logging.warning("⚠️ .env.development 파일이 없습니다. 기본 .env 사용")
         
         # 3단계: config.yaml 파일 로드
         config_file = 'config.yaml'
