@@ -157,8 +157,8 @@ class AutoTrader:
         self.telegram_bot.send_message(
             f"⏸️ 시스템 중지\n\n"
             f"📊 일일 통계:\n"
-            f"진입: {stats['entry_count']}/{stats['max_entries']}회\n"
-            f"청산: {stats['exit_count']}/{stats['max_exits']}회\n\n"
+            f"진입: {stats.get('entry', 0)}/{stats.get('max_entries', 6)}회\n"
+            f"청산: {stats.get('exit', 0)}/{stats.get('max_exits', 6)}회\n\n"
             f"📋 감시 종목: {len(self.watch_list)}개\n"
             f"🚫 제외 종목: {len(self.permanently_excluded)}개"
         )
