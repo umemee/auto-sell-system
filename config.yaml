@@ -147,7 +147,7 @@ telegram:
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 telegram_orders:
   # 기본 설정
-  enabled: true                  # 텔레그램 주문 시스템 활성화
+  enabled: false                  # 텔레그램 주문 시스템 활성화
   max_pending_orders: 6          # 최대 대기 주문 수 (기획서 5.3)
   
   # 목표가 감시 (기획서 5.4)

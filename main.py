@@ -447,7 +447,7 @@ def main():
         #     smart_monitor.set_telegram_order_manager(telegram_order_manager)
         #     logging.info("✅ [A] -> [B] 수면 모드 연동 완료")
 
-        smart_monitor.start()
+        # smart_monitor.start()
         logging.info("✅ SmartOrderMonitor가 모든 시장 상태를 전담합니다.")
         
         # 🆕 9. v3.0: AutoTrader 시작 (enabled=true인 경우만)

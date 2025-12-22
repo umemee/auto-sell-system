@@ -194,9 +194,12 @@ class TokenManager:
                 
                 # 인증 오류 처리
                 if resp.status_code in [401, 403]:
-                    logger.error(f"❌ 인증 실패 (HTTP {resp.status_code})")
-                    self._send_telegram_alert(f"Access Token 인증 실패\nHTTP {resp.status_code}\n설정 확인 필요", "critical")
-                    raise AuthenticationError(f"HTTP {resp.status_code}: 인증 실패")
+                    logger.critical(f"🚨 인증 실패 (HTTP {resp.status_code}) - 시스템을 종료합니다.")
+                    self._send_telegram_alert(f"🚨 인증 실패 (HTTP {resp.status_code})\n시스템을 안전하게 종료합니다.", "critical")
+                    
+                    # [수정] 무한 재부팅을 막기 위해 여기서 프로그램을 강제 종료합니다.
+                    import sys
+                    sys.exit(1)
                 
                 resp.raise_for_status()
                 data = resp.json()

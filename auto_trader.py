@@ -67,10 +67,11 @@ class AutoTrader:
         self.MA_PERIOD = auto_config['ma_period']
         self.TOUCH_THRESHOLD = auto_config['touch_threshold']
         self.VOLUME_MULTIPLIER = auto_config['volume_multiplier']
-        self.STOP_LOSS = auto_config['stop_loss']
+        # [수정] 설정값 로드 안전장치 추가 (기본값 강제 할당)
+        self.STOP_LOSS = auto_config.get('stop_loss', -4.0)
         self.TAKE_PROFIT = auto_config.get('take_profit', 6.0)
-        self.TAKE_PROFIT_TIER1 = auto_config.get('take_profit_tier1', 3)
-        self.TAKE_PROFIT_TIER2 = auto_config.get('take_profit_tier2', 6)
+        self.TAKE_PROFIT_TIER1 = auto_config.get('take_profit_tier1', 3.0)
+        self.TAKE_PROFIT_TIER2 = auto_config.get('take_profit_tier2', 5.5)
         self.TRAILING_STOP = auto_config.get('trailing_stop_distance', 2)
 
         # 추적 손절용 변수 추가
