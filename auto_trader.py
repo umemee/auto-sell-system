@@ -867,6 +867,129 @@ class AutoTrader:
             return (True, f"최종 익절 ({profit_rate:.2f}%)")
     
         return (False, "")
+    
+    def monitor_loop(self):
+        """50MA 터치 전략 감시 루프"""
+        while self.is_running:
+            try:
+                # 1. 주기적 랭킹 업데이트
+                if self.last_ranking_update is None or \
+                   (datetime.now() - self.last_ranking_update).total_seconds() > self.RANKING_INTERVAL:
+                    self.update_ranking()
+                    self.last_ranking_update = datetime.now()
+
+                # 2. 감시 종목 체크 (복사본 사용)
+                watch_list_copy = list(self.watch_list)
+                
+                for ticker in watch_list_copy:
+                    if not self.is_running: break
+
+                    if ticker in self.permanently_excluded or ticker in self.touched_but_skipped:
+                        continue
+
+                    # 진입 한도 체크
+                    if not self.trade_counter.can_enter():
+                        logger.warning(f"⚠️ 오늘 진입 한도({self.trade_counter.MAX_ENTRIES}회) 도달")
+                        self.stop()
+                        break
+
+                    # 진입 조건 판별
+                    should_buy, reason = self._check_entry_conditions(ticker)
+                    
+                    if should_buy:
+                        logger.info(f"✅ [{ticker}] 진입 신호 감지: {reason}")
+                        self._execute_entry(ticker)
+                    else:
+                        logger.debug(f"⏭️ [{ticker}] 진입 불가: {reason}")
+
+                time.sleep(self.MONITORING_INTERVAL)
+
+            except KeyboardInterrupt:
+                logger.info("⌨️ 사용자 중지 요청")
+                self.stop()
+                break
+            except Exception as e:
+                logger.error(f"❌ monitor_loop 오류: {e}")
+                import traceback
+                traceback.print_exc()
+                time.sleep(5)
+
+    def _check_entry_conditions(self, ticker: str) -> tuple:
+        """진입 조건 판별 (50MA 터치)"""
+        try:
+            candles = self._get_1min_candles(ticker, 60)
+            if not candles or len(candles) < 50:
+                return (False, f"캔들 부족 ({len(candles) if candles else 0}개)")
+
+            closes = [float(c['close']) for c in candles[-50:]]
+            ma50 = sum(closes) / len(closes)
+
+            current_price = self.order_executor.get_current_price(ticker)
+            if current_price is None or current_price <= 0:
+                return (False, "현재가 조회 실패")
+
+            touch_pct = ((current_price - ma50) / ma50) * 100
+            
+            # 조건 1: 50MA 부근 (-4% ~ +2%)
+            if not (-4.0 <= touch_pct <= 2.0):
+                return (False, f"50MA 범위 이탈 ({touch_pct:+.2f}%)")
+
+            # 조건 2: 저가주 제외
+            if current_price < 1.0:
+                return (False, f"저가주 제외 (${current_price:.2f})")
+
+            # 조건 3: 거래량 확인
+            volumes_10 = [float(c.get('volume', 0)) for c in candles[-10:]]
+            avg_volume = sum(volumes_10) / len(volumes_10) if volumes_10 else 0
+            current_volume = float(candles[-1].get('volume', 0))
+
+            if avg_volume > 0 and current_volume < avg_volume * self.VOLUME_MULTIPLIER:
+                 return (False, f"거래량 부족")
+
+            return (True, f"50MA 터치 ({touch_pct:.1f}%) | 현재가: ${current_price:.2f}")
+
+        except Exception as e:
+            logger.error(f"❌ [{ticker}] 진입 조건 체크 오류: {e}")
+            return (False, f"체크 오류: {str(e)[:50]}")
+
+    def _execute_entry(self, ticker: str) -> bool:
+        """매수 실행"""
+        try:
+            logger.info(f"💰 [{ticker}] 매수 실행 준비 중...")
+            
+            current_price = self.order_executor.get_current_price(ticker)
+            if not current_price or current_price <= 0:
+                self.touched_but_skipped.add(ticker)
+                return False
+
+            result = self.order_executor.place_fullsize_buy(ticker, exchange_code='NASD')
+            
+            if not result.get('success'):
+                reason = result.get('reason', 'Unknown')
+                logger.error(f"❌ [{ticker}] 매수 실패: {reason}")
+                if reason in ['insufficient_funds', 'price_fetch_failed']:
+                    self.touched_but_skipped.add(ticker)
+                return False
+
+            self.trade_counter.increment_entry(source='v3_auto')
+            
+            if ticker in self.watch_list:
+                self.watch_list.remove(ticker)
+            self.permanently_excluded.add(ticker)
+            self._save_state()
+
+            if self.telegram_bot:
+                try:
+                    self.telegram_bot.send_message(
+                        f"✅ **v3.0 자동 매수 체결!**\nTARGET: {ticker}\nQTY: {result.get('quantity', 0)}주"
+                    )
+                except Exception: pass
+            
+            return True
+
+        except Exception as e:
+            logger.error(f"❌ [{ticker}] 매수 실행 오류: {e}")
+            return False
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # 테스트 코드
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
