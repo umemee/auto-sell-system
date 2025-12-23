@@ -265,7 +265,7 @@ class TokenManager:
             
             # ✅ 2. 메모리/파일에 유효한 토큰이 있는지 확인
             if not force_refresh and self.access_token and self.token_expires_at:
-                time_until_expiry = (self.token_expires_at - now).total_seconds()
+                time_until_expiry = (self.token_expires_at - datetime.now()).total_seconds()
                 margin_seconds = self.token_refresh_margin * 60
                 
                 # 만료 시간과 마진을 비교하여 유효하면 반환
@@ -389,7 +389,7 @@ class TokenManager:
 
             # ✅ 2. 메모리/파일에 유효한 키가 있는지 확인
             if not force_refresh and self.approval_key and self.approval_expires_at:
-                time_until_expiry = (self.approval_expires_at - now).total_seconds()
+                time_until_expiry = (self.approval_expires_at - datetime.now()).total_seconds()
                 
                 if time_until_expiry > self.approval_refresh_margin:
                     return self.approval_key

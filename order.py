@@ -608,9 +608,14 @@ def get_current_price(config, token_manager, ticker):
             
             if response.status_code != 200:
                 continue
-            
+
             data = response.json()
-            
+
+            # 👇 여기 아래 2줄을 직접 타이핑해서 넣어주세요
+            import logging
+            logging.info(f"🔍 [DEBUG] 잔고 조회 데이터: {data}")
+            # 👆 여기까지 (들여쓰기 꼭 윗줄이랑 맞추세요!)
+
             if data.get('msg_cd') == 'EGW00123':
                 logger.warning("⚠️ [시세조회] 토큰 만료. 재시도")
                 continue
