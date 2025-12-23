@@ -410,15 +410,15 @@ class TokenManager:
         access_status = {
             'exists': bool(self.access_token),
             'expires_at': self.token_expires_at.strftime('%Y-%m-%d %H:%M:%S') if self.token_expires_at else None,
-            'expires_in_seconds': (self.token_expires_at - now).total_seconds() if self.token_expires_at else None,
-            'is_valid': (self.token_expires_at - now).total_seconds() > 0 if self.token_expires_at else False
+            'expires_in_seconds': (self.token_expires_at - datetime.now()).total_seconds() if self.token_expires_at else None,
+            'is_valid': (self.token_expires_at - datetime.now()).total_seconds() > 0 if self.token_expires_at else False
         }
         
         approval_status = {
             'exists': bool(self.approval_key),
             'expires_at': self.approval_expires_at.strftime('%Y-%m-%d %H:%M:%S') if self.approval_expires_at else None,
-            'expires_in_seconds': (self.approval_expires_at - now).total_seconds() if self.approval_expires_at else None,
-            'is_valid': (self.approval_expires_at - now).total_seconds() > 0 if self.approval_expires_at else False
+            'expires_in_seconds': (self.approval_expires_at - datetime.now()).total_seconds() if self.approval_expires_at else None,
+            'is_valid': (self.approval_expires_at - datetime.now()).total_seconds() > 0 if self.approval_expires_at else False
         }
         
         return {
