@@ -632,17 +632,19 @@ def get_current_price(config, token_manager, ticker):
             
     return None
 
-@log_api_call('가용 자금 조회', 'TTTS3007R')
+@log_api_call('가용 자금 조회', 'TTTS3012R')
 def get_available_funds(config, token_manager):
     """
-    가용 매수 금액 조회 (토큰 갱신 추가)
+    가용 매수 자금(예수금) 조회
+    API: 해외주식 잔고 조회 (TTTS3012R) 사용
     """
+    # 1. URL 설정: 'inquire-balance'는 잔고 조회용 URL입니다.
     url = f"{config['api']['base_url']}/uapi/overseas-stock/v1/trading/inquire-balance"
     
     for attempt in range(2):
         try:
-            is_retry = (attempt > 0)
-            token = token_manager.get_access_token(force_refresh=is_retry)
+            # 2. 토큰 가져오기 (재시도 시에도 강제 갱신은 하지 않음 - 안정성 위함)
+            token = token_manager.get_access_token(force_refresh=False)
             if not token: continue
             
             headers = {
@@ -650,44 +652,60 @@ def get_available_funds(config, token_manager):
                 "authorization": f"Bearer {token}",
                 "appkey": config["api_key"],
                 "appsecret": config["api_secret"],
-                "tr_id": "TTTS3007R",
+                "tr_id": "TTTS3012R",  # [핵심] 잔고 조회를 위한 정확한 ID
                 "custtype": "P"
             }
             
             params = {
                 "CANO": config["cano"],
                 "ACNT_PRDT_CD": config["acnt_prdt_cd"],
-                "OVRS_EXCG_CD": "NASD",
-                "TR_CRCY_CD": "USD",
+                "OVRS_EXCG_CD": "NASD", # 미국(나스닥) 기준
+                "TR_CRCY_CD": "USD",    # 달러(USD) 기준 조회
                 "CTX_AREA_FK200": "",
                 "CTX_AREA_NK200": ""
             }
             
             logger.info(f"💰 [가용 자금 조회] 요청 전송 중... (시도 {attempt+1})")
             
-            response = requests.get(url, headers=headers, params=params, timeout=15)
-            logger.info(f"📥 [가용 자금 조회] 응답 수신 | 상태코드: {response.status_code}")
+            response = requests.get(url, headers=headers, params=params, timeout=10)
             
-            if response.status_code != 200:
-                continue
-            
-            data = response.json()
-            
-            # 🟢 [DEBUG] 응답 데이터 확인용 로그
-            import logging
-            logging.info(f"🔍 [DEBUG] 잔고 조회 원본 데이터: {data}")
-            
-            if data.get('msg_cd') == 'EGW00123':
-                logger.warning("⚠️ [자금조회] 토큰 만료. 갱신 후 재시도")
-                continue
-            
-            if data.get("rt_cd") == "0":
-                val = float(data.get("output1", {}).get("frcr_dncl_amt_2", "0"))
-                logger.info(f"✅ 가용 자금: ${val:.2f}")
-                return val
-            
+            # 3. [DEBUG] 응답 데이터 확인 (문제가 생기면 이 로그를 확인하세요)
+            if response.status_code == 200:
+                data = response.json()
+                import logging
+                logging.info(f"🔍 [DEBUG] 잔고 조회 원본 데이터: {data}") # 디버깅용
+                
+                if data.get('rt_cd') == '0':
+                    # 4. 데이터 파싱: output2(예수금 내역)에서 USD 찾기
+                    # 공식 문서상 output2는 배열(List)이며, 통화별로 정보가 담겨 있습니다.
+                    output2 = data.get('output2', [])
+                    val = 0.0
+                    
+                    if output2:
+                        for item in output2:
+                            # 통화코드(crcy_cd)가 USD인 항목의 '외화예수금(frcr_dncl_amt_2)'을 가져옵니다.
+                            if item.get('crcy_cd') == 'USD':
+                                val = float(item.get('frcr_dncl_amt_2', '0'))
+                                break
+                        
+                        # 만약 USD를 못 찾았다면 첫 번째 통화의 예수금을 가져옴
+                        if val == 0.0 and len(output2) > 0:
+                             val = float(output2[0].get('frcr_dncl_amt_2', '0'))
+
+                        logger.info(f"✅ 가용 자금(USD 예수금): ${val:.2f}")
+                        return val
+                    else:
+                        logger.warning("⚠️ [주의] 잔고 데이터(output2)가 비어있습니다.")
+                        return 0.0
+                else:
+                    logger.error(f"❌ 잔고 조회 실패 (API 에러): {data.get('msg1')}")
+                    # 토큰 만료 에러(EGW00123) 등이 발생하면 다음 시도에서 해결될 수 있음
+            else:
+                logger.error(f"❌ HTTP 요청 실패: {response.status_code}")
+
         except Exception as e:
-            logger.error(f"❌ 잔고 조회 오류: {e}")
+            logger.error(f"❌ 잔고 조회 중 예외 발생: {e}")
+            time.sleep(1) # 에러 발생 시 잠시 대기
             
     return 0.0
 
