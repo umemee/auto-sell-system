@@ -43,7 +43,7 @@ def is_market_hours(trading_timezone='US/Eastern'):
         tz = timezone(trading_timezone)
         now = datetime.now(tz).time()
         
-        premarket_start = dtime(5, 0)
+        premarket_start = dtime(4, 0)
         regular_start = dtime(9, 30)
         system_end = dtime(12, 0)
         
@@ -94,7 +94,7 @@ def should_system_run(trading_timezone='US/Eastern'):
             return False
 
         # 월요일 새벽 슬립 모드 (05:00 이전)
-        start_time_of_day = dtime(5, 0)
+        start_time_of_day = dtime(4, 0)
         if weekday == 0 and now_time < start_time_of_day:
             logger.debug(f"🌙 월요일 새벽 (ET {now_time.strftime('%H:%M')}) - 아직 시작 전")
             return False
