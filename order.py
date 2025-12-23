@@ -668,6 +668,10 @@ def get_available_funds(config, token_manager):
             
             data = response.json()
             
+            # 🟢 [DEBUG] 응답 데이터 확인용 로그
+            import logging
+            logging.info(f"🔍 [DEBUG] 잔고 조회 원본 데이터: {data}")
+            
             if data.get('msg_cd') == 'EGW00123':
                 logger.warning("⚠️ [자금조회] 토큰 만료. 갱신 후 재시도")
                 continue
