@@ -14,12 +14,17 @@ class GapZoneScalper:
         self.state_file = "trade_state.json"
         self.state = self._load_state()
         
-        # 전략 파라미터
         self.symbol = Config.TARGET_SYMBOL
         self.exchange = Config.EXCHANGE_CD
         
+        # [NEW] 디버깅 정보를 담을 블랙박스 (외부에서 조회 가능)
+        self.debug_info = {
+            "target_price": 0.0,
+            "trend_ok": False,
+            "reason": "초기화 중..."
+        }
+
     def _load_state(self):
-        """매매 상태 로드"""
         if os.path.exists(self.state_file):
             try:
                 with open(self.state_file, 'r') as f:
@@ -29,98 +34,79 @@ class GapZoneScalper:
         return {"has_position": False, "buy_price": 0.0, "qty": 0, "highest_price": 0.0}
 
     def _save_state(self):
-        """매매 상태 저장"""
         with open(self.state_file, 'w') as f:
             json.dump(self.state, f)
 
     def calculate_indicators(self, df):
-        """보조지표 계산 (SMA, EMA, RSI)"""
-        if len(df) < 50:
-            return df
-        
-        # 1. 이동평균선
+        if len(df) < 50: return df
         df['SMA_50'] = df['close'].rolling(window=50).mean()
         df['EMA_50'] = df['close'].ewm(span=50, adjust=False).mean()
-        df['EMA_200'] = df['close'].ewm(span=200, adjust=False).mean()
-        
-        # 2. RSI (14) - 간단 구현
-        delta = df['close'].diff()
-        gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
-        loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
-        rs = gain / loss
-        df['RSI'] = 100 - (100 / (1 + rs))
-        
+        # [중요] 데이터 부족 이슈 해결을 위해 200 -> 100으로 변경 유지
+        df['EMA_100'] = df['close'].ewm(span=100, adjust=False).mean() 
         return df
 
     def update_market_data(self):
-        """1분봉/5분봉 데이터 수집 및 지표 업데이트"""
         self.df_1m = self.api.get_candles(self.exchange, self.symbol, Config.TIMEFRAME_1M)
         self.df_5m = self.api.get_candles(self.exchange, self.symbol, Config.TIMEFRAME_5M)
         
         if self.df_1m.empty or self.df_5m.empty:
-            logger.warning("캔들 데이터 부족으로 로직 수행 건너뜀")
+            self.debug_info["reason"] = "캔들 데이터 수신 실패"
             return False
 
         self.df_1m = self.calculate_indicators(self.df_1m)
         self.df_5m = self.calculate_indicators(self.df_5m)
-        
         self.current_price = self.api.get_current_price(self.exchange, self.symbol)
         return True
 
     def check_entry_signal(self):
-        """
-        [매수 로직] Gap Zone & Confluence
-        """
+        """[매수 로직] + 디버깅 정보 업데이트"""
         if self.state["has_position"]:
+            self.debug_info["reason"] = "이미 보유중 (매도 감시중)"
             return False
 
-        # 최신 데이터 추출
         last_1m = self.df_1m.iloc[-1]
         last_5m = self.df_5m.iloc[-1]
         
-        # 1. Trend Filter: 정배열 (1분: EMA50 > SMA50, 5분: Price > EMA200)
-        # NaN 체크
-        if pd.isna(last_1m['EMA_50']) or pd.isna(last_5m['EMA_200']):
+        # 지표 미생성 시
+        if pd.isna(last_1m.get('EMA_50')) or pd.isna(last_5m.get('EMA_100')):
+            self.debug_info["reason"] = "지표 계산 불가 (데이터 부족)"
             return False
 
+        # 1. Trend Filter
         trend_ok = (last_1m['EMA_50'] > last_1m['SMA_50']) and \
-                   (self.current_price > last_5m['EMA_200'])
-        
+                   (self.current_price > last_5m['EMA_100'])
+        self.debug_info["trend_ok"] = bool(trend_ok)
+
         if not trend_ok:
-            # logger.debug("Trend Filter: Fail") # 너무 잦은 로그 방지
+            self.debug_info["reason"] = "추세 필터 미달 (하락세/역배열)"
+            self.debug_info["target_price"] = 0 
             return False
 
-        # 2. Volume Filter: 거래량 급감 (최근 10개 봉 최대 거래량 대비 40% 미만)
-        recent_vol = self.df_1m['volume'].tail(10)
-        max_vol = recent_vol.max()
-        vol_ok = last_1m['volume'] < (max_vol * 0.4)
-        
-        if not vol_ok:
-            # logger.debug("Volume Filter: Fail (Not Dry-out)")
-            return False
+        # 2. Target Price (1분 SMA50 + 5분 EMA100 평균)
+        target_price = (last_1m['SMA_50'] + last_5m['EMA_100']) / 2
+        self.debug_info["target_price"] = target_price
 
-        # 3. Target Price & Buy Zone
-        # Target = (1분 SMA50 + 5분 EMA200) / 2
-        target_price = (last_1m['SMA_50'] + last_5m['EMA_200']) / 2
+        # 3. Zone Check
+        lower = target_price * 0.995
+        upper = target_price * 1.005
         
-        # Buy Zone: Target ± 0.5%
-        lower_bound = target_price * 0.995
-        upper_bound = target_price * 1.005
-        
-        in_zone = lower_bound <= self.current_price <= upper_bound
-        
-        if in_zone:
-            logger.info(f"⚡ 매수 신호 발생! Price: {self.current_price} (Target: {target_price:.2f})")
+        if lower <= self.current_price <= upper:
+            self.debug_info["reason"] = "진입 성공!"
             return True
-        
-        return False
+        else:
+            # [자네가 원하던 기능] 왜 안 샀는지 구체적 이유 계산
+            if self.current_price > upper:
+                diff = ((self.current_price - target_price) / target_price) * 100
+                self.debug_info["reason"] = f"진입 대기 (고가 괴리율 +{diff:.2f}%)"
+            else:
+                self.debug_info["reason"] = "진입 대기 (저가 이탈 - 지지선 붕괴)"
+            return False
 
     def execute_buy(self):
-        """매수 실행"""
-        # 예산 기반 수량 계산
         qty = int(Config.TOTAL_BUDGET_USD // self.current_price)
-        if qty < 1:
-            return
+        if qty < 1: 
+            self.debug_info["reason"] = "예산 부족 (수량 0)"
+            return False
 
         res = self.api.place_order_final(self.exchange, self.symbol, "BUY", qty, self.current_price)
         if res:
@@ -129,56 +115,38 @@ class GapZoneScalper:
             self.state["qty"] = qty
             self.state["highest_price"] = self.current_price
             self._save_state()
+            return True 
+        return False
 
     def check_exit_signal(self):
-        """
-        [청산 로직] 
-        1. 익절: +3% (50% 분할매도 구현은 복잡하므로 여기선 전량매도로 단순화하되 로직만 포함)
-        2. 트레일링 스탑: 고점 대비 -2%
-        3. 손절: -3%
-        """
-        if not self.state["has_position"]:
-            return
+        if not self.state["has_position"]: return None
 
         buy_price = self.state["buy_price"]
         curr_price = self.current_price
         
-        # 고점 갱신
         if curr_price > self.state["highest_price"]:
             self.state["highest_price"] = curr_price
             self._save_state()
         
         highest = self.state["highest_price"]
-        qty = self.state["qty"]
-
-        # 수익률 계산
         pnl_rate = (curr_price - buy_price) / buy_price * 100
         drop_rate = (curr_price - highest) / highest * 100
 
         reason = ""
-        
-        # 1. 익절 (Take Profit)
-        if pnl_rate >= 3.0:
-            reason = "Take Profit (+3%)"
-        
-        # 2. 트레일링 스탑 (Trailing Stop)
-        elif drop_rate <= -2.0:
-            reason = "Trailing Stop (-2% from High)"
-            
-        # 3. 손절 (Stop Loss)
-        elif pnl_rate <= -3.0:
-            reason = "Stop Loss (-3%)"
+        if pnl_rate >= 3.0: reason = "Take Profit (+3%)"
+        elif drop_rate <= -2.0: reason = "Trailing Stop (-2%)"
+        elif pnl_rate <= -3.0: reason = "Stop Loss (-3%)"
             
         if reason:
-            logger.info(f"📉 매도 신호 발생: {reason} | PnL: {pnl_rate:.2f}%")
-            self.execute_sell(qty, reason)
+            if self.execute_sell(self.state["qty"], reason):
+                return f"{reason} (수익률: {pnl_rate:.2f}%)"
+        return None
 
     def execute_sell(self, qty, reason):
-        """매도 실행"""
-        # 시장가 매도 혹은 현재가 지정가 매도
         res = self.api.place_order_final(self.exchange, self.symbol, "SELL", qty, self.current_price)
         if res:
             logger.info(f"매도 완료: {reason}")
-            # 상태 초기화
             self.state = {"has_position": False, "buy_price": 0.0, "qty": 0, "highest_price": 0.0}
             self._save_state()
+            return True
+        return False
