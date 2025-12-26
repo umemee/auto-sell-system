@@ -31,43 +31,42 @@ class KisApi:
 
     def get_ranking(self, sort_type="vol"):
         """
-        해외주식 거래량 순위 조회 (수정 완료: 거래량 상위 종목 API 적용)
-        API ID: 해외주식-043 (해외주식 거래량순위)
-        TR_ID: HHDFS76310010
+        해외주식 거래량 순위 조회 (수정: KeyError 방지 및 디버깅 로그 추가)
+        API ID: 해외주식-043 (HHDFS76310010)
         """
-        # [수정 1] 올바른 API URL로 변경 (거래량 순위)
         path = "/uapi/overseas-stock/v1/ranking/trade-vol"
-        
-        # [수정 2] 올바른 TR_ID 설정
         self._update_headers("HHDFS76310010") 
         
-        # [수정 3] 필수 요청 파라미터 설정 (API 문서 기준)
         params = {
             "AUTH": "",
-            "EXCD": "NAS",      # 거래소: 나스닥(NAS), 뉴욕(NYS), 아멕스(AMS)
-            "NDAY": "0",        # 기간: 0(당일)
-            "PRC1": "",         # 가격범위 시작 (공백: 전체)
-            "PRC2": "",         # 가격범위 끝
-            "VOL_RANG": "0",    # 거래량 조건: 0(전체)
-            "KEYB": ""          # 페이징 키 (첫 요청시 공백)
+            "EXCD": "NAS",      # 나스닥
+            "NDAY": "0",        # 당일
+            "PRC1": "", "PRC2": "",
+            "VOL_RANG": "0",    # 전체
+            "KEYB": ""
         }
         
         try:
-            # API 요청 전송
             res = requests.get(f"{self.base_url}{path}", headers=self.headers, params=params)
             data = res.json()
             
-            # 응답 처리
-            if data['rt_cd'] == '0':
-                return data['output'] # 정상적으로 리스트 반환
+            # [DEBUG] API 응답 코드 확인
+            rt_cd = data.get('rt_cd')
+            
+            if rt_cd == '0':
+                # [KeyError 방지] 'output' 키가 없으면 빈 리스트 반환
+                ranking_data = data.get('output', [])
+                
+                if not ranking_data:
+                    logger.warning(f"Ranking 조회 성공했으나 데이터가 비어있습니다. 응답: {str(data)[:100]}...")
+                    
+                return ranking_data
             else:
-                # API 호출은 성공했으나, 로직상 실패한 경우 (장 종료 등)
-                logger.error(f"Ranking 조회 실패: {data.get('msg1')} ({data.get('msg_cd')})")
+                logger.error(f"Ranking 조회 실패: {data.get('msg1')} (Code: {data.get('msg_cd')})")
                 return []
                 
         except Exception as e:
-            # 네트워크 에러 등 예외 처리
-            logger.error(f"Ranking 요청 중 에러 발생: {e}")
+            logger.error(f"Ranking 요청 중 예외 발생: {e}")
             return []
 
     def get_candles(self, exchange, symbol, timeframe, limit=200):
