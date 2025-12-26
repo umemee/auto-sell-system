@@ -11,23 +11,25 @@ class Config:
     CANO = os.getenv("CANO")
     ACNT_PRDT_CD = os.getenv("ACNT_PRDT_CD", "01")
 
-    # 2. API URL (실전 투자)
+    # 2. API URL (여기가 문제의 핵심이었네!)
+    # 어떤 파일은 URL_BASE를 찾고, 어떤 파일은 BASE_URL을 찾으니 둘 다 정의해버리는 것일세.
     URL_BASE = "https://openapi.koreainvestment.com:9443"
+    BASE_URL = URL_BASE  # [핵심] BASE_URL을 요청해도 URL_BASE를 주도록 별칭(Alias) 설정
 
     # 3. 전략 설정 (Gap-Zone Scalper)
     TOTAL_BUDGET_USD = 30     # 예산
     TARGET_SYMBOL = "TSLA"    # 타겟 종목
-    EXCHANGE_CD = "NASD"      # 거래소 코드 (나스닥)
+    EXCHANGE_CD = "NASD"      # 거래소 코드
     
-    # 4. [중요] 타임프레임 설정 (변수명 불일치 방지용으로 다 넣음)
-    TIMEFRAME_1 = "1M"       # 1분봉
-    TIMEFRAME_2 = "5M"       # 5분봉
-    TIMEFRAME_1M = "1M"      # Strategy가 이걸 찾아서 에러가 났었음! (추가됨)
-    TIMEFRAME_5M = "5M"      # 혹시 몰라 추가함
+    # 4. 타임프레임 (여기도 안전하게 둘 다 설정)
+    TIMEFRAME_1 = "1M"       
+    TIMEFRAME_2 = "5M"       
+    TIMEFRAME_1M = "1M"      
+    TIMEFRAME_5M = "5M"      
 
     # 5. 데이터 처리 설정
-    CANDLE_LIMIT = 200       # 이평선 계산용 데이터 개수
-    RATE_LIMIT_DELAY = 1.0   # 1초 딜레이
+    CANDLE_LIMIT = 200       
+    RATE_LIMIT_DELAY = 1.0   
 
     @classmethod
     def check_settings(cls):
