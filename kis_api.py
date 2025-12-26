@@ -1,8 +1,6 @@
-# kis_api.py
 import requests
 import json
 import time
-import math
 import pandas as pd
 from config import Config
 from utils import get_logger
@@ -12,7 +10,7 @@ logger = get_logger()
 class KisApi:
     def __init__(self, token_manager):
         self.tm = token_manager
-        self.base_url = Config.URL_BASE
+        self.base_url = Config().BASE_URL
         self.headers = {
             "content-type": "application/json; charset=utf-8",
             "authorization": "",
@@ -26,39 +24,41 @@ class KisApi:
         self.headers["authorization"] = f"Bearer {self.tm.get_token()}"
         self.headers["tr_id"] = tr_id
 
-    def get_candles(self, exchange, symbol, timeframe, limit=200):
+    def _get_lookup_excd(self, exchange):
         """
-        [핵심] 차트 데이터(OHLCV) 조회 및 DataFrame 변환
-        - timeframe: "1M" (1분), "5M" (5분)
+        [거래소 코드 변환기]
+        주문용 코드(4자리)를 시세조회용 코드(3자리)로 변환
+        NASD -> NAS, NYSE -> NYS, AMEX -> AMS
         """
-        path = "/uapi/overseas-price/v1/quotations/inquire-time-itemchartprice"
-        self._update_headers("HHDFS76950200") # 해외주식 분봉 조회 TR_ID
-
-        # [수정 포인트] 거래소 코드 변환 (주문용 NASD -> 시세용 NAS)
-        # API가 시세 조회 때는 3글자 코드를 원하기 때문입니다.
         excd_map = {
             "NASD": "NAS",
             "NYSE": "NYS",
             "AMEX": "AMS"
         }
-        lookup_excd = excd_map.get(exchange, exchange)
+        return excd_map.get(exchange, exchange)
 
-        # 분봉 변환 ("1M" -> "1", "5M" -> "5")
+    def get_candles(self, exchange, symbol, timeframe, limit=200):
+        """차트 데이터(OHLCV) 조회"""
+        path = "/uapi/overseas-price/v1/quotations/inquire-time-itemchartprice"
+        self._update_headers("HHDFS76950200")
+
+        # [중요] 시세 조회용 코드로 변환 (NASD -> NAS)
+        lookup_excd = self._get_lookup_excd(exchange)
+
         nmin = "1"
         if timeframe == "5M": nmin = "5"
         
         params = {
             "AUTH": "",
-            "EXCD": lookup_excd, # [중요] 변환된 코드를 사용
+            "EXCD": lookup_excd, # 변환된 코드 사용
             "SYMB": symbol,
             "NMIN": nmin,
             "PINC": "1",
             "NEXT": "",
-            "NREC": "120", # API 1회 최대 조회 수
+            "NREC": "120", 
             "KEYB": ""
         }
 
-        # KIS API는 1회 120건 제한. 전략은 최근 데이터가 중요하므로 1회 호출로 최적화.
         try:
             res = requests.get(f"{self.base_url}{path}", headers=self.headers, params=params)
             res.raise_for_status()
@@ -72,13 +72,10 @@ class KisApi:
             if not items:
                 return pd.DataFrame()
 
-            # DataFrame 생성 및 타입 변환
             df = pd.DataFrame(items)
             df = df[['kymd', 'khms', 'open', 'high', 'low', 'last', 'evol']]
             df.columns = ['date', 'time', 'open', 'high', 'low', 'close', 'volume']
             df = df.astype({'open': float, 'high': float, 'low': float, 'close': float, 'volume': int})
-            
-            # 시간 오름차순 정렬 (과거 -> 현재)
             df = df.sort_values(by=['date', 'time']).reset_index(drop=True)
             
             return df
@@ -87,16 +84,19 @@ class KisApi:
             logger.error(f"Get Candles Failed: {e}")
             return pd.DataFrame()
         finally:
-            time.sleep(0.1) # Rate Limit 미세 조정
+            time.sleep(0.1)
 
     def get_current_price(self, exchange, symbol):
         """현재가 조회"""
         path = "/uapi/overseas-price/v1/quotations/price"
         self._update_headers("HHDFS00000300")
         
+        # [중요] 여기도 변환해야 합니다! (NASD -> NAS)
+        lookup_excd = self._get_lookup_excd(exchange)
+        
         params = {
             "AUTH": "",
-            "EXCD": exchange,
+            "EXCD": lookup_excd, # 변환된 코드 사용
             "SYMB": symbol
         }
         
@@ -111,22 +111,18 @@ class KisApi:
             return 0.0
 
     def place_order(self, exchange, symbol, side, price=0):
-        """
-        주문 실행 (매수/매도)
-        - [Budget Guard] 적용됨
-        """
+        """주문 실행 (매수/매도)"""
+        # [중요] 주문 API는 'NASD'(4자리)를 그대로 써야 하므로 변환하지 않습니다.
+        
         path = "/uapi/overseas-stock/v1/trading/order"
         
-        # TR_ID 설정 (실전/모의 & 매수/매도)
         is_buy = (side == "BUY")
-        if Config.IS_MOCK:
-            tr_id = "VTTT1002U" if is_buy else "VTTT1001U"
-        else:
-            tr_id = "TTTT1002U" if is_buy else "TTTT1006U" # 미국 기준
+        # 실전 투자용 TR_ID (미국 기준)
+        tr_id = "TTTT1002U" if is_buy else "TTTT1006U"
             
         self._update_headers(tr_id)
 
-        # 현재가 조회 및 수량 계산
+        # 현재가 조회 (실패 시 0.0 반환)
         current_price = price if price > 0 else self.get_current_price(exchange, symbol)
         if current_price <= 0:
             logger.error("현재가 조회 실패로 주문 불가")
@@ -134,39 +130,34 @@ class KisApi:
 
         qty = 0
         if is_buy:
-            # [Smart Quantity] 예산 범위 내 최대 수량 계산
+            # 예산 범위 내 최대 수량 계산
             max_qty = int(Config.TOTAL_BUDGET_USD // current_price)
             if max_qty < 1:
                 logger.warning(f"예산 부족: ${Config.TOTAL_BUDGET_USD} / 현재가 ${current_price}")
                 return None
             qty = max_qty
         else:
-            # 매도 시에는 보유 수량을 strategy에서 받아와야 함 (여기서는 API 호출 규격만 정의)
-            # 실제 qty는 strategy에서 주입받는 구조로 변경하거나, params로 받아야 함.
-            # 이 함수는 qty를 인자로 받도록 수정 권장하나, 요청사항의 문맥상 자동계산 로직 예시임.
-            # 아래 strategy.py 연동을 위해 qty를 인자로 받는 형태로 확장.
+            # 매도 로직은 Strategy에서 수량을 결정해서 호출해야 함
             pass 
 
-        # (오버로딩 흉내: qty가 인자로 안 들어오면 자동 계산)
-        # 실제 호출 시: place_order_final(self, exchange, symbol, side, qty, price) 사용 권장
-        pass
+        # 실제 주문 전송 (qty가 0이 아니면 전송)
+        if qty > 0:
+            return self.place_order_final(exchange, symbol, side, qty, current_price)
+        return None
 
     def place_order_final(self, exchange, symbol, side, qty, price):
         """최종 주문 전송"""
         path = "/uapi/overseas-stock/v1/trading/order"
         
         is_buy = (side == "BUY")
-        if Config.IS_MOCK:
-            tr_id = "VTTT1002U" if is_buy else "VTTT1001U"
-        else:
-            tr_id = "TTTT1002U" if is_buy else "TTTT1006U"
+        tr_id = "TTTT1002U" if is_buy else "TTTT1006U"
             
         self._update_headers(tr_id)
         
         body = {
             "CANO": Config.CANO,
             "ACNT_PRDT_CD": Config.ACNT_PRDT_CD,
-            "OVRS_EXCG_CD": exchange,
+            "OVRS_EXCG_CD": exchange, # 주문은 NASD 그대로 사용
             "PDNO": symbol,
             "ORD_QTY": str(qty),
             "OVRS_ORD_UNPR": str(price),
