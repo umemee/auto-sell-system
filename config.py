@@ -21,7 +21,7 @@ class Config:
     # 4. 전략 파라미터 (Gap-Zone Scalper)
     TOTAL_BUDGET_USD = 30     # 예산 ($30)
     TARGET_SYMBOL = "TSLA"    # 타겟 종목
-    TARGET_EXCHANGE = "NASD"  # 거래소 (나스닥)
+    EXCHANGE_CD = "NASD"      # 거래소 (나스닥)
 
     # 5. 시스템 설정
     CANDLE_LIMIT = 200        # 이평선 계산용 데이터 개수
