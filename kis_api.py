@@ -1,4 +1,4 @@
-# kis_api.py (Update)
+# kis_api.py
 import requests
 import json
 import time
@@ -29,45 +29,41 @@ class KisApi:
         excd_map = {"NASD": "NAS", "NYSE": "NYS", "AMEX": "AMS"}
         return excd_map.get(exchange, exchange)
 
-    # [NEW] 랭킹 조회 (거래량 상위 등)
     def get_ranking(self, sort_type="vol"):
-        """
-        해외주식 순위 조회
-        - sort_type: "vol" (거래량 상위), "change" (상승률 상위)
-        """
-        # API 엔드포인트: 해외주식 조건검색(종목결과) 또는 순위 API 사용
-        # 여기서는 '상승률 상위' or '거래량 상위' 등락률 순위 사용
+        """해외주식 순위 조회 (404 에러 수정됨)"""
         path = "/uapi/overseas-stock/v1/ranking/fluctuation"
-        self._update_headers("HHDFS76410000") # 등락률 순위 TR_ID
+        self._update_headers("HHDFS76410000") 
         
-        # 정렬 조건: 0(상승순), 1(하락순), 2(거래량순)
         rank_sort = "2" if sort_type == "vol" else "0"
 
+        # [수정] AUTH 파라미터 제거
         params = {
-            "AUTH": "",
-            "EXCC": "NAS", # 나스닥 기준
-            "GUBN": "0",   # 0:전체, 1:보통주
-            "QRY_DIV": "0",# 0:전체, 1:종목명
+            "EXCC": "NAS", 
+            "GUBN": "0",   
+            "QRY_DIV": "0",
             "RANK_SORT": rank_sort 
         }
         
         try:
             res = requests.get(f"{self.base_url}{path}", headers=self.headers, params=params)
-            res.raise_for_status()
-            data = res.json()
             
+            # 404 등 에러 발생 시 예외 처리 강화
+            if res.status_code != 200:
+                logger.warning(f"Ranking API Error: {res.status_code} {res.text[:50]}")
+                return []
+
+            data = res.json()
             if data['rt_cd'] != '0':
                 logger.error(f"Ranking Fetch Error: {data['msg1']}")
                 return []
             
-            return data['output'] # 리스트 반환
+            return data['output']
 
         except Exception as e:
             logger.error(f"Ranking Fetch Failed: {e}")
             return []
 
     def get_candles(self, exchange, symbol, timeframe, limit=200):
-        # (기존 코드와 동일)
         path = "/uapi/overseas-price/v1/quotations/inquire-time-itemchartprice"
         self._update_headers("HHDFS76950200")
         lookup_excd = self._get_lookup_excd(exchange)
@@ -103,7 +99,6 @@ class KisApi:
             time.sleep(0.1)
 
     def get_current_price(self, exchange, symbol):
-        # (기존 코드와 동일)
         path = "/uapi/overseas-price/v1/quotations/price"
         self._update_headers("HHDFS00000300")
         lookup_excd = self._get_lookup_excd(exchange)
@@ -117,7 +112,6 @@ class KisApi:
             return 0.0
 
     def place_order_final(self, exchange, symbol, side, qty, price):
-        # (기존 코드와 동일)
         path = "/uapi/overseas-stock/v1/trading/order"
         is_buy = (side == "BUY")
         tr_id = "TTTT1002U" if is_buy else "TTTT1006U"
