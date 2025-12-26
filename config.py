@@ -26,7 +26,7 @@ class Config:
 
     # 3. 전략 설정 (Gap-Zone Scalper)
     TOTAL_BUDGET_USD = 30     # 예산
-    TARGET_SYMBOL = "TSLA"    # 타겟 종목
+    TARGET_SYMBOL = "SIDU"    # 타겟 종목
     EXCHANGE_CD = "NASD"      # 거래소 코드
     
     # 4. 타임프레임
