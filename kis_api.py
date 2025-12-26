@@ -12,7 +12,7 @@ logger = get_logger()
 class KisApi:
     def __init__(self, token_manager):
         self.tm = token_manager
-        self.base_url = Config().BASE_URL
+        self.base_url = Config.URL_BASE
         self.headers = {
             "content-type": "application/json; charset=utf-8",
             "authorization": "",
