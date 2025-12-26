@@ -31,7 +31,7 @@ class KisApi:
 
     def get_ranking(self, sort_type="vol"):
         """
-        해외주식 거래량 순위 조회 (수정: KeyError 방지 및 디버깅 로그 추가)
+        해외주식 거래량 순위 조회 (수정: 응답 Key 'output2'로 변경)
         API ID: 해외주식-043 (HHDFS76310010)
         """
         path = "/uapi/overseas-stock/v1/ranking/trade-vol"
@@ -50,12 +50,12 @@ class KisApi:
             res = requests.get(f"{self.base_url}{path}", headers=self.headers, params=params)
             data = res.json()
             
-            # [DEBUG] API 응답 코드 확인
             rt_cd = data.get('rt_cd')
             
             if rt_cd == '0':
-                # [KeyError 방지] 'output' 키가 없으면 빈 리스트 반환
-                ranking_data = data.get('output', [])
+                # [수정] 거래량 순위 API는 종목 리스트를 'output2'에 담아서 줍니다.
+                # 기존: data.get('output', []) -> 변경: data.get('output2', [])
+                ranking_data = data.get('output2', [])
                 
                 if not ranking_data:
                     logger.warning(f"Ranking 조회 성공했으나 데이터가 비어있습니다. 응답: {str(data)[:100]}...")
