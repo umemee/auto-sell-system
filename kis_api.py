@@ -34,13 +34,22 @@ class KisApi:
         path = "/uapi/overseas-price/v1/quotations/inquire-time-itemchartprice"
         self._update_headers("HHDFS76950200") # 해외주식 분봉 조회 TR_ID
 
+        # [수정 포인트] 거래소 코드 변환 (주문용 NASD -> 시세용 NAS)
+        # API가 시세 조회 때는 3글자 코드를 원하기 때문입니다.
+        excd_map = {
+            "NASD": "NAS",
+            "NYSE": "NYS",
+            "AMEX": "AMS"
+        }
+        lookup_excd = excd_map.get(exchange, exchange)
+
         # 분봉 변환 ("1M" -> "1", "5M" -> "5")
         nmin = "1"
         if timeframe == "5M": nmin = "5"
         
         params = {
             "AUTH": "",
-            "EXCD": exchange,
+            "EXCD": lookup_excd, # [중요] 변환된 코드를 사용
             "SYMB": symbol,
             "NMIN": nmin,
             "PINC": "1",
@@ -49,10 +58,7 @@ class KisApi:
             "KEYB": ""
         }
 
-        # KIS API는 1회 120건 제한이 있으므로, 200개 이상 필요 시 반복 호출 로직 필요할 수 있음.
-        # 여기서는 전략의 핵심인 최근 데이터 확보를 위해 120건 기준으로 처리 (최근 데이터가 중요)
-        # 필요시 Loop 로직 추가 가능하나 속도를 위해 1회 호출로 최적화
-        
+        # KIS API는 1회 120건 제한. 전략은 최근 데이터가 중요하므로 1회 호출로 최적화.
         try:
             res = requests.get(f"{self.base_url}{path}", headers=self.headers, params=params)
             res.raise_for_status()

@@ -36,7 +36,7 @@ class Config:
     TIMEFRAME_5M = "5M"      
 
     # 5. 데이터 처리 설정
-    CANDLE_LIMIT = 200       
+    CANDLE_LIMIT = 100       
     RATE_LIMIT_DELAY = 1.0   
 
     @classmethod
