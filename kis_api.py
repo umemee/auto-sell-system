@@ -191,15 +191,68 @@ class KisApi:
                 # 종목 코드가 일치하는지 확인
                 if item.get('pdno') == symbol:
                     # 특정 주문번호가 지정된 경우, 그 주문만 체크
+                    # API에서 주는 주문번호(odno)와 내가 가진 번호(order_no)가 일치하는지 확인
                     if order_no and item.get('odno') != order_no:
                         continue
-                        
-                    # 미체결 수량 합산 (nccs_qty)
-                    qty = int(item.get('nccs_qty', 0))
-                    total_unfilled += qty
+                    
+                    # 일치하는 주문을 찾으면 미체결 수량(nccs_qty) 반환
+                    return int(item.get('nccs_qty', 0))
             
-            return total_unfilled
+            return 0 # 리스트를 다 뒤져도 없으면 미체결 없음(전량 체결됨)
             
         except Exception as e:
             logger.error(f"미체결 확인 중 에러: {e}")
             return 0
+        
+    def revise_order(self, exchange, symbol, orgn_order_no, revise_type, qty, price, order_type="00"):
+        """
+        [주문 정정/취소 API]
+        API ID: 해외주식 주문 정정/취소 (TTTS3035U / VTTS3035U)
+        
+        Args:
+            exchange (str): 거래소 코드 (NASD, NYS, AMS)
+            symbol (str): 종목 코드
+            orgn_order_no (str): 원주문 번호 (get_unfilled_qty로 조회한 미체결 주문번호)
+            revise_type (str): "01"(정정), "02"(취소)
+            qty (int): 정정/취소할 수량 (전량 취소 시 미체결 잔량 입력)
+            price (float): 정정할 가격 (취소 시에는 0 입력)
+            order_type (str): 주문 구분 (기본 "00": 지정가)
+        """
+        path = "/uapi/overseas-stock/v1/trading/order-rvsecncl"
+        
+        # [TR ID 설정] 
+        # 실전투자: TTTS3035U
+        # 모의투자: VTTS3035U
+        # ※ 학습 단계이므로 실전용 ID를 기본으로 하되, 모의투자 시 아래 값을 'VTTS3035U'로 변경하세요.
+        tr_id = "TTTS3035U"
+        
+        self._update_headers(tr_id)
+
+        body = {
+            "CANO": Config.CANO,
+            "ACNT_PRDT_CD": Config.ACNT_PRDT_CD,
+            "OVRS_EXCG_CD": exchange, 
+            "PDNO": symbol,
+            "ORGN_ODNO": orgn_order_no,
+            "RVSE_CNCL_DV_CD": revise_type, # 01: 정정, 02: 취소
+            "ORD_QTY": str(qty),
+            "ORD_UNPR": str(price),
+            "ORD_DVSN": order_type,
+            "CTX_AREA_FK200": "",
+            "CTX_AREA_NK200": ""
+        }
+
+        try:
+            res = requests.post(f"{self.base_url}{path}", headers=self.headers, data=json.dumps(body))
+            data = res.json()
+            
+            if data['rt_cd'] == '0':
+                action = "정정" if revise_type == "01" else "취소"
+                logger.info(f"✅ [{symbol}] 주문 {action} 성공! (원주문:{orgn_order_no} -> {action})")
+                return data['output']
+            else:
+                logger.error(f"❌ [{symbol}] 주문 정정/취소 실패: {data['msg1']} (Code: {data['msg_cd']})")
+                return None
+        except Exception as e:
+            logger.error(f"[주문 정정/취소 예외 발생] {e}")
+            return None

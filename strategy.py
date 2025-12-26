@@ -1,4 +1,5 @@
 # strategy.py
+import time
 import pandas as pd
 import json
 import os
@@ -132,20 +133,62 @@ class GapZoneScalper:
                 self.execute_sell(symbol, state["qty"], current_price, reason, pnl_rate)
 
     def execute_buy(self, symbol, price):
-        # 종목당 예산 배분 (간단하게 N빵)
-        # budget_per_stock = Config.TOTAL_BUDGET_USD / len(Config.TARGET_SYMBOLS)
-        # 일단은 전체 예산 사용 (스캐너용 대비)
+        """
+        스마트 주문 실행: 지정가 주문 -> 3초 대기 -> 미체결 시 취소 후 급하게 재주문
+        """
+        # 1. 예산 계산 (기존 로직 유지)
         qty = int(Config.TOTAL_BUDGET_USD // price)
-        if qty < 1: return
+        if qty < 1: 
+            logger.warning(f"[{symbol}] 예산 부족으로 매수 불가 (필요: ${price}, 예산: ${Config.TOTAL_BUDGET_USD})")
+            return
 
-        res = self.api.place_order_final(self.exchange, symbol, "BUY", qty, price)
-        if res:
-            self.states[symbol]["has_position"] = True
-            self.states[symbol]["buy_price"] = price
-            self.states[symbol]["qty"] = qty
-            self.states[symbol]["highest_price"] = price
-            self._save_states()
-            # 텔레그램 알림은 리턴값 대신 Main에서 상태 변화를 감지하거나 여기서 로그로 처리
+        logger.info(f"⚡ [{symbol}] 1차 지정가 매수 시도: {qty}주 @ ${price}")
+        
+        # 2. 1차 주문 전송 (지정가)
+        # place_order_final이 아닌 place_order를 사용 (api 래퍼가 있다면 확인 필요, 여기선 place_order로 가정)
+        # 만약 kis_api.py에 place_order_final만 있다면 그것을 사용하세요.
+        res = self.api.place_order(self.exchange, symbol, "BUY", qty, price)
+        
+        if not res:
+            logger.error(f"[{symbol}] 1차 주문 실패")
+            return
+
+        order_no = res.get("ODNO") # 주문 번호 획득
+        
+        # 3. 3초간 체결 대기 (시장의 반응 기다림)
+        time.sleep(3)
+        
+        # 4. 미체결 잔량 확인 (새로 만든 기능!)
+        remained_qty = self.api.get_unfilled_qty(symbol, order_no)
+        
+        # 5. 결과에 따른 분기 처리
+        if remained_qty > 0:
+            logger.info(f"⚠️ [{symbol}] 미체결 {remained_qty}주 발생 -> 기존 주문 취소 후 재진입 시도")
+            
+            # (1) 기존 주문 취소
+            self.api.revise_order(self.exchange, symbol, order_no, "02", remained_qty, 0)
+            time.sleep(0.5) # 취소 처리 대기
+            
+            # (2) 확실하게 잡기 위해 가격을 높여서 재주문 (현재가 + 2%)
+            # 스캘핑에서는 놓치는 것보다 약간 비싸게라도 잡는 것이 나을 때가 있음
+            final_price = round(price * 1.02, 2) 
+            
+            logger.info(f"🚀 [{symbol}] 2차 재주문 (Market-like): {remained_qty}주 @ ${final_price}")
+            res_retry = self.api.place_order(self.exchange, symbol, "BUY", remained_qty, final_price)
+            
+            if res_retry:
+                self._update_state(symbol, final_price, remained_qty) # 상태 업데이트
+        else:
+            logger.info(f"✅ [{symbol}] 1차 주문 전량 체결 완료!")
+            self._update_state(symbol, price, qty) # 상태 업데이트
+
+    def _update_state(self, symbol, buy_price, qty):
+        """매수 성공 시 상태 파일 업데이트 (코드 중복 방지용 헬퍼)"""
+        self.states[symbol]["has_position"] = True
+        self.states[symbol]["buy_price"] = buy_price
+        self.states[symbol]["qty"] = qty
+        self.states[symbol]["highest_price"] = buy_price
+        self._save_states()
 
     def execute_sell(self, symbol, qty, price, reason, pnl):
         res = self.api.place_order_final(self.exchange, symbol, "SELL", qty, price)
