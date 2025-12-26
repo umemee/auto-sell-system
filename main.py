@@ -1,8 +1,9 @@
 import time
 import os
 import sys
+from datetime import datetime
 
-# 1. Config 클래스 가져오기 (이게 빠져서 에러가 난 걸세!)
+# 모듈 임포트
 from config import Config
 from kis_auth import TokenManager
 from kis_api import KisApi
@@ -15,49 +16,53 @@ logger = get_logger()
 def main():
     logger.info("=== KIS US Scalper System Started ===")
     
-    # 1. 토큰 관리자 초기화
+    # 1. 초기화
     token_manager = TokenManager()
-    
-    # 2. API 래퍼 초기화
     api = KisApi(token_manager)
     
-    # 3. 전략 엔진 초기화
     try:
         strategy = GapZoneScalper(api)
     except Exception as e:
         logger.error(f"전략 초기화 실패: {e}")
         return
 
-    # [수정 포인트] 에러가 났던 부분 안전하게 변경
-    # strategy.symbol 대신 Config.TARGET_SYMBOL을 직접 사용
     logger.info(f"Target: {Config.TARGET_SYMBOL} | Budget: ${Config.TOTAL_BUDGET_USD}")
     
-    # 4. 메인 루프 시작
+    # [추가] 마지막 생존신고 시간 기록용 변수
+    last_heartbeat = 0
+    
+    # 2. 메인 루프
     while True:
         try:
-            # 4-1. 킬 스위치 체크
+            # 2-1. 킬 스위치
             if os.path.exists("STOP.txt"):
-                logger.info("⛔ Kill Switch Detected (STOP.txt). System Exit.")
+                logger.info("⛔ Kill Switch Detected. Exiting.")
                 break
 
-            # 4-2. 장 운영 시간 체크 (utils.py에 함수가 있다고 가정)
-            # 개발 중에는 주석 처리하거나, utils.is_market_open() 구현 필요
-            # if not is_market_open():
-            #     time.sleep(60)
-            #     continue
-
-            # 4-3. 전략 실행 (데이터 갱신 -> 매수/매도 판별)
-            # update_market_data가 True일 때만(데이터가 유효할 때만) 로직 수행
-            if strategy.update_market_data():
-                
+            # 2-2. 데이터 갱신 및 전략 실행
+            # (데이터가 갱신되지 않아도 루프는 돕니다)
+            has_data = strategy.update_market_data()
+            
+            if has_data:
                 # 매수 신호 확인
                 if strategy.check_entry_signal():
                     strategy.execute_buy()
                 
-                # 매도 신호 확인 (이미 보유 중인 경우 내부에서 처리)
+                # 매도 신호 확인
                 strategy.check_exit_signal()
             
-            # 4-4. Rate Limit 준수 (1초 대기)
+            # 2-3. [NEW] 10초마다 생존 신고 (Heartbeat)
+            # 현재가가 0이 아닐 때만 출력
+            current_ts = time.time()
+            if current_ts - last_heartbeat > 10:
+                price = getattr(strategy, 'current_price', 0)
+                if price > 0:
+                    logger.info(f"💓 [생존신고] 감시중... 현재가: ${price} (Target: {Config.TARGET_SYMBOL})")
+                else:
+                    logger.info(f"💓 [생존신고] 데이터 수신 대기중... (Target: {Config.TARGET_SYMBOL})")
+                last_heartbeat = current_ts
+
+            # 2-4. Rate Limit 준수
             time.sleep(Config.RATE_LIMIT_DELAY)
 
         except KeyboardInterrupt:
@@ -65,7 +70,7 @@ def main():
             break
         except Exception as e:
             logger.error(f"Critical Error in Main Loop: {e}")
-            time.sleep(5) # 에러 발생 시 5초 대기
+            time.sleep(5)
 
 if __name__ == "__main__":
     main()
