@@ -5,28 +5,29 @@ from dotenv import load_dotenv
 load_dotenv(dotenv_path=".env.production")
 
 class Config:
-    # 1. 계좌 및 인증 정보 (자네의 .env 변수명에 맞게 자동 매핑)
-    # KIS_APP_KEY로 저장되어 있어도 읽고, KIS_APPKEY로 저장되어 있어도 읽습니다.
+    # 1. 계좌 및 인증 정보 (자동 매핑: 언더바 유무 상관없이 다 읽음)
     APP_KEY = os.getenv("KIS_APP_KEY") or os.getenv("KIS_APPKEY")
     APP_SECRET = os.getenv("KIS_APP_SECRET") or os.getenv("KIS_APPSECRET")
 
-    # 계좌번호 처리 (KIS_ACCOUNT_NO="12345678-01" 형태 대응)
+    # 계좌번호 (하이픈 있어도 되고 없어도 됨)
     _ACC_NO = os.getenv("KIS_ACCOUNT_NO") or os.getenv("CANO")
-    
     if _ACC_NO and "-" in _ACC_NO:
-        # 하이픈(-)을 기준으로 앞뒤를 자릅니다.
         CANO, ACNT_PRDT_CD = _ACC_NO.split("-")
     else:
         CANO = _ACC_NO
         ACNT_PRDT_CD = os.getenv("ACNT_PRDT_CD", "01")
 
-    # 2. API URL (URL_BASE, BASE_URL 둘 다 지원)
+    # [NEW] 텔레그램 설정 (여기가 빠져서 에러가 난 걸세!)
+    TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+    TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
+
+    # 2. API URL (NASD -> NAS 변환 이슈 해결용)
     URL_BASE = "https://openapi.koreainvestment.com:9443"
     BASE_URL = URL_BASE 
 
     # 3. 전략 설정 (Gap-Zone Scalper)
     TOTAL_BUDGET_USD = 30     # 예산
-    TARGET_SYMBOL = "SIDU"    # 타겟 종목
+    TARGET_SYMBOL = "SIDU"    # 타겟 종목 (SIDU로 유지)
     EXCHANGE_CD = "NASD"      # 거래소 코드
     
     # 4. 타임프레임
@@ -36,14 +37,14 @@ class Config:
     TIMEFRAME_5M = "5M"      
 
     # 5. 데이터 처리 설정
-    CANDLE_LIMIT = 100       
+    CANDLE_LIMIT = 100       # 데이터 개수 제한 (API 맞춰서 100)
     RATE_LIMIT_DELAY = 1.0   
 
     @classmethod
     def check_settings(cls):
-        # APP_KEY가 제대로 로드되었는지 확인
         if not cls.APP_KEY or not cls.APP_SECRET:
             print(f"❌ [오류] .env 파일 로드 실패 (KEY 못찾음)")
-            print(f"   현재 인식된 키: {cls.APP_KEY}")
             return False
+        if not cls.TELEGRAM_BOT_TOKEN:
+            print(f"⚠️ [경고] 텔레그램 토큰이 없습니다.")
         return True
