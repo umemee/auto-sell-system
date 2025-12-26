@@ -59,64 +59,21 @@ class GapZoneScalper:
         return True
 
     def check_entry_signal(self):
-        """[매수 로직] + 디버깅 정보 업데이트"""
+        """[매수 로직] 테스트 모드: 무조건 매수 진입"""
+        # 1. 이미 보유 중이면 패스
         if self.state["has_position"]:
-            self.debug_info["reason"] = "이미 보유중 (매도 감시중)"
+            self.debug_info["reason"] = "이미 보유중"
             return False
 
-        last_1m = self.df_1m.iloc[-1]
-        last_5m = self.df_5m.iloc[-1]
+        # 2. [테스트] 모든 조건 무시하고 매수 신호 발생!
+        # 원래 있던 Trend Filter, Zone Check 등을 다 무시합니다.
         
-        # 지표 미생성 시
-        if pd.isna(last_1m.get('EMA_50')) or pd.isna(last_5m.get('EMA_100')):
-            self.debug_info["reason"] = "지표 계산 불가 (데이터 부족)"
-            return False
-
-        # 1. Trend Filter
-        trend_ok = (last_1m['EMA_50'] > last_1m['SMA_50']) and \
-                   (self.current_price > last_5m['EMA_100'])
-        self.debug_info["trend_ok"] = bool(trend_ok)
-
-        if not trend_ok:
-            self.debug_info["reason"] = "추세 필터 미달 (하락세/역배열)"
-            self.debug_info["target_price"] = 0 
-            return False
-
-        # 2. Target Price (1분 SMA50 + 5분 EMA100 평균)
-        target_price = (last_1m['SMA_50'] + last_5m['EMA_100']) / 2
-        self.debug_info["target_price"] = target_price
-
-        # 3. Zone Check
-        lower = target_price * 0.995
-        upper = target_price * 1.005
+        self.debug_info["trend_ok"] = True
+        self.debug_info["target_price"] = self.current_price # 현재가를 목표가로 설정
+        self.debug_info["reason"] = "🔥 [테스트] 강제 매수 진입"
         
-        if lower <= self.current_price <= upper:
-            self.debug_info["reason"] = "진입 성공!"
-            return True
-        else:
-            # [자네가 원하던 기능] 왜 안 샀는지 구체적 이유 계산
-            if self.current_price > upper:
-                diff = ((self.current_price - target_price) / target_price) * 100
-                self.debug_info["reason"] = f"진입 대기 (고가 괴리율 +{diff:.2f}%)"
-            else:
-                self.debug_info["reason"] = "진입 대기 (저가 이탈 - 지지선 붕괴)"
-            return False
-
-    def execute_buy(self):
-        qty = int(Config.TOTAL_BUDGET_USD // self.current_price)
-        if qty < 1: 
-            self.debug_info["reason"] = "예산 부족 (수량 0)"
-            return False
-
-        res = self.api.place_order_final(self.exchange, self.symbol, "BUY", qty, self.current_price)
-        if res:
-            self.state["has_position"] = True
-            self.state["buy_price"] = self.current_price
-            self.state["qty"] = qty
-            self.state["highest_price"] = self.current_price
-            self._save_state()
-            return True 
-        return False
+        logger.warning("🚨 TEST MODE: 강제 매수 신호를 생성합니다!")
+        return True
 
     def check_exit_signal(self):
         if not self.state["has_position"]: return None
