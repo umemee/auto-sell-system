@@ -123,8 +123,7 @@ class KisApi:
         tr_id = "TTTT1002U" if is_buy else "TTTT1006U"
         self._update_headers(tr_id)
         
-        # [수정] 가격 호가 단위 준수 (1달러 이상: 소수점 2자리, 1달러 미만: 소수점 4자리)
-        # API 에러 방지: "1$이상 소수점 2자리까지만 가능 합니다."
+        # 가격 호가 단위 준수
         if float(price) >= 1.0:
             final_price = f"{float(price):.2f}"
         else:
@@ -136,7 +135,7 @@ class KisApi:
             "OVRS_EXCG_CD": exchange,
             "PDNO": symbol,
             "ORD_QTY": str(int(qty)),
-            "OVRS_ORD_UNPR": final_price, # [변경] str(price) -> final_price
+            "OVRS_ORD_UNPR": final_price,
             "ORD_SVR_DVSN_CD": "0",
             "ORD_DVSN": "00"
         }
@@ -146,11 +145,61 @@ class KisApi:
             data = res.json()
             
             if data['rt_cd'] == '0':
-                logger.info(f"✅ 주문 성공 [{side}] {symbol} {qty}주 @ ${final_price}")
-                return True
+                # [수정] 주문 성공 시 '주문번호(ODNO)'를 반환 (추후 체결 확인용)
+                odno = data['output'].get('ODNO')
+                logger.info(f"✅ 주문 전송 성공 [{side}] {symbol} {qty}주 @ ${final_price} (ODNO: {odno})")
+                return odno # 주문번호 리턴 (Python에서 문자열은 True로 취급됨 -> 기존 로직 호환)
             else:
                 logger.error(f"주문 실패: {data.get('msg1')} (Code: {data.get('msg_cd')})")
-                return False
+                return None
         except Exception as e:
             logger.error(f"주문 요청 중 에러: {e}")
-            return False
+            return None
+
+    def get_unfilled_qty(self, exchange, symbol, order_no=None):
+        """
+        [신규 기능] 미체결 내역 조회 (체결 확인용)
+        - symbol: 종목코드
+        - order_no: (선택) 특정 주문번호만 확인할 경우
+        - Return: 해당 종목(또는 주문)의 미체결 수량 (0이면 전량 체결 의미)
+        """
+        path = "/uapi/overseas-stock/v1/trading/inquire-nccs"
+        self._update_headers("TTTS3018R") # 해외주식 미체결내역 TR
+        
+        params = {
+            "CANO": Config.CANO,
+            "ACNT_PRDT_CD": Config.ACNT_PRDT_CD,
+            "OVRS_EXCG_CD": exchange,
+            "SORT_SQN": "DS", # 역순(최근주문부터)
+            "CTX_AREA_FK200": "",
+            "CTX_AREA_NK200": ""
+        }
+        
+        try:
+            res = requests.get(f"{self.base_url}{path}", headers=self.headers, params=params)
+            data = res.json()
+            
+            if data['rt_cd'] != '0':
+                # 조회 실패 시 안전하게 0 리턴 (로그만 남김)
+                # logger.warning(f"미체결 조회 실패 ({symbol}): {data.get('msg1')}")
+                return 0
+                
+            output = data.get('output', [])
+            total_unfilled = 0
+            
+            for item in output:
+                # 종목 코드가 일치하는지 확인
+                if item.get('pdno') == symbol:
+                    # 특정 주문번호가 지정된 경우, 그 주문만 체크
+                    if order_no and item.get('odno') != order_no:
+                        continue
+                        
+                    # 미체결 수량 합산 (nccs_qty)
+                    qty = int(item.get('nccs_qty', 0))
+                    total_unfilled += qty
+            
+            return total_unfilled
+            
+        except Exception as e:
+            logger.error(f"미체결 확인 중 에러: {e}")
+            return 0
