@@ -123,25 +123,34 @@ class KisApi:
         tr_id = "TTTT1002U" if is_buy else "TTTT1006U"
         self._update_headers(tr_id)
         
+        # [수정] 가격 호가 단위 준수 (1달러 이상: 소수점 2자리, 1달러 미만: 소수점 4자리)
+        # API 에러 방지: "1$이상 소수점 2자리까지만 가능 합니다."
+        if float(price) >= 1.0:
+            final_price = f"{float(price):.2f}"
+        else:
+            final_price = f"{float(price):.4f}"
+        
         body = {
             "CANO": Config.CANO,
             "ACNT_PRDT_CD": Config.ACNT_PRDT_CD,
             "OVRS_EXCG_CD": exchange,
             "PDNO": symbol,
-            "ORD_QTY": str(qty),
-            "OVRS_ORD_UNPR": str(price),
+            "ORD_QTY": str(int(qty)),
+            "OVRS_ORD_UNPR": final_price, # [변경] str(price) -> final_price
             "ORD_SVR_DVSN_CD": "0",
             "ORD_DVSN": "00"
         }
+        
         try:
-            res = requests.post(f"{self.base_url}{path}", headers=self.headers, data=json.dumps(body))
+            res = requests.post(f"{self.base_url}{path}", headers=self.headers, json=body)
             data = res.json()
+            
             if data['rt_cd'] == '0':
-                logger.info(f"[{side}] 주문 성공: {qty}주 @ ${price}")
-                return data
+                logger.info(f"✅ 주문 성공 [{side}] {symbol} {qty}주 @ ${final_price}")
+                return True
             else:
-                logger.error(f"주문 실패: {data['msg1']}")
-                return None
+                logger.error(f"주문 실패: {data.get('msg1')} (Code: {data.get('msg_cd')})")
+                return False
         except Exception as e:
-            logger.error(f"Order Exception: {e}")
-            return None
+            logger.error(f"주문 요청 중 에러: {e}")
+            return False
