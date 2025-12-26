@@ -58,25 +58,49 @@ class GapZoneScalper:
         return True
 
     def check_entry_signal(self):
-        """[매수 로직] 🔥 테스트 모드: 무조건 매수 진입"""
-        # 1. 이미 보유 중이면 패스
+        """[매수 로직] 복구됨: 엄격한 Gap-Zone 전략 적용"""
         if self.state["has_position"]:
             self.debug_info["reason"] = "이미 보유중"
             return False
 
-        # 2. [테스트] 강제 매수 신호 발생!
-        self.debug_info["trend_ok"] = True
-        self.debug_info["target_price"] = self.current_price 
-        self.debug_info["reason"] = "🔥 [테스트] 강제 매수 진입"
+        last_1m = self.df_1m.iloc[-1]
+        last_5m = self.df_5m.iloc[-1]
         
-        logger.warning("🚨 TEST MODE: 강제 매수 신호를 생성합니다!")
-        return True
+        # 지표 확인
+        if pd.isna(last_1m.get('EMA_50')) or pd.isna(last_5m.get('EMA_100')):
+            self.debug_info["reason"] = "지표 계산 중"
+            return False
 
-    # [복구됨] 이 함수가 지워져서 에러가 났던 것일세!
+        # 1. Trend Filter
+        trend_ok = (last_1m['EMA_50'] > last_1m['SMA_50']) and \
+                   (self.current_price > last_5m['EMA_100'])
+        self.debug_info["trend_ok"] = bool(trend_ok)
+
+        if not trend_ok:
+            self.debug_info["reason"] = "추세 필터 미달 (하락세)"
+            self.debug_info["target_price"] = 0 
+            return False
+
+        # 2. Target Price
+        target_price = (last_1m['SMA_50'] + last_5m['EMA_100']) / 2
+        self.debug_info["target_price"] = target_price
+
+        # 3. Zone Check
+        lower = target_price * 0.995
+        upper = target_price * 1.005
+        
+        if lower <= self.current_price <= upper:
+            self.debug_info["reason"] = "진입 성공!"
+            return True
+        else:
+            diff = ((self.current_price - target_price) / target_price) * 100
+            self.debug_info["reason"] = f"진입 대기 (괴리율 {diff:.2f}%)"
+            return False
+
     def execute_buy(self):
         qty = int(Config.TOTAL_BUDGET_USD // self.current_price)
         if qty < 1: 
-            self.debug_info["reason"] = "예산 부족 (수량 0)"
+            self.debug_info["reason"] = "예산 부족"
             return False
 
         res = self.api.place_order_final(self.exchange, self.symbol, "BUY", qty, self.current_price)
@@ -90,27 +114,27 @@ class GapZoneScalper:
         return False
 
     def check_exit_signal(self):
+        """[청산 로직] 🔥 테스트 모드: 강제 매도 실행"""
         if not self.state["has_position"]: return None
 
         buy_price = self.state["buy_price"]
         curr_price = self.current_price
-        
+        qty = self.state["qty"]
+
+        # 고점 갱신 로직은 유지
         if curr_price > self.state["highest_price"]:
             self.state["highest_price"] = curr_price
             self._save_state()
-        
-        highest = self.state["highest_price"]
-        pnl_rate = (curr_price - buy_price) / buy_price * 100
-        drop_rate = (curr_price - highest) / highest * 100
 
-        reason = ""
-        if pnl_rate >= 3.0: reason = "Take Profit (+3%)"
-        elif drop_rate <= -2.0: reason = "Trailing Stop (-2%)"
-        elif pnl_rate <= -3.0: reason = "Stop Loss (-3%)"
+        pnl_rate = (curr_price - buy_price) / buy_price * 100
+
+        # [테스트] 무조건 매도 신호 발생
+        reason = "🔥 [테스트] 강제 매도 검증"
+        logger.warning(f"🚨 TEST MODE: 강제 매도 실행! (PnL: {pnl_rate:.2f}%)")
+        
+        if self.execute_sell(qty, reason):
+            return f"{reason} (수익률: {pnl_rate:.2f}%)"
             
-        if reason:
-            if self.execute_sell(self.state["qty"], reason):
-                return f"{reason} (수익률: {pnl_rate:.2f}%)"
         return None
 
     def execute_sell(self, qty, reason):
