@@ -30,37 +30,44 @@ class KisApi:
         return excd_map.get(exchange, exchange)
 
     def get_ranking(self, sort_type="vol"):
-        """해외주식 순위 조회 (404 에러 수정됨)"""
-        path = "/uapi/overseas-stock/v1/ranking/fluctuation"
-        self._update_headers("HHDFS76410000") 
+        """
+        해외주식 거래량 순위 조회 (수정 완료: 거래량 상위 종목 API 적용)
+        API ID: 해외주식-043 (해외주식 거래량순위)
+        TR_ID: HHDFS76310010
+        """
+        # [수정 1] 올바른 API URL로 변경 (거래량 순위)
+        path = "/uapi/overseas-stock/v1/ranking/trade-vol"
         
-        rank_sort = "2" if sort_type == "vol" else "0"
-
-        # [수정] AUTH 파라미터 제거
+        # [수정 2] 올바른 TR_ID 설정
+        self._update_headers("HHDFS76310010") 
+        
+        # [수정 3] 필수 요청 파라미터 설정 (API 문서 기준)
         params = {
-            "EXCC": "NAS", 
-            "GUBN": "0",   
-            "QRY_DIV": "0",
-            "RANK_SORT": rank_sort 
+            "AUTH": "",
+            "EXCD": "NAS",      # 거래소: 나스닥(NAS), 뉴욕(NYS), 아멕스(AMS)
+            "NDAY": "0",        # 기간: 0(당일)
+            "PRC1": "",         # 가격범위 시작 (공백: 전체)
+            "PRC2": "",         # 가격범위 끝
+            "VOL_RANG": "0",    # 거래량 조건: 0(전체)
+            "KEYB": ""          # 페이징 키 (첫 요청시 공백)
         }
         
         try:
+            # API 요청 전송
             res = requests.get(f"{self.base_url}{path}", headers=self.headers, params=params)
-            
-            # 404 등 에러 발생 시 예외 처리 강화
-            if res.status_code != 200:
-                logger.warning(f"Ranking API Error: {res.status_code} {res.text[:50]}")
-                return []
-
             data = res.json()
-            if data['rt_cd'] != '0':
-                logger.error(f"Ranking Fetch Error: {data['msg1']}")
-                return []
             
-            return data['output']
-
+            # 응답 처리
+            if data['rt_cd'] == '0':
+                return data['output'] # 정상적으로 리스트 반환
+            else:
+                # API 호출은 성공했으나, 로직상 실패한 경우 (장 종료 등)
+                logger.error(f"Ranking 조회 실패: {data.get('msg1')} ({data.get('msg_cd')})")
+                return []
+                
         except Exception as e:
-            logger.error(f"Ranking Fetch Failed: {e}")
+            # 네트워크 에러 등 예외 처리
+            logger.error(f"Ranking 요청 중 에러 발생: {e}")
             return []
 
     def get_candles(self, exchange, symbol, timeframe, limit=200):
