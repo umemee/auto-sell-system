@@ -14,7 +14,7 @@ class MarketScanner:
         self.min_price = 0.2        # 동전주 포함 (사용자 설정)
         self.max_price = 30.0       # 자본금 고려 ($30 이하)
         self.min_volume = 100000    # 거래량 기준 대폭 완화 (10만 주 이상이면 감시)
-        self.min_change = 5.0       # 5% 이상만 오르면 일단 감시
+        self.min_change = 40.0       # 40% 이상만 오르면 일단 감시
         
         self.etf_keywords = ['ETF', 'ETN', 'BULL', 'BEAR', '2X', '3X', 'ULTRA', 'PROSHARES']
 
