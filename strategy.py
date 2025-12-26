@@ -17,7 +17,7 @@ class GapZoneScalper:
         self.symbol = Config.TARGET_SYMBOL
         self.exchange = Config.EXCHANGE_CD
         
-        # [NEW] 디버깅 정보를 담을 블랙박스 (외부에서 조회 가능)
+        # 디버깅 정보
         self.debug_info = {
             "target_price": 0.0,
             "trend_ok": False,
@@ -41,7 +41,6 @@ class GapZoneScalper:
         if len(df) < 50: return df
         df['SMA_50'] = df['close'].rolling(window=50).mean()
         df['EMA_50'] = df['close'].ewm(span=50, adjust=False).mean()
-        # [중요] 데이터 부족 이슈 해결을 위해 200 -> 100으로 변경 유지
         df['EMA_100'] = df['close'].ewm(span=100, adjust=False).mean() 
         return df
 
@@ -59,21 +58,36 @@ class GapZoneScalper:
         return True
 
     def check_entry_signal(self):
-        """[매수 로직] 테스트 모드: 무조건 매수 진입"""
+        """[매수 로직] 🔥 테스트 모드: 무조건 매수 진입"""
         # 1. 이미 보유 중이면 패스
         if self.state["has_position"]:
             self.debug_info["reason"] = "이미 보유중"
             return False
 
-        # 2. [테스트] 모든 조건 무시하고 매수 신호 발생!
-        # 원래 있던 Trend Filter, Zone Check 등을 다 무시합니다.
-        
+        # 2. [테스트] 강제 매수 신호 발생!
         self.debug_info["trend_ok"] = True
-        self.debug_info["target_price"] = self.current_price # 현재가를 목표가로 설정
+        self.debug_info["target_price"] = self.current_price 
         self.debug_info["reason"] = "🔥 [테스트] 강제 매수 진입"
         
         logger.warning("🚨 TEST MODE: 강제 매수 신호를 생성합니다!")
         return True
+
+    # [복구됨] 이 함수가 지워져서 에러가 났던 것일세!
+    def execute_buy(self):
+        qty = int(Config.TOTAL_BUDGET_USD // self.current_price)
+        if qty < 1: 
+            self.debug_info["reason"] = "예산 부족 (수량 0)"
+            return False
+
+        res = self.api.place_order_final(self.exchange, self.symbol, "BUY", qty, self.current_price)
+        if res:
+            self.state["has_position"] = True
+            self.state["buy_price"] = self.current_price
+            self.state["qty"] = qty
+            self.state["highest_price"] = self.current_price
+            self._save_state()
+            return True 
+        return False
 
     def check_exit_signal(self):
         if not self.state["has_position"]: return None
