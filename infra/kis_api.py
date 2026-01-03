@@ -184,3 +184,43 @@ class KisApi:
                 if order_no and item.get('odno') != order_no: continue
                 return int(item.get('nccs_qty', 0))
         return 0
+
+    def get_minute_candles(self, exchange, symbol, timeframe="1"):
+        """
+        [Fix] 해외주식 분봉 조회
+        """
+        path = "/uapi/overseas-price/v1/quotations/inquire-time-itemchartprice"
+        url = f"{self.base_url}{path}"
+        
+        # [수정 포인트] _get_headers() 삭제 -> _update_headers() 호출 후 self.headers 사용
+        self._update_headers("HHDFS76950200")
+        
+        # 거래소 코드 변환
+        exch_map = {"NASD": "NAS", "NYSE": "NYS", "AMEX": "AMS"}
+        kis_exch = exch_map.get(exchange, "NAS")
+        
+        params = {
+            "AUTH": "",
+            "EXCD": kis_exch,
+            "SYMB": symbol,
+            "NMIN": timeframe, 
+            "PINC": "1",
+            "NEXT": "",
+            "NREC": "100", 
+            "KEYB": ""
+        }
+        
+        try:
+            # [수정 포인트] headers=self.headers 로 변경
+            res = requests.get(url, headers=self.headers, params=params)
+            
+            if res.status_code == 200:
+                data = res.json()
+                if data['rt_cd'] == '0':
+                    return data['output2'] 
+                else:
+                    logger.error(f"Candle Fail: {data['msg1']}")
+            else:
+                logger.error(f"API Error {res.status_code}")    
+        except Exception as e:
+            logger.error(f"Request Error: {e}")
