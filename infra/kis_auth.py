@@ -6,11 +6,11 @@ import os
 import threading
 from datetime import datetime, timedelta
 from config import Config
-from utils import get_logger
+from infra.utils import get_logger 
 
 logger = get_logger()
 
-class TokenManager:
+class KisAuth: 
     """
     KIS 접근 토큰 관리자
     - 파일 캐싱 (token_store.json)
@@ -18,7 +18,7 @@ class TokenManager:
     - 스레드 안전 (Thread Safe)
     """
     def __init__(self):
-        self._lock = threading.RLock() # 재진입 가능한 락
+        self._lock = threading.RLock()
         self.token_file = "token_store.json"
         self.access_token = None
         self.token_expired = None # 토큰 만료 시간 (datetime 객체)
