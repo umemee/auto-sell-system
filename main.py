@@ -3,6 +3,7 @@ import time
 import logging
 import os
 import sys
+import pandas as pd
 from datetime import datetime
 
 # --- Core Modules ---
@@ -22,6 +23,19 @@ import config
 # 로깅 설정 (utils.py의 설정을 따름)
 from infra.utils import get_logger
 logger = get_logger("Main")
+
+def save_trade_log(trade_data):
+    """실전 매매 로그 저장 (엑셀 분석용)"""
+    file_path = "results/live_trade_journal.csv"
+    if not os.path.exists("results"):
+        os.makedirs("results")
+    
+    df = pd.DataFrame([trade_data])
+    
+    if not os.path.exists(file_path):
+        df.to_csv(file_path, index=False, mode='w', encoding='utf-8-sig')
+    else:
+        df.to_csv(file_path, index=False, mode='a', header=False, encoding='utf-8-sig')
 
 def generate_trade_id(symbol):
     now = datetime.now()
@@ -157,19 +171,23 @@ def main():
                         bot.send_message(f"🔎 <b>New Candidates</b>\nTop3: {', '.join(top3)}")
 
                 if market_listener.target_symbols:
-                    # 예수금 조회
                     my_cash = api.get_buyable_cash()
                     
-                    market_data = market_listener.get_market_data()
+                    # [수정됨] market_data 대신 캔들 데이터를 직접 조회
+                    # 주의: 타겟 종목이 많으면 여기서 속도가 느려질 수 있으므로,
+                    # market_listener.target_symbols는 엄선된 소수(Top 5 등)여야 함.
                     
-                    for symbol, data in market_data.items():
-                        # Signal Engine 분석
+                    for symbol in market_listener.target_symbols:
+                        # 1. 1분봉 데이터 조회 (최근 100개)
+                        candles = api.get_minute_candles(config.Config.EXCHANGE_CD, symbol)
+                        if not candles:
+                            continue
+                            
+                        # 2. 엔진 분석
                         action_plan = signal_engine.analyze(
                             symbol=symbol,
-                            current_price=data.get('price'),
-                            open_price=data.get('open'),
-                            pm_volume=data.get('vol'),
-                            available_balance=my_cash 
+                            candles=candles, # 캔들 전달
+                            balance=my_cash 
                         )
 
                         if action_plan:
@@ -269,7 +287,27 @@ def main():
                                 "order_no": odno
                             }
                             bot.send_rich_notification("SELL", noti_data)
-                            
+
+                            # 매매 일지 기록
+                            try:
+                                trade_log = {
+                                    "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                                    "trade_id": tid,
+                                    "symbol": symbol,
+                                    "strategy": "ATOM_SUP_EMA5", # 현재 게릴라전 전략명
+                                    "side": "SELL",
+                                    "qty": qty,
+                                    "entry_price": entry_price,
+                                    "exit_price": curr_price,
+                                    "pnl_abs": round((curr_price - entry_price) * qty, 2),
+                                    "pnl_pct": round(pnl_rate, 2),
+                                    "order_no": odno
+                                }
+                                save_trade_log(trade_log)
+                                logger.info(f"💾 Trade Log Saved: {symbol} PnL {pnl_rate:.2f}%")
+                            except Exception as log_e:
+                                logger.error(f"Log Save Error: {log_e}")
+
                             # 리스크 매니저에 결과 기록
                             risk_manager.record_trade_result(pnl_rate)
                             

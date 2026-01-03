@@ -49,19 +49,16 @@ class Config:
     @classmethod
     def get_order_qty(cls, current_price: float, balance: float) -> int:
         """
-        [V2 Feature] 현재가와 목표 금액을 기반으로 주문 수량 계산
-        단, 잔고(balance)가 부족하면 잔고에 맞춰 조정
+        [Phase 1: Guerrilla Mode]
+        목표 금액($1000) 제한을 풀고, 현재 잔고의 98%를 '몰빵' 매수합니다.
         """
         if current_price <= 0:
             return 0
             
-        # 1. 목표 금액 기준 수량 계산
-        target_qty = int(cls.AVG_BUY_AMOUNT // current_price)
+        # 잔고의 98% 사용 (2%는 수수료 및 슬리피지 버퍼)
+        safe_balance = balance * 0.98
         
-        # 2. 실제 잔고 기준 최대 수량 계산 (수수료 여유분 99% 적용)
-        max_qty = int((balance * 0.99) // current_price)
-        
-        # 3. 둘 중 작은 값 선택 (자금이 많아도 목표 금액만큼만, 부족하면 있는 만큼만)
-        final_qty = min(target_qty, max_qty)
+        # 수량 계산
+        final_qty = int(safe_balance // current_price)
         
         return max(1, final_qty) if final_qty > 0 else 0
