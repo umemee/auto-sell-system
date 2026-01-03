@@ -1,5 +1,7 @@
-# core/signal_engine.py - Dependency Free & Balance Aware
+# core/signal_engine.py
 import logging
+import pandas as pd
+import numpy as np
 from typing import Optional
 from core.action_plan import ActionPlan
 
@@ -7,61 +9,64 @@ class SignalEngine:
     def __init__(self):
         self.logger = logging.getLogger("SignalEngine")
         
-        # 전략 파라미터 (취향에 따라 튜닝 가능)
-        self.MIN_GAP_PCT = 2.0          # 갭상승 최소 2%
-        self.MIN_PM_VOLUME = 10000      # 프리마켓 거래량 최소 1만주
-        self.STOP_LOSS_PCT = 0.02       # 손절 -2%
-        self.TAKE_PROFIT_PCT = 0.04     # 익절 +4%
+        # [Phase 1] ATOM_SUP_EMA5 전략 파라미터
+        self.STRATEGY_NAME = "ATOM_SUP_EMA5"
+        self.SUPPORT_THRESHOLD = 0.01  # 지지 범위 (1%)
+        self.STOP_LOSS_PCT = 0.015     # 손절 -1.5% (스캘핑이라 타이트하게)
+        self.TAKE_PROFIT_PCT = 0.03    # 익절 +3.0%
 
-    def analyze(self, symbol: str, current_price: float, open_price: float, pm_volume: int, available_balance: float) -> Optional[ActionPlan]:
+    def analyze(self, symbol: str, candles: list, balance: float) -> Optional[ActionPlan]:
         """
-        분석 및 자금 관리(Money Management) 통합
-        :param available_balance: 현재 주문 가능한 현금 (USD)
+        EMA 5일선 지지 패턴 분석
+        :param candles: KIS API에서 가져온 캔들 리스트 (최신순)
         """
-        
-        # 1. 기초 데이터 검증
-        if current_price <= 0:
+        if not candles or len(candles) < 20:
             return None
 
-        # 2. 전략 로직: 갭상승 & 거래량
-        momentum_pct = ((current_price - open_price) / open_price) * 100
-        
-        if momentum_pct < self.MIN_GAP_PCT:
-            return None
-        if pm_volume < self.MIN_PM_VOLUME:
-            return None
-
-        # 3. 확신도(Confidence) 계산
-        score = 0.5 
-        if momentum_pct > 5.0: score += 0.2
-        if pm_volume > 50000: score += 0.2
-        confidence = min(score, 0.95)
-
-        # 4. 진입가 및 청산가 설정
-        entry_price = current_price
-        stop_price = entry_price * (1 - self.STOP_LOSS_PCT)
-        target_price = entry_price * (1 + self.TAKE_PROFIT_PCT)
-        
-        # 5. [중요] 잔고 기반 수량 계산 (All-in)
-        # 미수 발생 방지를 위해 잔고의 99%만 사용
-        safe_balance = available_balance * 0.99
-        buy_qty = int(safe_balance // entry_price)
-        
-        if buy_qty < 1:
-            # 잔고가 부족하여 1주도 못 사는 경우
-            # (로그가 너무 많이 쌓일 수 있어 디버그 레벨로 낮춤)
-            # self.logger.debug(f"자금 부족: {symbol} (Need: ${entry_price}, Have: ${available_balance})")
-            return None
-
-        self.logger.info(f"✨ Signal Detected: {symbol} (Qty: {buy_qty}, Cash: ${available_balance:.2f})")
-
-        return ActionPlan(
-            symbol=symbol,
-            signal_type='LONG',
-            confidence=confidence,
-            reason=f"Gap {momentum_pct:.1f}% / Vol {pm_volume}",
-            entry_price=entry_price,
-            quantity=buy_qty, 
-            stop_loss=stop_price,
-            take_profit=[target_price]
-        )
+        # 1. 데이터프레임 변환 및 전처리
+        try:
+            df = pd.DataFrame(candles)
+            # KIS 데이터 컬럼: last(종가), open, high, low
+            df['close'] = pd.to_numeric(df['last'])
+            df['low'] = pd.to_numeric(df['low'])
+            
+            # 시간순 정렬 (과거 -> 최신)
+            df = df.iloc[::-1].reset_index(drop=True)
+            
+            # 2. 지표 계산 (EMA 5)
+            df['ema_5'] = df['close'].ewm(span=5, adjust=False).mean()
+            
+            # 3. 최신 데이터(마지막 봉) 확인
+            current_row = df.iloc[-1]
+            price = current_row['close']
+            low = current_row['low']
+            ema_5 = current_row['ema_5']
+            
+            # 4. 전략 로직: 5선 지지 (Low가 EMA5 근처 1% 이내 접근)
+            # 조건: 저가가 EMA5보다 살짝 아래거나 1% 위 이내
+            #      AND 종가는 EMA5 위에 있어야 함 (지지에 성공한 모습)
+            
+            dist_pct = abs(low - ema_5) / ema_5
+            is_support = (dist_pct <= self.SUPPORT_THRESHOLD) and (price >= ema_5)
+            
+            if is_support:
+                self.logger.info(f"✨ [{self.STRATEGY_NAME}] {symbol} Signal! Price:{price}, EMA5:{ema_5:.2f}")
+                
+                # 수량 계산 (All-in 모드: RiskManager/Config에서 최종 결정하지만 여기서도 가이드)
+                buy_qty = int((balance * 0.98) // price)
+                
+                return ActionPlan(
+                    symbol=symbol,
+                    signal_type='LONG',
+                    confidence=0.9, # 높은 확신
+                    reason=f"EMA5 Support (Dist: {dist_pct*100:.2f}%)",
+                    entry_price=price,
+                    quantity=buy_qty, 
+                    stop_loss=price * (1 - self.STOP_LOSS_PCT),
+                    take_profit=[price * (1 + self.TAKE_PROFIT_PCT)]
+                )
+                
+        except Exception as e:
+            self.logger.error(f"Analysis Error ({symbol}): {e}")
+            
+        return None

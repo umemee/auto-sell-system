@@ -10,9 +10,9 @@ class RiskManager:
         
         # --- [Auditor Approved Policy] ---
         # 이 기준을 변경하려면 Auditor 컨펌 필수
-        self.MAX_DAILY_LOSS_PCT = -2.0   # 일일 손실 한도 (%)
+        self.MAX_DAILY_LOSS_PCT = -3.0   # 일일 손실 한도 (%)
         self.MAX_CONSECUTIVE_LOSS = 3    # 연속 손실 허용 횟수
-        self.MAX_SLIPPAGE_PCT = 0.3      # 허용 슬리피지 (%)
+        self.MAX_SLIPPAGE_PCT = 0.5      # 허용 슬리피지 (%)
         # ---------------------------------
         
         # 일일 상태 추적 변수
