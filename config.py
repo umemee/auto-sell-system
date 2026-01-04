@@ -1,15 +1,13 @@
-# config.py - v3.1 Integrated
+# config.py
 import os
 from dotenv import load_dotenv
 
-# .env 파일 로드
 load_dotenv(dotenv_path=".env.production")
 
 class Config:
-    # 1. 계좌 및 인증 (필수)
+    # --- [계좌 및 인증] ---
     APP_KEY = os.getenv("KIS_APP_KEY")
     APP_SECRET = os.getenv("KIS_APP_SECRET")
-
     _ACC_NO = os.getenv("KIS_ACCOUNT_NO")
     if _ACC_NO and "-" in _ACC_NO:
         CANO, ACNT_PRDT_CD = _ACC_NO.split("-")
@@ -17,27 +15,31 @@ class Config:
         CANO = _ACC_NO
         ACNT_PRDT_CD = os.getenv("ACNT_PRDT_CD", "01")
 
-    # 텔레그램 설정
+    # --- [텔레그램] ---
     TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
     TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
-    # 2. 거래소 및 URL 설정
+    # --- [거래소 설정] ---
     URL_BASE = "https://openapi.koreainvestment.com:9443"
     BASE_URL = URL_BASE 
     EXCHANGE_CD = "NASD"
 
-    # 3. 전략 및 타겟 설정
-    TARGET_SYMBOLS = [] 
-    
-    # 차트 데이터 설정
+    # --- [데이터 설정] ---
     TIMEFRAME_1M = "1M"      
-    TIMEFRAME_5M = "5M"      
-    CANDLE_LIMIT = 100
+    CANDLE_LIMIT = 300       # [수정] SMA 200 계산을 위해 넉넉하게 300개 요청
     RATE_LIMIT_DELAY = 1.2
 
-    # [V2 이식] 자금 관리 설정
-    # 1회 매수 시 사용할 목표 금액 (USD)
-    AVG_BUY_AMOUNT = 1000.0 
+    # --- [자금 관리] ---
+    # 1회 매수 시 All-in (98%) 로직은 get_order_qty에서 처리됨
+    
+    # --- [전략 파라미터 (ROD_B)] ---
+    STRATEGY_NAME = "ROD_B"
+    STOP_LOSS_PCT = 0.08      # [수정] 손절 -8%
+    TAKE_PROFIT_PCT = 0.10    # [수정] 익절 +10%
+    
+    # --- [스캐닝 조건] ---
+    SCAN_MIN_CHANGE = 0.40    # 40% 이상 급등
+    SCAN_DELAY_MIN = 10       # 10분 지연
 
     @classmethod
     def check_settings(cls):
@@ -48,17 +50,8 @@ class Config:
 
     @classmethod
     def get_order_qty(cls, current_price: float, balance: float) -> int:
-        """
-        [Phase 1: Guerrilla Mode]
-        목표 금액($1000) 제한을 풀고, 현재 잔고의 98%를 '몰빵' 매수합니다.
-        """
-        if current_price <= 0:
-            return 0
-            
-        # 잔고의 98% 사용 (2%는 수수료 및 슬리피지 버퍼)
+        """All-in Mode: 잔고의 98% 투입"""
+        if current_price <= 0: return 0
         safe_balance = balance * 0.98
-        
-        # 수량 계산
         final_qty = int(safe_balance // current_price)
-        
         return max(1, final_qty) if final_qty > 0 else 0
