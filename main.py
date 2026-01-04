@@ -1,4 +1,4 @@
-# main.py (Final Orchestrator) - v3.1 Hybrid Edition
+# main.py (Final Orchestrator) - v4.0 Sniper Edition
 import time
 import logging
 import os
@@ -16,16 +16,15 @@ from core.action_plan import ActionPlan
 from infra.kis_auth import KisAuth
 from infra.kis_api import KisApi
 from infra.telegram_bot import TelegramBot
-from infra.utils import is_market_open, get_next_market_open, get_us_time
+from infra.utils import is_market_open, get_next_market_open, get_us_time, get_logger
 from data.market_listener import MarketListener
 import config
 
-# 로깅 설정 (utils.py의 설정을 따름)
-from infra.utils import get_logger
+# 로깅 설정
 logger = get_logger("Main")
 
 def save_trade_log(trade_data):
-    """실전 매매 로그 저장 (엑셀 분석용)"""
+    """실전 매매 로그 저장"""
     file_path = "results/live_trade_journal.csv"
     if not os.path.exists("results"):
         os.makedirs("results")
@@ -42,21 +41,26 @@ def generate_trade_id(symbol):
     return f"{now.strftime('%Y%m%d')}_{symbol}_{now.strftime('%H%M%S')}"
 
 def main():
-    print("🚀 Auto-Sell System v3.1 (Hybrid Edition) Booting Up...")
+    print("🚀 Auto-Sell System v4.0 (ROD_B Sniper) Booting Up...")
     logger.info("✅ 시스템 초기화 시작")
 
     # 1. 인프라 초기화
     try:
+        # 설정 체크
+        if not config.Config.check_settings():
+            return
+
         kis_auth = KisAuth()       
         api = KisApi(kis_auth)
         
         state_manager = StateManager()
-        
-        # [V3.1] 봇에 state_manager 주입 (상태 조회 명령어용)
         bot = TelegramBot(state_manager)
-        bot.start() # 봇 스레드 시작 (명령어 수신 대기)
+        bot.start() 
         
-        bot.send_message("🤖 <b>Auto-Sell System v3.1 가동</b>\n(Core: V3 + Safety: V2 + SmartTime: V1)")
+        bot.send_message(f"🤖 <b>System v4.0 가동 (ROD_B)</b>\n"
+                         f"전략: {config.Config.STRATEGY_NAME}\n"
+                         f"손절: {config.Config.STOP_LOSS_PCT*100}%\n"
+                         f"익절: {config.Config.TAKE_PROFIT_PCT*100}%")
         logger.info("✅ 인프라 연결 성공")
     except Exception as e:
         logger.critical(f"❌ 인프라 초기화 실패: {e}")
@@ -73,7 +77,7 @@ def main():
     RETRY_INTERVAL = 60
     
     last_heartbeat_time = time.time()
-    HEARTBEAT_INTERVAL = 3600 # 1시간마다 생존 신고
+    HEARTBEAT_INTERVAL = 3600 
 
     active_trade = None 
 
@@ -81,144 +85,102 @@ def main():
 
     try:
         while True:
-            # =========================================================
-            # [V2 Feature] 안전 종료 (Kill Switch File)
-            # =========================================================
+            # [Safety] Kill Switch Check
             if os.path.exists("STOP.txt"):
-                msg = "⛔ [Kill Switch] STOP.txt 감지됨. 시스템을 안전하게 종료합니다."
+                msg = "⛔ [Kill Switch] STOP.txt 감지됨. 종료합니다."
                 logger.warning(msg)
                 bot.send_message(msg)
-                os.remove("STOP.txt") # 파일 삭제 후 종료
+                os.remove("STOP.txt")
                 break
 
             current_state = state_manager.get_state()
             us_now = get_us_time()
             now_ts = time.time()
 
-            # =========================================================
-            # [V1 Feature] 스마트 타임 & 주말 체크
-            # =========================================================
-            # 포지션이 없고(IDLE/SCANNING), 장 운영 시간이 아니면 슬립 모드
+            # [Smart Time] 장 운영 시간 체크 (포지션 없을 때만)
             if current_state in [SystemState.IDLE, SystemState.SCANNING] and not active_trade:
                 if not is_market_open():
                     next_open = get_next_market_open()
                     wait_seconds = (next_open - us_now).total_seconds()
                     
                     if wait_seconds > 0:
-                        msg = (f"💤 <b>Smart Sleep Mode</b>\n"
-                               f"현재: {us_now.strftime('%m-%d %H:%M')} (NY)\n"
-                               f"오픈: {next_open.strftime('%m-%d %H:%M')} (NY)\n"
-                               f"상태: 장 시작 전 대기합니다.")
-                        
-                        logger.info(f"Sleep until {next_open}")
+                        msg = (f"💤 <b>Market Closed</b>\n"
+                               f"오픈: {next_open.strftime('%m-%d %H:%M')} (NY)")
                         bot.send_message(msg)
-                        
-                        # IDLE 상태 전환
                         state_manager.set_state(SystemState.IDLE, "Market Closed")
                         
-                        # 긴 대기 (최대 1시간 단위로 끊어서 대기 - 봇 명령 수신 위해)
                         sleep_chunk = 3600
                         while wait_seconds > 0:
-                             # 대기 중에도 STOP.txt 체크
                             if os.path.exists("STOP.txt"): break
-                            
                             to_sleep = min(wait_seconds, sleep_chunk)
                             time.sleep(to_sleep)
                             wait_seconds -= to_sleep
-                            
-                            # 다시 시간 체크 (정확도 보정)
-                            us_now = get_us_time()
                             if is_market_open(): break
-                        
                         continue
 
-            # 장 시간이면 SCANNING으로 자동 전환
             if is_market_open() and current_state == SystemState.IDLE:
                 state_manager.set_state(SystemState.SCANNING, "Market Open")
-                bot.send_message("🔔 <b>Market Open!</b> 감시를 시작합니다.")
+                bot.send_message("🔔 <b>Market Open!</b> 스나이핑을 시작합니다.")
 
-            # =========================================================
-            # [Phase 2] 생존 신고 (Dashboard)
-            # =========================================================
+            # [Heartbeat]
             if now_ts - last_heartbeat_time > HEARTBEAT_INTERVAL:
                 targets = market_listener.target_symbols
-                target_str = ", ".join(targets) if targets else "없음"
-                
-                msg = (f"💓 <b>System Heartbeat</b>\n"
-                       f"상태: {current_state.name}\n"
-                       f"감시중: {len(targets)}개\n"
-                       f"목록: {target_str}")
+                msg = (f"💓 <b>Alive</b>\n상태: {current_state.name}\n타겟: {len(targets)}개")
                 bot.send_message(msg)
                 last_heartbeat_time = now_ts
 
             # =========================================================
-            # [Phase 3] 스캔 및 매매 로직 (V3 Core Logic 유지)
+            # [Logic] 스캔 및 매매
             # =========================================================
             if current_state == SystemState.SCANNING:
                 
-                # 스캔 주기 체크
+                # 주기적 종목 스캔 (Market Listener)
                 is_regular_scan = (now_ts - last_scan_time > SCAN_INTERVAL)
                 is_retry_scan = (not market_listener.target_symbols) and (now_ts - last_scan_time > RETRY_INTERVAL)
 
                 if last_scan_time == 0 or is_regular_scan or is_retry_scan:
-                    logger.info("📡 Scanning market...")
                     found_symbols = market_listener.scan_for_candidates()
                     last_scan_time = now_ts
-                    
-                    # [V2 Feature] 스캔 결과 브리핑 (Top 3)
                     if found_symbols:
-                        top3 = found_symbols[:3]
-                        bot.send_message(f"🔎 <b>New Candidates</b>\nTop3: {', '.join(top3)}")
+                        bot.send_message(f"🔎 <b>Scan Result</b>: {len(found_symbols)} candidates")
 
                 if market_listener.target_symbols:
                     my_cash = api.get_buyable_cash()
                     
-                    # [수정됨] market_data 대신 캔들 데이터를 직접 조회
-                    # 주의: 타겟 종목이 많으면 여기서 속도가 느려질 수 있으므로,
-                    # market_listener.target_symbols는 엄선된 소수(Top 5 등)여야 함.
-                    
                     for symbol in market_listener.target_symbols:
-                        # 1. 1분봉 데이터 조회 (최근 100개)
-                        candles = api.get_minute_candles(config.Config.EXCHANGE_CD, symbol)
-                        if not candles:
+                        
+                        # [Critical Fix 1] One-Shot Rule: 오늘 거래한 종목은 패스
+                        if state_manager.is_traded_today(symbol):
                             continue
-                            
-                        # 2. 엔진 분석
-                        action_plan = signal_engine.analyze(
-                            symbol=symbol,
-                            candles=candles, # 캔들 전달
-                            balance=my_cash 
+
+                        # [Critical Fix 2] SMA 200 계산을 위해 300개 캔들 요청
+                        candles = api.get_minute_candles(
+                            config.Config.EXCHANGE_CD, 
+                            symbol, 
+                            limit=config.Config.CANDLE_LIMIT # 300
                         )
+                        if not candles: continue
+                            
+                        # 엔진 분석 (SignalEngine 내부에 40% 급등 & 10분 지연 로직 포함됨)
+                        action_plan = signal_engine.analyze(symbol, candles, my_cash)
 
                         if action_plan:
                             state_manager.set_state(SystemState.SIGNAL_LOCKED, f"Signal on {symbol}")
                             
-                            # Risk Manager 검증
                             if risk_manager.check_entry_permit(action_plan, my_cash):
                                 
-                                # [V2 Feature] config.get_order_qty 사용 (동적 수량 재계산)
-                                # SignalEngine이 제안한 수량과 Config 계산 수량 중 안전한 쪽 선택
+                                # 수량 확정
                                 config_safe_qty = config.Config.get_order_qty(action_plan.entry_price, my_cash)
                                 final_qty = min(action_plan.quantity, config_safe_qty)
                                 
                                 if final_qty < 1:
-                                    logger.warning(f"수량 부족으로 진입 실패 ({symbol})")
                                     state_manager.set_state(SystemState.SCANNING, "Low Qty")
                                     continue
 
                                 trade_id = generate_trade_id(symbol)
-                                logger.info(f"[{trade_id}] 🚀 Signal Confirmed. Qty: {final_qty}")
+                                logger.info(f"🚀 Execute Buy: {symbol} @ ${action_plan.entry_price}")
 
-                                # 중복 주문 방지
-                                try:
-                                    unfilled = api.get_unfilled_qty(config.Config.EXCHANGE_CD, symbol)
-                                    if unfilled > 0:
-                                        logger.warning(f"중복 방지: {symbol} 미체결 있음")
-                                        continue
-                                except:
-                                    continue
-
-                                # 주문 실행
+                                # 주문 실행 (ROD_B는 Limit Price = Entry Price)
                                 odno = api.place_order_final(
                                     exchange=config.Config.EXCHANGE_CD,
                                     symbol=symbol,
@@ -229,113 +191,122 @@ def main():
                                 )
                                 
                                 if odno:
-                                    # [V2 Feature] Rich Notification 전송
+                                    # [Critical Fix 3] One-Shot 기록: 오늘 이 종목은 졸업
+                                    state_manager.record_trade(symbol)
+                                    
                                     noti_data = {
-                                        "symbol": symbol,
-                                        "qty": final_qty,
-                                        "price": action_plan.entry_price,
-                                        "order_no": odno
+                                        "symbol": symbol, "qty": final_qty,
+                                        "price": action_plan.entry_price, "order_no": odno
                                     }
                                     bot.send_rich_notification("BUY", noti_data)
                                     
+                                    # Active Trade에 TP/SL 정보 정확히 저장
                                     active_trade = {
                                         "trade_id": trade_id,
                                         "symbol": symbol,
                                         "qty": final_qty,
                                         "entry_price": action_plan.entry_price,
-                                        "stop_loss": action_plan.stop_loss,
+                                        "stop_loss": action_plan.stop_loss,   # -8%
+                                        "take_profit": action_plan.take_profit[0], # +10%
                                         "order_no": odno
                                     }
-                                    state_manager.set_state(SystemState.IN_POSITION, f"Entry Success {trade_id}")
+                                    state_manager.set_state(SystemState.IN_POSITION, f"Entry {symbol}")
+                                    
+                                    # One-Shot Rule에 의해 한 번 진입하면 루프 탈출 (단일 포지션 집중)
+                                    break 
                                 else:
                                     state_manager.set_state(SystemState.SCANNING, "Order Fail")
                             else:
                                 state_manager.set_state(SystemState.SCANNING, "Risk Check Fail")
 
             # =========================================================
-            # [Phase 4] 포지션 감시 (청산 로직)
+            # [Logic] 청산 감시 (ROD_B Exit)
             # =========================================================
             elif current_state == SystemState.IN_POSITION:
                 if not active_trade:
-                    state_manager.set_state(SystemState.SCANNING, "Trade info lost")
+                    state_manager.set_state(SystemState.SCANNING, "Lost Trade Info")
                     continue
 
-                tid = active_trade.get("trade_id", "?")
                 symbol = active_trade["symbol"]
                 entry_price = active_trade["entry_price"]
                 qty = active_trade["qty"]
                 stop_loss = active_trade["stop_loss"]
+                take_profit = active_trade["take_profit"] # [New] 익절가
 
                 curr_price = api.get_current_price(config.Config.EXCHANGE_CD, symbol)
                 
                 if curr_price > 0:
                     pnl_rate = ((curr_price - entry_price) / entry_price) * 100
                     
-                    # 손절 조건 (-2.0%) - RiskManager 정책 따름
-                    if pnl_rate <= risk_manager.MAX_DAILY_LOSS_PCT or curr_price <= stop_loss:
+                    exit_signal = False
+                    exit_reason = ""
+                    
+                    # [Critical Fix 4] 정확한 TP/SL 로직
+                    if curr_price >= take_profit:
+                        exit_signal = True
+                        exit_reason = "Take Profit (ROD_B)"
+                    elif curr_price <= stop_loss:
+                        exit_signal = True
+                        exit_reason = "Stop Loss (ROD_B)"
+                    
+                    # (옵션) 3시 50분 강제 청산 로직을 추가할 수도 있음
                         
-                        esc_price = curr_price * 0.95 # 시장가성 지정가
-                        odno = api.place_order_final(config.Config.EXCHANGE_CD, symbol, "SELL", qty, esc_price, tid)
+                    if exit_signal:
+                        # 지정가 매도 (현재가보다 약간 유리하게 던지거나 시장가로)
+                        # 여기서는 확실한 체결을 위해 시장가성 지정가(-2% range) or 시장가 사용
+                        # KIS API 특성상 지정가가 안전함
+                        esc_price = curr_price * 0.98 if "Stop" in exit_reason else curr_price
+                        
+                        odno = api.place_order_final(config.Config.EXCHANGE_CD, symbol, "SELL", qty, esc_price, active_trade["trade_id"])
                         
                         if odno:
-                            # [V2 Feature] Rich Notification (손절)
                             noti_data = {
-                                "symbol": symbol,
-                                "qty": qty,
-                                "price": curr_price,
-                                "pnl": pnl_rate,
+                                "symbol": symbol, "qty": qty,
+                                "price": curr_price, "pnl": pnl_rate,
                                 "order_no": odno
                             }
                             bot.send_rich_notification("SELL", noti_data)
+                            bot.send_message(f"🏁 <b>{exit_reason}</b>\n{symbol} PnL: {pnl_rate:.2f}%")
 
-                            # 매매 일지 기록
-                            try:
-                                trade_log = {
-                                    "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                                    "trade_id": tid,
-                                    "symbol": symbol,
-                                    "strategy": "ATOM_SUP_EMA5", # 현재 게릴라전 전략명
-                                    "side": "SELL",
-                                    "qty": qty,
-                                    "entry_price": entry_price,
-                                    "exit_price": curr_price,
-                                    "pnl_abs": round((curr_price - entry_price) * qty, 2),
-                                    "pnl_pct": round(pnl_rate, 2),
-                                    "order_no": odno
-                                }
-                                save_trade_log(trade_log)
-                                logger.info(f"💾 Trade Log Saved: {symbol} PnL {pnl_rate:.2f}%")
-                            except Exception as log_e:
-                                logger.error(f"Log Save Error: {log_e}")
-
-                            # 리스크 매니저에 결과 기록
+                            # 로그 저장
+                            trade_log = {
+                                "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                                "symbol": symbol,
+                                "strategy": config.Config.STRATEGY_NAME,
+                                "side": "SELL",
+                                "entry": entry_price,
+                                "exit": curr_price,
+                                "pnl_pct": round(pnl_rate, 2),
+                                "reason": exit_reason
+                            }
+                            save_trade_log(trade_log)
                             risk_manager.record_trade_result(pnl_rate)
                             
                             active_trade = None
-                            state_manager.set_state(SystemState.COOLDOWN, "Stop Loss Triggered")
+                            state_manager.set_state(SystemState.COOLDOWN, exit_reason)
                         else:
-                            bot.send_message(f"❌ [{tid}] 청산 주문 실패! 수동 확인 요망!")
-
+                            bot.send_message(f"❌ 매도 주문 실패! {symbol} 수동 청산 요망")
                 else:
                     time.sleep(1)
 
             # =========================================================
-            # [Phase 5] 쿨다운
+            # [Logic] 쿨다운
             # =========================================================
             elif current_state == SystemState.COOLDOWN:
-                time.sleep(10) # 10초 휴식
-                state_manager.set_state(SystemState.SCANNING, "Cooldown Finished")
+                # 매매 종료 후 잠시 대기
+                time.sleep(30)
+                state_manager.set_state(SystemState.SCANNING, "Cooldown Done")
 
-            time.sleep(1) # Main Loop Interval
+            time.sleep(1)
 
     except KeyboardInterrupt:
-        bot.send_message("👋 시스템 수동 종료 (KeyboardInterrupt)")
+        bot.send_message("👋 시스템 종료 요청")
     except Exception as e:
         logger.critical(f"🔥 Critical Error: {e}")
-        bot.send_message(f"🔥 시스템 에러 발생: {e}")
-        state_manager.trigger_kill_switch("System Crash")
+        bot.send_message(f"🔥 시스템 에러: {e}")
+        state_manager.trigger_kill_switch("Crash")
     finally:
-        bot.stop() # 봇 스레드 종료
+        bot.stop()
 
 if __name__ == "__main__":
     main()
