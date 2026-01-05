@@ -40,7 +40,7 @@ class KisApi:
             "ACNT_PRDT_CD": Config.ACNT_PRDT_CD,
             "WCRC_FRCR_DVSN_CD": "02",
             "NATN_CD": "840",
-            "TR_MKET_CD": "00",  # [Critical Fix] TR_MK -> TR_MKET_CD 수정
+            "TR_MKET_CD": "00", 
             "INQR_DVSN_CD": "00"
         }
         
@@ -83,13 +83,14 @@ class KisApi:
             res = requests.get(f"{self.base_url}{path}", headers=self.headers, params=params)
             data = res.json()
             if data['rt_cd'] == '0': 
+                # [Critical Fix] 필드명 수정: open -> popen
+                output = data['output']
                 return dict(
-                    last=float(data['output']['last']),
-                    open=float(data['output']['open']),
-                    volume=int(data['output']['tvol'])
+                    last=float(output.get('last', 0)),
+                    open=float(output.get('popen', 0)), # KIS API는 'popen' 사용
+                    volume=int(output.get('tvol', 0))
                 )
             else:
-                # [Fix] 시세 조회 실패 시 이유 출력
                 logger.error(f"현재가 조회 실패 ({symbol}): {data.get('msg1')}")
             return None
         except Exception as e:
