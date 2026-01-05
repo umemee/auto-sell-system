@@ -17,7 +17,9 @@ class MarketListener:
         return False
 
     def scan_markets(self, min_change=40.0) -> List[str]:
-        """급등주 스캔 (scan_markets)"""
+        """
+        급등주 스캔 (메서드명: scan_markets)
+        """
         try:
             raw_list = self.kis.get_ranking(sort_type="fluct") 
             if not raw_list: return []
@@ -34,11 +36,11 @@ class MarketListener:
                 except:
                     continue
 
-                # 1. 가격 필터 ($0.5 ~ $200)
+                # 1. 가격 필터
                 if not (0.5 <= price <= 200.0): continue
-                # 2. 거래량 필터 (최소 1000주)
+                # 2. 거래량 필터
                 if vol < 1000: continue
-                # 3. 급등 필터 (40% 이상)
+                # 3. 급등 필터
                 if rate < min_change: continue
                 
                 # 4. ETF 필터

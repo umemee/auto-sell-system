@@ -11,7 +11,7 @@ from infra.kis_auth import KisAuth
 from infra.kis_api import KisApi
 from infra.telegram_bot import TelegramBot
 from data.market_listener import MarketListener
-from infra.utils import is_market_open # utils 활용
+from infra.utils import is_market_open
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger("SystemVerifier")
@@ -24,7 +24,7 @@ def verify_system():
         logger.info("🔹 [Step 1] Initializing Infrastructure...")
         auth = KisAuth()
         kis = KisApi(auth)
-        bot = TelegramBot(None) # state_manager 없이 초기화
+        bot = TelegramBot(None) 
         listener = MarketListener(kis)
         logger.info("✅ Infrastructure initialized successfully.")
     except Exception as e:
@@ -50,7 +50,6 @@ def verify_system():
     try:
         logger.info(f"🔹 [Step 3] Checking Market Data for {target_symbol}...")
         
-        # [Fix] get_current_price 인자 (exchange="NASD")
         price_info = kis.get_current_price("NASD", target_symbol)
         if not price_info:
              logger.error(f"❌ Failed to fetch price for {target_symbol}.")
@@ -72,8 +71,8 @@ def verify_system():
     # 3.5 스캐너 로직 점검
     try:
         logger.info("🔹 [Step 3.5] Checking Scanner Logic...")
-        # [Fix] 실제 메서드명 scan_for_candidates 사용
-        listener.scan_for_candidates() 
+        # [Fix] 메서드명 scan_markets으로 통일
+        listener.scan_markets(min_change=0.0) 
         logger.info("✅ Scanner Logic Executed.")
     except Exception as e:
         logger.error(f"❌ Scanner Logic Error: {e}")
@@ -88,8 +87,11 @@ def verify_system():
         logger.error(f"❌ Telegram Failed: {e}")
 
     # 5. 실전 매매 (장중에만)
+    # 프리마켓(20:50)이라도 정규장이 아니면 KIS API 정책에 따라 주문이 거부될 수 있음.
+    # is_market_open()은 정규장(23:30~) 기준.
     if not is_market_open():
-        logger.warning("⏸️ Market is closed. Skipping Real Trade Test.")
+        logger.warning("⏸️ Market is closed (Regular Hours). Skipping Real Trade Test.")
+        logger.info("🎉 DIAGNOSTICS COMPLETE (Ready for Market Open)")
         return
 
     logger.info("🔹 [Step 5] Real Trade Test (Buy 1 -> Sell 1)...")
@@ -107,7 +109,6 @@ def verify_system():
             return
             
         logger.info(f"⏳ Waiting for fill (Order: {ord_no})...")
-        # [Fix] 복구된 wait_for_fill 사용
         if kis.wait_for_fill(ord_no, timeout=60):
             logger.info("✅ BUY Filled!")
             bot.send_message(f"🧪 [Buy Success] {target_symbol}")
