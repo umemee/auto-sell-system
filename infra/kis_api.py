@@ -25,13 +25,22 @@ class KisApi:
         self.headers["tr_id"] = tr_id
 
     def _get_lookup_excd(self, exchange):
-        # 거래소 코드 변환 (사용자 편의성)
+        """[시세조회용] 3자리 코드 변환 (NAS, NYS, AMS)"""
         excd_map = {
             "NASD": "NAS", "NAS": "NAS",
             "NYSE": "NYS", "NYS": "NYS",
             "AMEX": "AMS", "AMS": "AMS"
         }
-        return excd_map.get(exchange, "NAS") # 기본값 NAS
+        return excd_map.get(exchange, "NAS")
+
+    def _get_order_excd(self, exchange):
+        """[주문용] 4자리 코드 변환 (NASD, NYSE, AMEX)"""
+        excd_map = {
+            "NAS": "NASD", "NASD": "NASD",
+            "NYS": "NYSE", "NYSE": "NYSE",
+            "AMS": "AMEX", "AMEX": "AMEX"
+        }
+        return excd_map.get(exchange, "NASD")
 
     @log_api_call("예수금 조회")
     def get_buyable_cash(self) -> float:
@@ -78,6 +87,7 @@ class KisApi:
     def get_current_price(self, exchange, symbol):
         path = "/uapi/overseas-price/v1/quotations/price"
         self._update_headers("HHDFS00000300")
+        # [중요] 시세 조회는 3자리 코드 사용 (NAS)
         lookup_excd = self._get_lookup_excd(exchange)
         
         params = {"AUTH": "", "EXCD": lookup_excd, "SYMB": symbol}
@@ -87,8 +97,6 @@ class KisApi:
             
             if data['rt_cd'] == '0': 
                 output = data['output']
-                # [Fix] 안전한 파싱 (get 사용)
-                # 시가(open)가 없으면 popen을 찾고, 그래도 없으면 전일종가(base)를 씀
                 last = float(output.get('last') or 0)
                 base = float(output.get('base') or 0)
                 open_p = float(output.get('open') or output.get('popen') or base) 
@@ -110,7 +118,6 @@ class KisApi:
         path = "/uapi/overseas-stock/v1/trading/order"
         is_buy = (side == "BUY")
         
-        # 실전/모의 구분
         if "vts" in self.base_url:
             tr_id = "VTTT1002U" if is_buy else "VTTT1001U"
         else:
@@ -121,10 +128,13 @@ class KisApi:
         if float(price) >= 1.0: final_price = f"{float(price):.2f}"
         else: final_price = f"{float(price):.4f}"
         
+        # [Critical Fix] 주문은 4자리 코드 사용 (NASD)
+        order_excd = self._get_order_excd(exchange)
+        
         body = {
             "CANO": Config.CANO,
             "ACNT_PRDT_CD": Config.ACNT_PRDT_CD,
-            "OVRS_EXCG_CD": self._get_lookup_excd(exchange), # NASD -> NAS 변환 적용
+            "OVRS_EXCG_CD": order_excd, # NASD, NYSE, AMEX
             "PDNO": symbol,
             "ORD_QTY": str(int(qty)),
             "OVRS_ORD_UNPR": final_price,
@@ -144,10 +154,11 @@ class KisApi:
             return None
 
     def buy_limit(self, symbol, price, qty):
+        # 기본 NASD로 요청 (내부에서 4자리로 변환됨)
         return self.place_order_final("NASD", symbol, "BUY", qty, price)
 
     def sell_market(self, symbol, qty):
-        # 안전 매도: 현재가 -5% 지정가
+        # 시세 조회(3자리) -> 매도 주문(4자리)
         curr = self.get_current_price("NASD", symbol)
         price = "0"
         if curr:
@@ -157,6 +168,7 @@ class KisApi:
     def get_minute_candles(self, exchange, symbol, limit=100):
         path = "/uapi/overseas-price/v1/quotations/inquire-time-itemchartprice"
         self._update_headers("HHDFS76950200")
+        # 시세 조회는 3자리
         lookup_excd = self._get_lookup_excd(exchange)
         
         params = {
