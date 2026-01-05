@@ -10,7 +10,7 @@ logger = get_logger()
 class KisApi:
     def __init__(self, token_manager):
         self.tm = token_manager
-        # [검증 완료] Config.URL_BASE 사용
+        # [Fix] 변수명 수정 (BASE_URL -> URL_BASE) 및 인스턴스화 제거
         self.base_url = Config.URL_BASE
         self.headers = {
             "content-type": "application/json; charset=utf-8",
@@ -27,9 +27,11 @@ class KisApi:
 
     @log_api_call("예수금 조회")
     def get_buyable_cash(self) -> float:
-        """예수금 조회 (달러)"""
+        """예수금 조회 (통합 증거금 확인)"""
         path = "/uapi/overseas-stock/v1/trading/inquire-present-balance"
-        self._update_headers("CTRP6504R")
+        # URL에 따라 실전/모의 TR ID 분기
+        tr_id = "VTRP6504R" if "vts" in self.base_url else "CTRP6504R"
+        self._update_headers(tr_id)
         
         params = {
             "CANO": Config.CANO,
@@ -43,10 +45,10 @@ class KisApi:
         try:
             res = requests.get(f"{self.base_url}{path}", headers=self.headers, params=params)
             data = res.json()
+            
             if data['rt_cd'] == '0':
                 output2 = data.get('output2', [])
                 if output2:
-                    # 외화예수금 or 인출가능금액 확인
                     cash = output2[0].get('frcr_dncl_amt_2') or output2[0].get('frcr_drwg_psbl_amt_1')
                     return float(cash) if cash else 0.0
             return 0.0
@@ -56,7 +58,7 @@ class KisApi:
 
     @log_api_call("랭킹 조회")
     def get_ranking(self, sort_type="vol"):
-        """거래량 상위 조회"""
+        """거래량/등락률 상위 종목 조회"""
         path = "/uapi/overseas-stock/v1/ranking/trade-vol"
         self._update_headers("HHDFS76310010") 
         
@@ -97,10 +99,16 @@ class KisApi:
 
     @log_api_call("주문 전송")
     def _place_order(self, symbol, side, qty, price="0"):
-        """주문 공통 함수"""
+        """내부 주문 함수"""
         path = "/uapi/overseas-stock/v1/trading/order"
         is_buy = (side == "BUY")
-        tr_id = "TTTT1002U" if is_buy else "TTTT1006U"
+        
+        # 실전/모의 TR ID 분기
+        if "vts" in self.base_url:
+            tr_id = "VTTT1002U" if is_buy else "VTTT1001U"
+        else:
+            tr_id = "TTTT1002U" if is_buy else "TTTT1006U"
+
         self._update_headers(tr_id)
         
         final_price = "0"
@@ -115,7 +123,7 @@ class KisApi:
             "ORD_QTY": str(int(qty)),
             "OVRS_ORD_UNPR": final_price,
             "ORD_SVR_DVSN_CD": "0", 
-            "ORD_DVSN": "00" # 지정가 주문
+            "ORD_DVSN": "00"
         }
         
         try:
@@ -131,22 +139,15 @@ class KisApi:
             return None
 
     def buy_limit(self, symbol, price, qty):
-        """지정가 매수"""
         return self._place_order(symbol, "BUY", qty, price)
 
     def sell_market(self, symbol, qty):
-        """
-        [Safety Fix] 해외주식 안전 매도
-        시장가(Price=0)가 안 될 경우를 대비해 현재가 조회 후 -5% 가격으로 지정가 매도(Immediate Fill 유도)
-        """
+        # 안전장치: 현재가 조회 후 -5% 가격으로 매도 (사실상 시장가)
         curr = self.get_current_price(symbol)
         if curr:
-            # 현재가보다 5% 낮게 던져서 즉시 체결 유도 (사실상 시장가)
             safe_price = curr['last'] * 0.95
             return self._place_order(symbol, "SELL", qty, safe_price)
-        else:
-            # 조회 실패 시 그냥 0으로 시도
-            return self._place_order(symbol, "SELL", qty, "0")
+        return self._place_order(symbol, "SELL", qty, "0")
 
     def get_minute_candles(self, symbol, timeframe="1"):
         """분봉 조회 -> DataFrame 변환"""
@@ -179,7 +180,7 @@ class KisApi:
             return pd.DataFrame()
 
     def check_order_filled(self, order_no):
-        """주문 체결 확인"""
+        """체결 확인"""
         path = "/uapi/overseas-stock/v1/trading/inquire-lcc-order-res"
         self._update_headers("TTTS3035R")
         
@@ -197,14 +198,13 @@ class KisApi:
                 if output:
                     ord_qty = int(output[0].get('ord_qty', 0))
                     ccld_qty = int(output[0].get('tot_ccld_qty', 0))
-                    # 전량 체결 여부
                     return ccld_qty >= ord_qty and ord_qty > 0
             return False
         except:
             return False
 
     def wait_for_fill(self, order_no, timeout=30):
-        """체결 대기 (최대 timeout초)"""
+        """체결 대기"""
         start = time.time()
         while time.time() - start < timeout:
             if self.check_order_filled(order_no):
