@@ -1,6 +1,5 @@
-# data/market_listener.py - v3.1 Hybrid (Smart Filter Applied)
 import logging
-from typing import List, Dict
+from typing import List
 from infra.kis_api import KisApi 
 
 class MarketListener:
@@ -8,41 +7,26 @@ class MarketListener:
         self.kis = kis_api
         self.logger = logging.getLogger("MarketListener")
         self.target_symbols = [] 
-
-        # 스캐닝 조건
-        self.min_price = 0.5        
-        self.max_price = 50.0       
-        self.min_change = 5.0       
-        self.min_volume = 10000     
-
-        # [V2 Feature] ETF/ETN 및 레버리지 상품 필터링 키워드
+        
         self.etf_keywords = ['ETF', 'ETN', 'BULL', 'BEAR', '2X', '3X', 'ULTRA', 'PROSHARES']
 
     def _is_garbage(self, name: str) -> bool:
-        """[V2 Feature] 불필요한 종목(ETF, 스팩 등) 필터링"""
         name_upper = name.upper()
         for kw in self.etf_keywords:
-            if kw in name_upper:
-                return True
+            if kw in name_upper: return True
         return False
 
-    def scan_for_candidates(self) -> List[str]:
-        """
-        [Discovery] 시장 급등주 탐색 + V2 스마트 필터링
-        """
+    def scan_markets(self, min_change=40.0) -> List[str]:
+        """급등주 스캔 (scan_markets)"""
         try:
-            # 1. 등락률 순위 가져오기
             raw_list = self.kis.get_ranking(sort_type="fluct") 
-            
-            if not raw_list:
-                return []
+            if not raw_list: return []
 
             candidates = []
             for item in raw_list:
                 symb = item.get("symb")
-                name = item.get("name", "") # 종목명 확인
+                name = item.get("name", "")
                 
-                # 데이터 정제
                 try:
                     price = float(item.get("last", 0))
                     rate = float(item.get("rate", 0))
@@ -50,46 +34,24 @@ class MarketListener:
                 except:
                     continue
 
-                # 2. 기본 수치 필터링
-                if not (self.min_price <= price <= self.max_price): continue
-                if vol < self.min_volume: continue
-                if rate < self.min_change: continue
+                # 1. 가격 필터 ($0.5 ~ $200)
+                if not (0.5 <= price <= 200.0): continue
+                # 2. 거래량 필터 (최소 1000주)
+                if vol < 1000: continue
+                # 3. 급등 필터 (40% 이상)
+                if rate < min_change: continue
                 
-                # 3. [V2 Feature] ETF/ETN 필터링 적용
-                if self._is_garbage(name):
-                    # self.logger.debug(f"🧹 Filtered: {symb} ({name})")
-                    continue
+                # 4. ETF 필터
+                if self._is_garbage(name): continue
 
                 candidates.append(symb)
 
-            # 상위 10개만 집중 감시
             final_targets = candidates[:10]
-            
             if final_targets:
-                self.logger.info(f"📡 New Candidates Found (Filtered): {final_targets}")
-                self.set_targets(final_targets) 
+                self.logger.info(f"📡 Found Targets (>= {min_change}%): {final_targets}")
                 
             return final_targets
 
         except Exception as e:
             self.logger.error(f"Scan Error: {e}")
             return []
-
-    def set_targets(self, symbols: List[str]):
-        self.target_symbols = symbols
-
-    def get_market_data(self) -> Dict[str, dict]:
-        """현재 타겟 종목들의 상세 정보 조회"""
-        market_data = {}
-        for symbol in self.target_symbols:
-            try:
-                price_info = self.kis.get_current_price(symbol)
-                if price_info:
-                    market_data[symbol] = {
-                        'price': float(price_info.get('last', 0)),
-                        'open': float(price_info.get('open', 0)),
-                        'vol': int(price_info.get('volume', 0))
-                    }
-            except Exception as e:
-                pass 
-        return market_data

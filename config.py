@@ -1,11 +1,13 @@
 import os
+import sys
 from dotenv import load_dotenv
 
-# [실전 전용] .env.production 로드
+# .env.production 파일 우선 로드 (없으면 .env)
 load_dotenv(dotenv_path=".env.production")
+load_dotenv()
 
 class Config:
-    # --- [계좌 및 인증: 인프라 유지] ---
+    # --- [계좌 및 인증] ---
     APP_KEY = os.getenv("KIS_APP_KEY")
     APP_SECRET = os.getenv("KIS_APP_SECRET")
     _ACC_NO = os.getenv("KIS_ACCOUNT_NO")
@@ -23,16 +25,16 @@ class Config:
     # --- [Zone 1 전략 설정] ---
     ACTIVE_STRATEGY = "ATOM_SUP_EMA200"
     
-    # KIS 실전 서버 URL (모의투자 URL 삭제)
+    # KIS 실전 서버 URL
     URL_BASE = "https://openapi.koreainvestment.com:9443"
     
-    # 40% 급등주 필터 (Bible Rule 2)
+    # 40% 급등주 필터
     MIN_CHANGE_PCT = 40.0 
     
-    # 리스크 관리 (Zone 1 Rule)
+    # 리스크 관리
     MAX_POSITIONS = 1           # 1 Slot
-    MAX_DAILY_LOSS = 15.0       # 하루 $15 손실 시 셧다운 (달러 기준 안전장치)
+    MAX_DAILY_LOSS = 15.0       # 하루 $15 손실 시 셧다운
     ALL_IN_RATIO = 0.98         # 가용 현금의 98% 베팅
     
     # 시스템 설정
-    CHECK_INTERVAL_SEC = 60     # 1분 주기 체크 (API Quota 고려)
+    CHECK_INTERVAL_SEC = 60     # 1분 주기 체크
