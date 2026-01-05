@@ -304,12 +304,12 @@ def main():
             # 기본 루프 딜레이 (1분 간격으로 로직 수행)
             time.sleep(Config.CHECK_INTERVAL_SEC)
 
-    except KeyboardInterrupt:
-        bot.send_message("👋 시스템 종료")
-    except Exception as e:
-        logger.error(f"Critical Error: {e}")
-        bot.send_message(f"🔥 시스템 에러: {e}")
-        time.sleep(10)
+        except KeyboardInterrupt:
+            bot.send_message("👋 시스템 종료")
+        except Exception as e:
+            logger.error(f"Critical Error: {e}")
+            bot.send_message(f"🔥 시스템 에러: {e}")
+            time.sleep(10)
 
 if __name__ == "__main__":
     main()
