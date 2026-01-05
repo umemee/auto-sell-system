@@ -3,7 +3,6 @@ import os
 import time
 import logging
 
-# 프로젝트 루트 경로 추가
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from config import Config
@@ -35,40 +34,34 @@ def verify_system():
         logger.info("🔹 [Step 2] Checking API Connection & Balance...")
         cash = kis.get_buyable_cash()
         if cash is None:
-            logger.error("❌ Balance Check Returned None. Check API Keys or URL.")
+            logger.error("❌ Balance Check Returned None. Check API Keys.")
             return
+        
         logger.info(f"✅ Balance Check Success. Buyable Cash: ${cash:,.2f}")
+        
+        if cash < 2.0: # 최소 2달러는 있어야 테스트 가능
+            logger.error("🛑 STOP: Insufficient Balance ($0). Please deposit at least $10 to verify trading.")
+            # 잔고가 없으면 여기서 멈추도록 변경 (에러 방지)
+            return
+            
     except Exception as e:
         logger.error(f"❌ Balance Check Failed: {e}")
         return
 
-    # 3. 데이터 수신
-    target_symbol = None
+    # 3. 데이터 수신 (SIRI로 고정 테스트)
+    # DVLT 등 동전주는 거래 제한이 많으므로 안정적인 SIRI(나스닥) 사용
+    target_symbol = "SIRI"
     target_price = 0
+    
     try:
-        logger.info("🔹 [Step 3] Checking Market Data...")
-        ranking_list = kis.get_ranking(sort_type="vol")
-        if not ranking_list:
-            logger.error("❌ Failed to fetch ranking list.")
-            return
+        logger.info(f"🔹 [Step 3] Checking Market Data for {target_symbol}...")
         
-        logger.info(f"✅ Ranking List Fetched. Top 1: {ranking_list[0]['symb']}")
-        
-        # 테스트 대상 ($1~$100)
-        for item in ranking_list:
-            try:
-                price = float(item['last'])
-                if 1.0 <= price <= 100.0:
-                    target_symbol = item['symb']
-                    target_price = price
-                    break
-            except:
-                continue
-        
-        if not target_symbol:
-            logger.error("❌ No suitable test target found.")
-            return
-
+        price_info = kis.get_current_price(target_symbol)
+        if not price_info:
+             logger.error(f"❌ Failed to fetch price for {target_symbol}")
+             return
+             
+        target_price = price_info['last']
         logger.info(f"🎯 Test Target: {target_symbol} (Price: ${target_price})")
         
         # 분봉 확인
@@ -85,7 +78,6 @@ def verify_system():
     # 3.5 스캐너 로직 점검
     try:
         logger.info("🔹 [Step 3.5] Checking Scanner Logic...")
-        # 조건 없이 스캔 실행해보기 (Dry Run)
         listener.scan_markets(min_change=0.0) 
         logger.info("✅ Scanner Logic Executed.")
     except Exception as e:
@@ -95,24 +87,24 @@ def verify_system():
     # 4. 텔레그램
     try:
         logger.info("🔹 [Step 4] Sending Test Message...")
-        bot.send_message(f"🧪 [Verify] Test Target: {target_symbol}")
+        bot.send_message(f"🧪 [Verify] Test Target: {target_symbol} @ ${target_price}")
         logger.info("✅ Telegram Message Sent.")
     except Exception as e:
         logger.error(f"❌ Telegram Failed: {e}")
 
-    # 5. 실전 매매 (장중에만 동작)
+    # 5. 실전 매매
     logger.info("🔹 [Step 5] Real Trade Test (Buy 1 -> Sell 1)...")
     logger.warning("⚠️ Executing REAL ORDERS in 5 seconds. Ctrl+C to cancel.")
     time.sleep(5)
     
     try:
         # 매수
-        buy_price = target_price * 1.01 # 1% 위 지정가 (즉시 체결)
+        buy_price = target_price * 1.02 # 2% 위로 넉넉하게 지정가 (즉시 체결)
         logger.info(f"💸 Buying {target_symbol} @ ${buy_price:.2f} (1 qty)")
         
         ord_no = kis.buy_limit(target_symbol, buy_price, 1)
         if not ord_no:
-            logger.error("❌ Buy Order Failed.")
+            logger.error("❌ Buy Order Failed. (Check if market is open or balance is sufficient)")
             return
             
         logger.info(f"⏳ Waiting for fill (Order: {ord_no})...")
