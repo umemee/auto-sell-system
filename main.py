@@ -38,7 +38,11 @@ def main():
     # 1. 인프라 초기화
     try:
         # Config에서 설정 로드 (기존 .env 로직 유지)
-        kis = KisApi(Config.APP_KEY, Config.APP_SECRET, Config.CANO, Config.URL_BASE)
+         #kis = KisApi(Config.APP_KEY, Config.APP_SECRET, Config.CANO, Config.URL_BASE)
+        from infra.kis_auth import KisAuth  # 상단에 import 확인
+
+        auth = KisAuth() # .env 데이터를 내부에서 자동으로 읽음
+        kis = KisApi(auth) # KisApi는 auth 객체 하나만 인자로 받음
         bot = TelegramBot()
         market_listener = MarketListener(kis) # 기존 스캐너 객체 생성
         
