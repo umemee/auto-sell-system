@@ -28,6 +28,7 @@ class KisApi:
 
     @log_api_call("예수금 조회")
     def get_buyable_cash(self) -> float:
+        """예수금 조회"""
         path = "/uapi/overseas-stock/v1/trading/inquire-present-balance"
         tr_id = "VTRP6504R" if "vts" in self.base_url else "CTRP6504R"
         self._update_headers(tr_id)
@@ -56,6 +57,7 @@ class KisApi:
 
     @log_api_call("랭킹 조회")
     def get_ranking(self, sort_type="vol"):
+        """거래량 상위 조회"""
         path = "/uapi/overseas-stock/v1/ranking/trade-vol"
         self._update_headers("HHDFS76310010") 
         
@@ -70,6 +72,7 @@ class KisApi:
 
     @log_api_call("현재가 조회")
     def get_current_price(self, symbol):
+        """현재가 조회"""
         path = "/uapi/overseas-price/v1/quotations/price"
         self._update_headers("HHDFS00000300")
         
@@ -87,10 +90,16 @@ class KisApi:
         except: return None
 
     @log_api_call("주문 전송")
-    def _place_order(self, symbol, side, qty, price="0"):
+    def _place_order(self, symbol, side, qty, price="0", exchange="NAS"):
+        """[Upgrade] exchange 파라미터 추가 (기본값 NAS)"""
         path = "/uapi/overseas-stock/v1/trading/order"
         is_buy = (side == "BUY")
-        tr_id = "TTTT1002U" if is_buy else "TTTT1006U"
+        
+        if "vts" in self.base_url:
+            tr_id = "VTTT1002U" if is_buy else "VTTT1001U"
+        else:
+            tr_id = "TTTT1002U" if is_buy else "TTTT1006U"
+
         self._update_headers(tr_id)
         
         final_price = "0"
@@ -100,7 +109,7 @@ class KisApi:
         body = {
             "CANO": Config.CANO,
             "ACNT_PRDT_CD": Config.ACNT_PRDT_CD,
-            "OVRS_EXCG_CD": "NAS",
+            "OVRS_EXCG_CD": exchange, # [Fix] 유연한 거래소 코드 사용
             "PDNO": symbol,
             "ORD_QTY": str(int(qty)),
             "OVRS_ORD_UNPR": final_price,
@@ -119,15 +128,15 @@ class KisApi:
             logger.error(f"주문 전송 중 에러: {e}")
             return None
 
-    def buy_limit(self, symbol, price, qty):
-        return self._place_order(symbol, "BUY", qty, price)
+    def buy_limit(self, symbol, price, qty, exchange="NAS"):
+        return self._place_order(symbol, "BUY", qty, price, exchange)
 
-    def sell_market(self, symbol, qty):
+    def sell_market(self, symbol, qty, exchange="NAS"):
         curr = self.get_current_price(symbol)
         if curr:
             safe_price = curr['last'] * 0.95
-            return self._place_order(symbol, "SELL", qty, safe_price)
-        return self._place_order(symbol, "SELL", qty, "0")
+            return self._place_order(symbol, "SELL", qty, safe_price, exchange)
+        return self._place_order(symbol, "SELL", qty, "0", exchange)
 
     def get_minute_candles(self, symbol, timeframe="1"):
         path = "/uapi/overseas-price/v1/quotations/inquire-time-itemchartprice"
