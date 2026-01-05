@@ -7,6 +7,8 @@ class MarketListener:
         self.kis = kis_api
         self.logger = logging.getLogger("MarketListener")
         self.target_symbols = [] 
+        # [NEW] 외부 조회용 최신 타겟 리스트 저장소
+        self.current_targets = []
         
         self.etf_keywords = ['ETF', 'ETN', 'BULL', 'BEAR', '2X', '3X', 'ULTRA', 'PROSHARES']
 
@@ -15,6 +17,10 @@ class MarketListener:
         for kw in self.etf_keywords:
             if kw in name_upper: return True
         return False
+        
+    # [NEW] 현재 감시 중인 종목 리스트 반환
+    def get_current_targets(self):
+        return self.current_targets
 
     def scan_markets(self, min_change=40.0) -> List[str]:
         """
@@ -22,7 +28,9 @@ class MarketListener:
         """
         try:
             raw_list = self.kis.get_ranking(sort_type="fluct") 
-            if not raw_list: return []
+            if not raw_list: 
+                self.current_targets = []
+                return []
 
             candidates = []
             for item in raw_list:
@@ -49,6 +57,10 @@ class MarketListener:
                 candidates.append(symb)
 
             final_targets = candidates[:10]
+            
+            # [NEW] 최신 타겟 업데이트 (외부 조회용)
+            self.current_targets = final_targets
+            
             if final_targets:
                 self.logger.info(f"📡 Found Targets (>= {min_change}%): {final_targets}")
                 
@@ -56,4 +68,5 @@ class MarketListener:
 
         except Exception as e:
             self.logger.error(f"Scan Error: {e}")
+            self.current_targets = [] # 에러 시 빈 리스트
             return []

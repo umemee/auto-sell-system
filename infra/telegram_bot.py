@@ -1,4 +1,3 @@
-# infra/telegram_bot.py - v3.1 Interactive
 import requests
 import time
 import threading
@@ -10,23 +9,29 @@ from infra.utils import get_logger
 logger = get_logger()
 
 class TelegramBot:
-    def __init__(self, state_manager=None):
+    def __init__(self):
         self.token = Config.TELEGRAM_BOT_TOKEN
         self.chat_id = Config.TELEGRAM_CHAT_ID
         self.base_url = f"https://api.telegram.org/bot{self.token}"
-        self.state_manager = state_manager
+        
         self.last_update_id = 0
         self.is_running = False
         
-        # [V1 Feature] 명령어 핸들러 등록
+        # [UI] 상태 정보를 제공해줄 함수 (main.py에서 주입)
+        self.status_provider = None
+        
         self.command_handlers = {
             '/status': self._cmd_status,
             '/help': self._cmd_help,
-            # '/buy': self._cmd_buy # (위험하므로 필요시 주석 해제하여 구현)
+            '/stop': self._cmd_stop
         }
 
+    def set_status_provider(self, provider_func):
+        """main.py의 상태를 조회할 수 있는 함수 연결"""
+        self.status_provider = provider_func
+
     def start(self):
-        """[V1 Feature] 봇 폴링 시작 (별도 스레드)"""
+        """봇 폴링 시작 (별도 스레드)"""
         if not self.token: return
         self.is_running = True
         self.thread = threading.Thread(target=self._polling_loop, daemon=True)
@@ -46,37 +51,6 @@ class TelegramBot:
         except Exception as e:
             logger.error(f"Telegram Send Error: {e}")
 
-    def send_rich_notification(self, type, data):
-        """[V2 Feature] 상세 리포트 전송"""
-        if type == "BUY":
-            emoji = "🚀"
-            color_title = "<b>[매수 체결 알림]</b>"
-        elif type == "SELL":
-            emoji = "💰"
-            color_title = "<b>[익절/손절 알림]</b>"
-        else:
-            emoji = "🔔"
-            color_title = f"<b>[{type}]</b>"
-
-        # 수익금 표시 로직
-        pnl_str = ""
-        if "pnl" in data:
-            pnl = data['pnl']
-            pnl_icon = "🔴" if pnl < 0 else "🟢"
-            pnl_str = f"\n{pnl_icon} 수익률: <b>{pnl:.2f}%</b>"
-
-        msg = (
-            f"{emoji} {color_title}\n"
-            f"━━━━━━━━━━━━━━\n"
-            f"📦 종목: <b>{data.get('symbol')}</b>\n"
-            f"🔢 수량: {data.get('qty')}주\n"
-            f"💵 가격: ${data.get('price')}\n"
-            f"{pnl_str}"
-            f"🆔 주문: {data.get('order_no')}\n"
-            f"⏰ 시간: {datetime.now().strftime('%H:%M:%S')}"
-        )
-        self.send_message(msg)
-
     def _polling_loop(self):
         """텔레그램 서버에서 메시지 수신 (Long Polling)"""
         while self.is_running:
@@ -91,7 +65,6 @@ class TelegramBot:
                         self.last_update_id = update["update_id"]
                         self._handle_update(update)
             except Exception as e:
-                # logger.error(f"Polling Error: {e}")
                 time.sleep(5)
             time.sleep(1)
 
@@ -111,18 +84,59 @@ class TelegramBot:
             else:
                 self.send_message(f"❌ 알 수 없는 명령어: {cmd}")
 
+    # === [Commands] ===
     def _cmd_status(self):
-        if self.state_manager:
-            state = self.state_manager.get_state().name
-            self.send_message(f"📊 현재 상태: <b>{state}</b>")
-        else:
-            self.send_message("⚠️ 상태 매니저가 연결되지 않았습니다.")
+        """/status: 현재 시스템 상태 조회"""
+        if not self.status_provider:
+            self.send_message("⚠️ 시스템 연결 대기 중...")
+            return
+
+        # main.py에서 데이터 가져오기
+        data = self.status_provider()
+        
+        # 포지션 정보 포맷팅
+        pos_info = "없음 (스캐닝 중... 🔭)"
+        if data['position']:
+            p = data['position']
+            curr_price = p.get('current_price', p['entry_price'])
+            pnl_pct = ((curr_price - p['entry_price']) / p['entry_price']) * 100
+            icon = "🔴" if pnl_pct < 0 else "🟢"
+            pos_info = (
+                f"\n   📦 <b>{p['symbol']}</b> {p['qty']}주"
+                f"\n   평단: ${p['entry_price']}"
+                f"\n   현재: ${curr_price} ({icon} {pnl_pct:.2f}%)"
+            )
+
+        # 타겟 리스트 포맷팅
+        targets = data['targets']
+        target_str = ", ".join(targets) if targets else "없음"
+
+        # One-Shot 졸업생
+        oneshot_list = list(data['oneshot'])
+        oneshot_str = ", ".join(oneshot_list) if oneshot_list else "없음"
+
+        msg = (
+            f"📊 <b>[GapZone Dashboard]</b>\n"
+            f"━━━━━━━━━━━━━━━━\n"
+            f"💰 <b>예수금:</b> ${data['cash']:,.2f}\n"
+            f"📉 <b>금일 손실:</b> ${data['loss']:.2f} (Limit: ${data['loss_limit']})\n"
+            f"━━━━━━━━━━━━━━━━\n"
+            f"🔭 <b>감시 중 ({len(targets)}):</b>\n"
+            f"👉 {target_str}\n\n"
+            f"🎣 <b>현재 포지션:</b> {pos_info}\n\n"
+            f"✅ <b>One-Shot 완료:</b> {oneshot_str}\n"
+            f"⏰ <b>Update:</b> {datetime.now().strftime('%H:%M:%S')}"
+        )
+        self.send_message(msg)
 
     def _cmd_help(self):
         msg = (
-            "🤖 <b>Bot Commands</b>\n"
-            "/status - 시스템 상태 확인\n"
-            "/stop - (미구현) 시스템 정지\n"
-            "/start - (미구현) 시스템 시작"
+            "🤖 <b>GapZone Bot Commands</b>\n\n"
+            "/status - 대시보드 (잔고, 포지션, 감시종목)\n"
+            "/stop - ⛔ 시스템 긴급 종료\n"
+            "/help - 도움말"
         )
         self.send_message(msg)
+
+    def _cmd_stop(self):
+        self.send_message("⛔ <b>시스템 종료 요청됨!</b>\n안전하게 종료 절차를 밟습니다.")

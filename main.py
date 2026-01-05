@@ -38,7 +38,10 @@ def main():
         # 1. 인프라 초기화
         auth = KisAuth()
         kis = KisApi(auth)
+        
+        # [Bot] 봇 생성 (Start는 나중에)
         bot = TelegramBot()
+        
         market_listener = MarketListener(kis)
         state_manager = StateManager() # One-Shot 관리자
         
@@ -50,7 +53,6 @@ def main():
             
         init_log_file()
         logger.info(f"🔥 [Zone 1] System Ready. Strategy: {strategy.name}")
-        bot.send_message(f"🔥 Zone 1 실전 봇 시작. 전략: {strategy.name} (Risk: 98% All-in)")
 
     except Exception as e:
         print(f"❌ Init Error: {e}")
@@ -59,6 +61,37 @@ def main():
     # 상태 변수
     current_position = None 
     today_loss = 0.0
+    
+    # [NEW] 30분 생존 신고 타이머 (시작 시간으로 초기화)
+    last_heartbeat_time = time.time()
+
+    # ====================================================
+    # 🤖 [UI] 봇에게 시스템 상태를 알려주는 콜백 함수 정의
+    # ====================================================
+    def get_status_snapshot():
+        # 현재가 업데이트 (포지션 있을 때만)
+        curr_price = 0
+        if current_position:
+            try:
+                price_data = kis.get_current_price("NASD", current_position['symbol'])
+                if price_data:
+                    curr_price = price_data['last']
+                    current_position['current_price'] = curr_price
+            except: pass
+
+        return {
+            'cash': kis.get_buyable_cash(),
+            'loss': today_loss,
+            'loss_limit': Config.MAX_DAILY_LOSS,
+            'targets': market_listener.get_current_targets(), # 리스너에서 가져옴
+            'position': current_position, 
+            'oneshot': state_manager.traded_symbols
+        }
+
+    # 봇에게 콜백 연결 및 시작
+    bot.set_status_provider(get_status_snapshot)
+    bot.start()
+    bot.send_message(f"🔥 <b>Zone 1 실전 봇 시작</b>\n전략: {strategy.name} (Risk: 98%)\n\n✅ 30분마다 생존 신고 문자를 보냅니다.")
 
     while True:
         try:
@@ -66,6 +99,23 @@ def main():
             if today_loss >= Config.MAX_DAILY_LOSS:
                 bot.send_message("🛑 금일 손실 한도 초과. 종료합니다.")
                 break
+                
+            # ============================================
+            # [NEW] ⏰ 30분 정기 생존 신고 (Heartbeat)
+            # ============================================
+            if time.time() - last_heartbeat_time >= 1800: # 1800초 = 30분
+                targets = market_listener.get_current_targets()
+                target_str = ", ".join(targets) if targets else "없음"
+                
+                hb_msg = (
+                    f"⏱️ <b>[30분 생존 신고]</b>\n"
+                    f"시스템 정상 작동 중입니다.\n\n"
+                    f"🔭 <b>현재 감시 종목:</b>\n"
+                    f"👉 {target_str}\n\n"
+                    f"⏰ {datetime.now().strftime('%H:%M:%S')}"
+                )
+                bot.send_message(hb_msg)
+                last_heartbeat_time = time.time() # 타이머 리셋
 
             # ============================================
             # A. EXIT LOGIC (보유 중)
