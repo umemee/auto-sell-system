@@ -4,6 +4,7 @@ import time
 import logging
 from datetime import datetime
 
+# 프로젝트 루트 경로 추가
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from config import Config
@@ -19,7 +20,7 @@ logger = logging.getLogger("SystemVerifier")
 def verify_system():
     logger.info("🚀 [System Verification] Starting diagnostics...")
     
-    # 1. 인프라
+    # 1. 인프라 초기화
     try:
         logger.info("🔹 [Step 1] Initializing Infrastructure...")
         auth = KisAuth()
@@ -71,7 +72,7 @@ def verify_system():
     # 3.5 스캐너 로직 점검
     try:
         logger.info("🔹 [Step 3.5] Checking Scanner Logic...")
-        # [Fix] 메서드명 scan_markets으로 통일
+        # [Correct Fix] 실제 존재하는 메서드명 scan_markets 사용
         listener.scan_markets(min_change=0.0) 
         logger.info("✅ Scanner Logic Executed.")
     except Exception as e:
@@ -87,8 +88,6 @@ def verify_system():
         logger.error(f"❌ Telegram Failed: {e}")
 
     # 5. 실전 매매 (장중에만)
-    # 프리마켓(20:50)이라도 정규장이 아니면 KIS API 정책에 따라 주문이 거부될 수 있음.
-    # is_market_open()은 정규장(23:30~) 기준.
     if not is_market_open():
         logger.warning("⏸️ Market is closed (Regular Hours). Skipping Real Trade Test.")
         logger.info("🎉 DIAGNOSTICS COMPLETE (Ready for Market Open)")
