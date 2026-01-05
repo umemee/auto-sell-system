@@ -10,7 +10,6 @@ logger = get_logger()
 class KisApi:
     def __init__(self, token_manager):
         self.tm = token_manager
-        # Config.URL_BASE 사용
         self.base_url = Config.URL_BASE
         self.headers = {
             "content-type": "application/json; charset=utf-8",
@@ -36,13 +35,12 @@ class KisApi:
         tr_id = "VTRP6504R" if "vts" in self.base_url else "CTRP6504R"
         self._update_headers(tr_id)
         
-        # [Fix] TR_MK 필드 복구 (API 필수값)
         params = {
             "CANO": Config.CANO,
             "ACNT_PRDT_CD": Config.ACNT_PRDT_CD,
             "WCRC_FRCR_DVSN_CD": "02",
             "NATN_CD": "840",
-            "TR_MK": "00",  # 필수 필드 복구
+            "TR_MKET_CD": "00",  # [Critical Fix] TR_MK -> TR_MKET_CD 수정
             "INQR_DVSN_CD": "00"
         }
         
@@ -52,12 +50,10 @@ class KisApi:
             if data['rt_cd'] == '0':
                 output2 = data.get('output2', [])
                 if output2:
-                    # 외화예수금 or 인출가능금액
                     cash = output2[0].get('frcr_dncl_amt_2') or output2[0].get('frcr_drwg_psbl_amt_1')
                     return float(cash) if cash else 0.0
             else:
-                # 에러 로그 강화
-                logger.error(f"잔고 조회 API 실패: {data.get('msg1')} (Code: {data.get('rt_cd')})")
+                logger.error(f"예수금 조회 API 오류: {data.get('msg1')} (Code: {data.get('rt_cd')})")
             return 0.0
         except Exception as e:
             logger.error(f"예수금 조회 중 예외 발생: {e}")
@@ -80,7 +76,7 @@ class KisApi:
     def get_current_price(self, exchange, symbol):
         path = "/uapi/overseas-price/v1/quotations/price"
         self._update_headers("HHDFS00000300")
-        lookup_excd = self._get_lookup_excd(exchange) # 거래소 코드 변환 (NASD -> NAS)
+        lookup_excd = self._get_lookup_excd(exchange)
         
         params = {"AUTH": "", "EXCD": lookup_excd, "SYMB": symbol}
         try:
@@ -92,10 +88,14 @@ class KisApi:
                     open=float(data['output']['open']),
                     volume=int(data['output']['tvol'])
                 )
+            else:
+                # [Fix] 시세 조회 실패 시 이유 출력
+                logger.error(f"현재가 조회 실패 ({symbol}): {data.get('msg1')}")
             return None
-        except: return None
+        except Exception as e:
+            logger.error(f"현재가 조회 예외: {e}")
+            return None
 
-    # 호환성 유지
     def get_current_price_simple(self, symbol):
         return self.get_current_price("NASD", symbol)
 
