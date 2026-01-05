@@ -3,6 +3,7 @@ import os
 import time
 import logging
 
+# 프로젝트 루트 경로 추가
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from config import Config
@@ -33,24 +34,19 @@ def verify_system():
     try:
         logger.info("🔹 [Step 2] Checking API Connection & Balance...")
         cash = kis.get_buyable_cash()
-        if cash is None:
-            logger.error("❌ Balance Check Returned None. Check API Keys.")
-            return
         
-        logger.info(f"✅ Balance Check Success. Buyable Cash: ${cash:,.2f}")
-        
-        if cash < 2.0: # 최소 2달러는 있어야 테스트 가능
-            logger.error("🛑 STOP: Insufficient Balance ($0). Please deposit at least $10 to verify trading.")
-            # 잔고가 없으면 여기서 멈추도록 변경 (에러 방지)
-            return
+        # [디버깅 강화] 잔고가 0이면 경고하되, 테스트는 계속 진행 시도 (보유 종목 매도 테스트 가능성 고려)
+        if cash < 1.0:
+            logger.warning(f"⚠️ Balance is ${cash}. You might need to deposit USD or check account settings.")
+        else:
+            logger.info(f"✅ Balance Check Success. Buyable Cash: ${cash:,.2f}")
             
     except Exception as e:
         logger.error(f"❌ Balance Check Failed: {e}")
         return
 
-    # 3. 데이터 수신 (SIRI로 고정 테스트)
-    # DVLT 등 동전주는 거래 제한이 많으므로 안정적인 SIRI(나스닥) 사용
-    target_symbol = "SIRI"
+    # 3. 데이터 수신 (SIRI로 고정 테스트 - 안전 종목)
+    target_symbol = "SIRI" 
     target_price = 0
     
     try:
@@ -58,13 +54,12 @@ def verify_system():
         
         price_info = kis.get_current_price(target_symbol)
         if not price_info:
-             logger.error(f"❌ Failed to fetch price for {target_symbol}")
+             logger.error(f"❌ Failed to fetch price for {target_symbol}. Market might be closed or API error.")
              return
              
         target_price = price_info['last']
         logger.info(f"🎯 Test Target: {target_symbol} (Price: ${target_price})")
         
-        # 분봉 확인
         df = kis.get_minute_candles(target_symbol)
         if df.empty:
             logger.error(f"❌ Failed to fetch candles for {target_symbol}.")
@@ -98,13 +93,19 @@ def verify_system():
     time.sleep(5)
     
     try:
-        # 매수
-        buy_price = target_price * 1.02 # 2% 위로 넉넉하게 지정가 (즉시 체결)
+        # 잔고가 없으면 매수 스킵
+        cash = kis.get_buyable_cash()
+        if cash < target_price * 1.02:
+            logger.error("🛑 Insufficient funds for Buy Test. Skipping Trade.")
+            return
+
+        # 매수 (SIRI)
+        buy_price = target_price * 1.05 # 5% 위로 지정가 (즉시 체결 유도)
         logger.info(f"💸 Buying {target_symbol} @ ${buy_price:.2f} (1 qty)")
         
         ord_no = kis.buy_limit(target_symbol, buy_price, 1)
         if not ord_no:
-            logger.error("❌ Buy Order Failed. (Check if market is open or balance is sufficient)")
+            logger.error("❌ Buy Order Failed.")
             return
             
         logger.info(f"⏳ Waiting for fill (Order: {ord_no})...")
