@@ -132,7 +132,7 @@ def main():
                     if df is None or df.empty: continue
                     
                     strategy.calculate_indicators(df)
-                    entry_signal = strategy.check_entry(df)
+                    entry_signal = strategy.check_entry(df.iloc[:-1])
                     
                     if entry_signal:
                         # 자금 관리: All-in 98%
