@@ -1,4 +1,3 @@
-# infra/kis_api.py
 import requests
 import json
 import time
@@ -11,8 +10,7 @@ logger = get_logger()
 class KisApi:
     def __init__(self, token_manager):
         self.tm = token_manager
-        # [Fix] Config.URL_BASE 사용
-        self.base_url = Config.URL_BASE
+        self.base_url = Config.URL_BASE # [Fix] Config().BASE_URL -> Config.URL_BASE
         self.headers = {
             "content-type": "application/json; charset=utf-8",
             "authorization": "",
@@ -26,9 +24,13 @@ class KisApi:
         self.headers["authorization"] = f"Bearer {self.tm.get_token()}"
         self.headers["tr_id"] = tr_id
 
+    def _get_lookup_excd(self, exchange):
+        excd_map = {"NASD": "NAS", "NYSE": "NYS", "AMEX": "AMS"}
+        return excd_map.get(exchange, exchange)
+
     @log_api_call("예수금 조회")
     def get_buyable_cash(self) -> float:
-        """예수금 조회"""
+        """예수금 조회 (통합 증거금 확인)"""
         path = "/uapi/overseas-stock/v1/trading/inquire-present-balance"
         tr_id = "VTRP6504R" if "vts" in self.base_url else "CTRP6504R"
         self._update_headers(tr_id)
@@ -51,16 +53,13 @@ class KisApi:
                     cash = output2[0].get('frcr_dncl_amt_2') or output2[0].get('frcr_drwg_psbl_amt_1')
                     return float(cash) if cash else 0.0
             return 0.0
-        except Exception as e:
-            logger.error(f"예수금 조회 실패: {e}")
+        except:
             return 0.0
 
     @log_api_call("랭킹 조회")
     def get_ranking(self, sort_type="vol"):
-        """거래량 상위 조회"""
         path = "/uapi/overseas-stock/v1/ranking/trade-vol"
         self._update_headers("HHDFS76310010") 
-        
         params = {"AUTH": "", "EXCD": "NAS", "NDAY": "0", "PRC1": "", "PRC2": "", "VOL_RANG": "0", "KEYB": ""}
         try:
             res = requests.get(f"{self.base_url}{path}", headers=self.headers, params=params)
@@ -71,12 +70,12 @@ class KisApi:
         except: return []
 
     @log_api_call("현재가 조회")
-    def get_current_price(self, symbol):
-        """현재가 조회"""
+    def get_current_price(self, exchange, symbol): # [Fix] exchange 인자 추가됨
         path = "/uapi/overseas-price/v1/quotations/price"
         self._update_headers("HHDFS00000300")
+        lookup_excd = self._get_lookup_excd(exchange) # 거래소 코드 변환
         
-        params = {"AUTH": "", "EXCD": "NAS", "SYMB": symbol}
+        params = {"AUTH": "", "EXCD": lookup_excd, "SYMB": symbol}
         try:
             res = requests.get(f"{self.base_url}{path}", headers=self.headers, params=params)
             data = res.json()
@@ -89,9 +88,13 @@ class KisApi:
             return None
         except: return None
 
+    # [Fix] 기존 코드에 없던 '주문 전송' 관련 메서드 복구
+    def get_current_price_simple(self, symbol):
+        """거래소 인자 없이 NAS 기본 조회 (호환성용)"""
+        return self.get_current_price("NAS", symbol)
+
     @log_api_call("주문 전송")
-    def _place_order(self, symbol, side, qty, price="0", exchange="NAS"):
-        """[Upgrade] exchange 파라미터 추가 (기본값 NAS)"""
+    def place_order_final(self, exchange, symbol, side, qty, price, trade_id=None):
         path = "/uapi/overseas-stock/v1/trading/order"
         is_buy = (side == "BUY")
         
@@ -102,14 +105,13 @@ class KisApi:
 
         self._update_headers(tr_id)
         
-        final_price = "0"
-        if float(price) > 0:
-            final_price = f"{float(price):.2f}" if float(price) >= 1.0 else f"{float(price):.4f}"
-            
+        if float(price) >= 1.0: final_price = f"{float(price):.2f}"
+        else: final_price = f"{float(price):.4f}"
+        
         body = {
             "CANO": Config.CANO,
             "ACNT_PRDT_CD": Config.ACNT_PRDT_CD,
-            "OVRS_EXCG_CD": exchange, # [Fix] 유연한 거래소 코드 사용
+            "OVRS_EXCG_CD": exchange,
             "PDNO": symbol,
             "ORD_QTY": str(int(qty)),
             "OVRS_ORD_UNPR": final_price,
@@ -128,21 +130,28 @@ class KisApi:
             logger.error(f"주문 전송 중 에러: {e}")
             return None
 
-    def buy_limit(self, symbol, price, qty, exchange="NAS"):
-        return self._place_order(symbol, "BUY", qty, price, exchange)
+    def buy_limit(self, symbol, price, qty):
+        # 호환성을 위해 NASD 기본값 사용
+        return self.place_order_final("NASD", symbol, "BUY", qty, price)
 
-    def sell_market(self, symbol, qty, exchange="NAS"):
-        curr = self.get_current_price(symbol)
+    def sell_market(self, symbol, qty):
+        # 안전 매도: 현재가 -5% 지정가
+        curr = self.get_current_price("NASD", symbol)
+        price = "0"
         if curr:
-            safe_price = curr['last'] * 0.95
-            return self._place_order(symbol, "SELL", qty, safe_price, exchange)
-        return self._place_order(symbol, "SELL", qty, "0", exchange)
+            price = curr['last'] * 0.95
+        return self.place_order_final("NASD", symbol, "SELL", qty, price)
 
-    def get_minute_candles(self, symbol, timeframe="1"):
+    def get_minute_candles(self, exchange, symbol, limit=100):
+        """분봉 조회 -> DataFrame 변환"""
         path = "/uapi/overseas-price/v1/quotations/inquire-time-itemchartprice"
         self._update_headers("HHDFS76950200")
+        lookup_excd = self._get_lookup_excd(exchange)
         
-        params = {"AUTH": "", "EXCD": "NAS", "SYMB": symbol, "NMIN": timeframe, "PINC": "1", "NEXT": "", "NREC": "100", "KEYB": ""}
+        params = {
+            "AUTH": "", "EXCD": lookup_excd, "SYMB": symbol,
+            "NMIN": "1", "PINC": "1", "NEXT": "", "NREC": str(limit), "KEYB": ""
+        }
         try:
             res = requests.get(f"{self.base_url}{path}", headers=self.headers, params=params)
             if res.status_code == 200:
@@ -159,7 +168,9 @@ class KisApi:
             return pd.DataFrame()
         except: return pd.DataFrame()
 
+    # === [누락된 메서드 복구] ===
     def check_order_filled(self, order_no):
+        """체결 확인"""
         path = "/uapi/overseas-stock/v1/trading/inquire-lcc-order-res"
         self._update_headers("TTTS3035R")
         params = {
@@ -180,8 +191,9 @@ class KisApi:
         except: return False
 
     def wait_for_fill(self, order_no, timeout=30):
+        """체결 대기"""
         start = time.time()
         while time.time() - start < timeout:
             if self.check_order_filled(order_no): return True
-            time.sleep(1)
+            time.sleep(2)
         return False
