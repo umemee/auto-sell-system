@@ -224,3 +224,48 @@ class KisApi:
                 logger.error(f"API Error {res.status_code}")    
         except Exception as e:
             logger.error(f"Request Error: {e}")
+
+
+    # === [실전 필수 패치: 체결 확인 로직] ===
+    
+    def check_order_filled(self, order_no):
+        """
+        ① 특정 주문번호의 체결 상태 확인
+        """
+        path = "/uapi/overseas-stock/v1/trading/inquire-lcc-order-res"
+        self._update_headers("TTTS3035R") # 해외주식 주문체결 조회 TR
+        
+        params = {
+            "CANO": self.tm.cano,
+            "ACNT_PRDT_CD": self.tm.acnt_prdt_cd,
+            "ODNO": order_no,
+            "PRCS_DVSN": "00", # 00: 전체
+            "CTX_AREA_FK200": "",
+            "CTX_AREA_NK200": ""
+        }
+        
+        try:
+            res = requests.get(f"{self.base_url}{path}", headers=self.headers, params=params)
+            if res.status_code == 200:
+                data = res.json()
+                output = data.get('output', [])
+                if output:
+                    # 주문수량(ord_qty)과 총체결수량(tot_ccld_qty) 비교
+                    ord_qty = int(output[0].get('ord_qty', 0))
+                    ccld_qty = int(output[0].get('tot_ccld_qty', 0))
+                    return ccld_qty >= ord_qty and ord_qty > 0
+            return False
+        except Exception as e:
+            logger.error(f"체결 확인 중 오류: {e}")
+            return False
+
+    def wait_for_fill(self, order_no, timeout=30):
+        """
+        ② 최대 30초 대기하며 체결 확인
+        """
+        start_time = time.time()
+        while time.time() - start_time < timeout:
+            if self.check_order_filled(order_no):
+                return True
+            time.sleep(2) # 2초 간격 재확인
+        return False
