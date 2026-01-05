@@ -38,20 +38,22 @@ def verify_system():
         cash = kis.get_buyable_cash()
         logger.info(f"✅ Balance Check Success. Buyable Cash: ${cash:,.2f}")
         
-        if cash < 2.0:
-            logger.warning("⚠️ Low Balance. Trade test might fail.")
+        if cash < 160.0: # AMD 가격 고려 ($160)
+            logger.warning("⚠️ Low Balance for AMD test. Logic check only.")
+            # 잔고 부족 시 테스트 중단 방지를 위해 여기서 리턴하지 않음 (시세 조회라도 확인)
     except Exception as e:
         logger.error(f"❌ Balance Check Failed: {e}")
         return
 
-    # 3. 데이터 수신 (SIRI 고정)
-    target_symbol = "SIRI" 
+    # 3. 데이터 수신 (AMD로 변경 - 안정적인 종목)
+    target_symbol = "AMD" 
     target_price = 0
     
     try:
         logger.info(f"🔹 [Step 3] Checking Market Data for {target_symbol}...")
         
-        price_info = kis.get_current_price("NASD", target_symbol)
+        # 시세 조회 (NAS)
+        price_info = kis.get_current_price("NAS", target_symbol)
         if not price_info:
              logger.error(f"❌ Failed to fetch price for {target_symbol}.")
              return
@@ -59,7 +61,7 @@ def verify_system():
         target_price = price_info['last']
         logger.info(f"🎯 Test Target: {target_symbol} (Price: ${target_price})")
         
-        df = kis.get_minute_candles("NASD", target_symbol)
+        df = kis.get_minute_candles("NAS", target_symbol)
         if df.empty:
             logger.error(f"❌ Failed to fetch candles.")
         else:
@@ -72,7 +74,6 @@ def verify_system():
     # 3.5 스캐너 로직 점검
     try:
         logger.info("🔹 [Step 3.5] Checking Scanner Logic...")
-        # [Correct Fix] 실제 존재하는 메서드명 scan_markets 사용
         listener.scan_markets(min_change=0.0) 
         logger.info("✅ Scanner Logic Executed.")
     except Exception as e:
@@ -98,6 +99,11 @@ def verify_system():
     time.sleep(5)
     
     try:
+        # 잔고 재확인
+        if cash < target_price * 1.02:
+            logger.error(f"🛑 Insufficient Balance for {target_symbol}. Needed: ${target_price}, Have: ${cash}")
+            return
+
         # 매수
         buy_price = target_price * 1.02 # 2% 위
         logger.info(f"💸 Buying {target_symbol} @ ${buy_price:.2f} (1 qty)")
