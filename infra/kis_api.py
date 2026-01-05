@@ -25,12 +25,16 @@ class KisApi:
         self.headers["tr_id"] = tr_id
 
     def _get_lookup_excd(self, exchange):
-        excd_map = {"NASD": "NAS", "NYSE": "NYS", "AMEX": "AMS"}
-        return excd_map.get(exchange, exchange)
+        # 거래소 코드 변환 (사용자 편의성)
+        excd_map = {
+            "NASD": "NAS", "NAS": "NAS",
+            "NYSE": "NYS", "NYS": "NYS",
+            "AMEX": "AMS", "AMS": "AMS"
+        }
+        return excd_map.get(exchange, "NAS") # 기본값 NAS
 
     @log_api_call("예수금 조회")
     def get_buyable_cash(self) -> float:
-        """예수금 조회 (통합 증거금 확인)"""
         path = "/uapi/overseas-stock/v1/trading/inquire-present-balance"
         tr_id = "VTRP6504R" if "vts" in self.base_url else "CTRP6504R"
         self._update_headers(tr_id)
@@ -40,7 +44,7 @@ class KisApi:
             "ACNT_PRDT_CD": Config.ACNT_PRDT_CD,
             "WCRC_FRCR_DVSN_CD": "02",
             "NATN_CD": "840",
-            "TR_MKET_CD": "00", 
+            "TR_MKET_CD": "00",
             "INQR_DVSN_CD": "00"
         }
         
@@ -52,11 +56,9 @@ class KisApi:
                 if output2:
                     cash = output2[0].get('frcr_dncl_amt_2') or output2[0].get('frcr_drwg_psbl_amt_1')
                     return float(cash) if cash else 0.0
-            else:
-                logger.error(f"예수금 조회 API 오류: {data.get('msg1')} (Code: {data.get('rt_cd')})")
             return 0.0
         except Exception as e:
-            logger.error(f"예수금 조회 중 예외 발생: {e}")
+            logger.error(f"예수금 조회 실패: {e}")
             return 0.0
 
     @log_api_call("랭킹 조회")
@@ -82,14 +84,17 @@ class KisApi:
         try:
             res = requests.get(f"{self.base_url}{path}", headers=self.headers, params=params)
             data = res.json()
+            
             if data['rt_cd'] == '0': 
-                # [Critical Fix] 필드명 수정: open -> popen
                 output = data['output']
-                return dict(
-                    last=float(output.get('last', 0)),
-                    open=float(output.get('popen', 0)), # KIS API는 'popen' 사용
-                    volume=int(output.get('tvol', 0))
-                )
+                # [Fix] 안전한 파싱 (get 사용)
+                # 시가(open)가 없으면 popen을 찾고, 그래도 없으면 전일종가(base)를 씀
+                last = float(output.get('last') or 0)
+                base = float(output.get('base') or 0)
+                open_p = float(output.get('open') or output.get('popen') or base) 
+                vol = int(output.get('tvol') or 0)
+                
+                return dict(last=last, open=open_p, volume=vol)
             else:
                 logger.error(f"현재가 조회 실패 ({symbol}): {data.get('msg1')}")
             return None
@@ -105,6 +110,7 @@ class KisApi:
         path = "/uapi/overseas-stock/v1/trading/order"
         is_buy = (side == "BUY")
         
+        # 실전/모의 구분
         if "vts" in self.base_url:
             tr_id = "VTTT1002U" if is_buy else "VTTT1001U"
         else:
@@ -118,7 +124,7 @@ class KisApi:
         body = {
             "CANO": Config.CANO,
             "ACNT_PRDT_CD": Config.ACNT_PRDT_CD,
-            "OVRS_EXCG_CD": exchange,
+            "OVRS_EXCG_CD": self._get_lookup_excd(exchange), # NASD -> NAS 변환 적용
             "PDNO": symbol,
             "ORD_QTY": str(int(qty)),
             "OVRS_ORD_UNPR": final_price,
@@ -141,6 +147,7 @@ class KisApi:
         return self.place_order_final("NASD", symbol, "BUY", qty, price)
 
     def sell_market(self, symbol, qty):
+        # 안전 매도: 현재가 -5% 지정가
         curr = self.get_current_price("NASD", symbol)
         price = "0"
         if curr:
