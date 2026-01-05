@@ -35,13 +35,13 @@ def debug_balance():
         "custtype": "P"
     }
     
-    # [Fix] TR_MK="00" 복구
+    # [Critical Fix] TR_MK -> TR_MKET_CD 수정
     params = {
         "CANO": Config.CANO,
         "ACNT_PRDT_CD": Config.ACNT_PRDT_CD,
         "WCRC_FRCR_DVSN_CD": "02",
         "NATN_CD": "840",
-        "TR_MK": "00", # 필수
+        "TR_MKET_CD": "00", # 올바른 파라미터명
         "INQR_DVSN_CD": "00"
     }
     
