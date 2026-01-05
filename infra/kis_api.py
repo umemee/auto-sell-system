@@ -10,7 +10,8 @@ logger = get_logger()
 class KisApi:
     def __init__(self, token_manager):
         self.tm = token_manager
-        self.base_url = Config.URL_BASE # [Fix] Config().BASE_URL -> Config.URL_BASE
+        # Config.URL_BASE 사용
+        self.base_url = Config.URL_BASE
         self.headers = {
             "content-type": "application/json; charset=utf-8",
             "authorization": "",
@@ -35,12 +36,13 @@ class KisApi:
         tr_id = "VTRP6504R" if "vts" in self.base_url else "CTRP6504R"
         self._update_headers(tr_id)
         
+        # [Fix] TR_MK 필드 복구 (API 필수값)
         params = {
             "CANO": Config.CANO,
             "ACNT_PRDT_CD": Config.ACNT_PRDT_CD,
             "WCRC_FRCR_DVSN_CD": "02",
             "NATN_CD": "840",
-            "TR_MK": "00",
+            "TR_MK": "00",  # 필수 필드 복구
             "INQR_DVSN_CD": "00"
         }
         
@@ -50,10 +52,15 @@ class KisApi:
             if data['rt_cd'] == '0':
                 output2 = data.get('output2', [])
                 if output2:
+                    # 외화예수금 or 인출가능금액
                     cash = output2[0].get('frcr_dncl_amt_2') or output2[0].get('frcr_drwg_psbl_amt_1')
                     return float(cash) if cash else 0.0
+            else:
+                # 에러 로그 강화
+                logger.error(f"잔고 조회 API 실패: {data.get('msg1')} (Code: {data.get('rt_cd')})")
             return 0.0
-        except:
+        except Exception as e:
+            logger.error(f"예수금 조회 중 예외 발생: {e}")
             return 0.0
 
     @log_api_call("랭킹 조회")
@@ -70,10 +77,10 @@ class KisApi:
         except: return []
 
     @log_api_call("현재가 조회")
-    def get_current_price(self, exchange, symbol): # [Fix] exchange 인자 추가됨
+    def get_current_price(self, exchange, symbol):
         path = "/uapi/overseas-price/v1/quotations/price"
         self._update_headers("HHDFS00000300")
-        lookup_excd = self._get_lookup_excd(exchange) # 거래소 코드 변환
+        lookup_excd = self._get_lookup_excd(exchange) # 거래소 코드 변환 (NASD -> NAS)
         
         params = {"AUTH": "", "EXCD": lookup_excd, "SYMB": symbol}
         try:
@@ -88,10 +95,9 @@ class KisApi:
             return None
         except: return None
 
-    # [Fix] 기존 코드에 없던 '주문 전송' 관련 메서드 복구
+    # 호환성 유지
     def get_current_price_simple(self, symbol):
-        """거래소 인자 없이 NAS 기본 조회 (호환성용)"""
-        return self.get_current_price("NAS", symbol)
+        return self.get_current_price("NASD", symbol)
 
     @log_api_call("주문 전송")
     def place_order_final(self, exchange, symbol, side, qty, price, trade_id=None):
@@ -131,11 +137,9 @@ class KisApi:
             return None
 
     def buy_limit(self, symbol, price, qty):
-        # 호환성을 위해 NASD 기본값 사용
         return self.place_order_final("NASD", symbol, "BUY", qty, price)
 
     def sell_market(self, symbol, qty):
-        # 안전 매도: 현재가 -5% 지정가
         curr = self.get_current_price("NASD", symbol)
         price = "0"
         if curr:
@@ -143,7 +147,6 @@ class KisApi:
         return self.place_order_final("NASD", symbol, "SELL", qty, price)
 
     def get_minute_candles(self, exchange, symbol, limit=100):
-        """분봉 조회 -> DataFrame 변환"""
         path = "/uapi/overseas-price/v1/quotations/inquire-time-itemchartprice"
         self._update_headers("HHDFS76950200")
         lookup_excd = self._get_lookup_excd(exchange)
@@ -168,9 +171,7 @@ class KisApi:
             return pd.DataFrame()
         except: return pd.DataFrame()
 
-    # === [누락된 메서드 복구] ===
     def check_order_filled(self, order_no):
-        """체결 확인"""
         path = "/uapi/overseas-stock/v1/trading/inquire-lcc-order-res"
         self._update_headers("TTTS3035R")
         params = {
@@ -191,7 +192,6 @@ class KisApi:
         except: return False
 
     def wait_for_fill(self, order_no, timeout=30):
-        """체결 대기"""
         start = time.time()
         while time.time() - start < timeout:
             if self.check_order_filled(order_no): return True
