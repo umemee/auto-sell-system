@@ -1,4 +1,4 @@
-# kis_auth.py
+# infra/kis_auth.py
 import requests
 import json
 import time
@@ -47,7 +47,8 @@ class KisAuth:
 
     def _issue_new_token(self):
         """REST API를 통해 신규 토큰 발급"""
-        url = f"{Config().BASE_URL}/oauth2/tokenP"
+        # [Fix] Config().BASE_URL -> Config.URL_BASE 수정
+        url = f"{Config.URL_BASE}/oauth2/tokenP"
         headers = {"content-type": "application/json"}
         body = {
             "grant_type": "client_credentials",
