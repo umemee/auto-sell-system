@@ -12,6 +12,8 @@ from infra.utils import get_logger
 from data.market_listener import MarketListener
 from config import Config
 from core.strategies.atom_ema200 import AtomSupEma200
+# [New] 상태 관리자 로드
+from core.state_manager import StateManager
 
 logger = get_logger("Main")
 LOG_FILE = "results/zone1_live_journal.csv"
@@ -34,11 +36,14 @@ def log_trade(data):
 
 def main():
     try:
-        # 1. 인프라 초기화 (KisAuth -> KisApi 순서 중요)
+        # 1. 인프라 초기화
         auth = KisAuth()
         kis = KisApi(auth)
         bot = TelegramBot()
         market_listener = MarketListener(kis)
+        
+        # [New] 상태 관리자 초기화 (금일 매매 기록 관리)
+        state_manager = StateManager()
         
         # 2. 전략 장착
         if Config.ACTIVE_STRATEGY == "ATOM_SUP_EMA200":
@@ -70,7 +75,7 @@ def main():
             # ============================================
             if current_position:
                 symbol = current_position['symbol']
-                df = kis.get_minute_candles(symbol)
+                df = kis.get_minute_candles("NASD", symbol) # [Fix] 4자리 코드 사용 권장 (혹은 _get_lookup_excd 자동 변환 의존)
                 
                 if df.empty:
                     time.sleep(1)
@@ -119,16 +124,20 @@ def main():
             # B. ENTRY LOGIC (미보유)
             # ============================================
             else:
-                # 40% 이상 급등주 스캔
+                # 40% 이상 급등주 스캔 (메서드명 통일됨)
                 targets = market_listener.scan_markets(min_change=Config.MIN_CHANGE_PCT)
                 
                 for symbol in targets:
-                    df = kis.get_minute_candles(symbol)
+                    # [One-Shot Rule] 금일 매매 이력이 있는 종목은 즉시 패스
+                    if state_manager.is_traded_today(symbol):
+                        continue
+
+                    df = kis.get_minute_candles("NASD", symbol)
                     if df.empty or len(df) < 2: continue
                     
                     strategy.calculate_indicators(df)
                     
-                    # [중요] 확정된 봉(iloc[:-1])으로 진입 판단
+                    # 확정된 봉(iloc[:-1])으로 진입 판단
                     entry_signal = strategy.check_entry(df.iloc[:-1])
                     
                     if entry_signal:
@@ -150,6 +159,9 @@ def main():
                                         'max_price': entry_signal['price']
                                     }
                                     
+                                    # [One-Shot Rule] 매매 기록 저장 (중복 진입 방지)
+                                    state_manager.record_trade(symbol)
+                                    
                                     log_trade({
                                         "symbol": symbol, "action": "BUY", 
                                         "price": entry_signal['price'], "qty": qty, 
@@ -159,7 +171,7 @@ def main():
                                     msg = f"🎣 Entry {symbol} at ${entry_signal['price']} | Qty: {qty}"
                                     logger.info(msg)
                                     bot.send_message(msg)
-                                    break # One-Shot
+                                    break # 현재 스캔 루프 탈출 (보유 상태로 전환)
 
             time.sleep(Config.CHECK_INTERVAL_SEC)
 
