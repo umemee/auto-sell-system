@@ -1,3 +1,4 @@
+# infra/kis_api.py
 import requests
 import json
 import time
@@ -10,7 +11,7 @@ logger = get_logger()
 class KisApi:
     def __init__(self, token_manager):
         self.tm = token_manager
-        # [Fix] 변수명 수정 (BASE_URL -> URL_BASE) 및 인스턴스화 제거
+        # [Fix] Config().BASE_URL -> Config.URL_BASE 수정
         self.base_url = Config.URL_BASE
         self.headers = {
             "content-type": "application/json; charset=utf-8",
@@ -25,11 +26,14 @@ class KisApi:
         self.headers["authorization"] = f"Bearer {self.tm.get_token()}"
         self.headers["tr_id"] = tr_id
 
+    def _get_lookup_excd(self, exchange):
+        excd_map = {"NASD": "NAS", "NYSE": "NYS", "AMEX": "AMS"}
+        return excd_map.get(exchange, exchange)
+
     @log_api_call("예수금 조회")
     def get_buyable_cash(self) -> float:
         """예수금 조회 (통합 증거금 확인)"""
         path = "/uapi/overseas-stock/v1/trading/inquire-present-balance"
-        # URL에 따라 실전/모의 TR ID 분기
         tr_id = "VTRP6504R" if "vts" in self.base_url else "CTRP6504R"
         self._update_headers(tr_id)
         
@@ -42,19 +46,18 @@ class KisApi:
             "INQR_DVSN_CD": "00"
         }
         
-        try:
-            res = requests.get(f"{self.base_url}{path}", headers=self.headers, params=params)
-            data = res.json()
-            
-            if data['rt_cd'] == '0':
-                output2 = data.get('output2', [])
-                if output2:
-                    cash = output2[0].get('frcr_dncl_amt_2') or output2[0].get('frcr_drwg_psbl_amt_1')
-                    return float(cash) if cash else 0.0
-            return 0.0
-        except Exception as e:
-            logger.error(f"예수금 조회 실패: {e}")
-            return 0.0
+        res = requests.get(f"{self.base_url}{path}", headers=self.headers, params=params)
+        data = res.json()
+        
+        if data['rt_cd'] == '0':
+            output2 = data.get('output2', [])
+            if output2 and len(output2) > 0:
+                cash_str = output2[0].get('frcr_dncl_amt_2') 
+                if not cash_str:
+                    cash_str = output2[0].get('frcr_drwg_psbl_amt_1')
+                if cash_str:
+                    return float(cash_str)
+        return 0.0
 
     @log_api_call("랭킹 조회")
     def get_ranking(self, sort_type="vol"):
@@ -67,43 +70,70 @@ class KisApi:
             "PRC1": "", "PRC2": "", "VOL_RANG": "0", "KEYB": ""
         }
         
-        try:
-            res = requests.get(f"{self.base_url}{path}", headers=self.headers, params=params)
-            data = res.json()
-            if data.get('rt_cd') == '0':
-                return data.get('output2') or data.get('output', [])
-            return []
-        except:
-            return []
+        res = requests.get(f"{self.base_url}{path}", headers=self.headers, params=params)
+        data = res.json()
+        if data.get('rt_cd') == '0':
+            ranking_data = data.get('output2', [])
+            if not ranking_data:
+                    ranking_data = data.get('output', [])
+            return ranking_data
+        return []
 
     @log_api_call("현재가 조회")
-    def get_current_price(self, symbol):
+    def get_current_price(self, exchange, symbol):
         """현재가 조회"""
         path = "/uapi/overseas-price/v1/quotations/price"
         self._update_headers("HHDFS00000300")
+        lookup_excd = self._get_lookup_excd(exchange)
         
-        params = {"AUTH": "", "EXCD": "NAS", "SYMB": symbol}
+        params = {"AUTH": "", "EXCD": lookup_excd, "SYMB": symbol}
         
-        try:
-            res = requests.get(f"{self.base_url}{path}", headers=self.headers, params=params)
-            data = res.json()
-            if data['rt_cd'] == '0': 
-                return dict(
-                    last=float(data['output']['last']),
-                    open=float(data['output']['open']),
-                    volume=int(data['output']['tvol'])
-                )
-            return None
-        except:
-            return None
+        res = requests.get(f"{self.base_url}{path}", headers=self.headers, params=params)
+        data = res.json()
+        if data['rt_cd'] == '0': 
+            return dict(
+                last=float(data['output']['last']),
+                open=float(data['output']['open']),
+                volume=int(data['output']['tvol'])
+            )
+        return None
+
+    @log_api_call("일봉 차트 조회")
+    def get_daily_candle(self, exchange, symbol, period=100):
+        """과거 n일 간의 일봉 데이터 조회 (OHLCV)"""
+        path = "/uapi/overseas-price/v1/quotations/dailyprice"
+        self._update_headers("HHDFS76240000")
+        lookup_excd = self._get_lookup_excd(exchange)
+        
+        params = {
+            "AUTH": "",
+            "EXCD": lookup_excd,
+            "SYMB": symbol,
+            "GUBN": "0",
+            "BYMD": "",
+            "MODP": "1" # 수정주가 적용
+        }
+        
+        res = requests.get(f"{self.base_url}{path}", headers=self.headers, params=params)
+        data = res.json()
+        
+        if data['rt_cd'] == '0':
+            output2 = data.get('output2', [])
+            df = pd.DataFrame(output2)
+            if not df.empty:
+                df = df[['xymd', 'open', 'high', 'low', 'clos', 'tvol']]
+                df.columns = ['date', 'open', 'high', 'low', 'close', 'volume']
+                df = df.astype({'open': float, 'high': float, 'low': float, 'close': float, 'volume': int})
+                df = df.sort_values('date').tail(period)
+                return df
+        return None
 
     @log_api_call("주문 전송")
-    def _place_order(self, symbol, side, qty, price="0"):
-        """내부 주문 함수"""
+    def place_order_final(self, exchange, symbol, side, qty, price, trade_id=None):
+        """실제 주문 전송"""
         path = "/uapi/overseas-stock/v1/trading/order"
         is_buy = (side == "BUY")
         
-        # 실전/모의 TR ID 분기
         if "vts" in self.base_url:
             tr_id = "VTTT1002U" if is_buy else "VTTT1001U"
         else:
@@ -111,83 +141,100 @@ class KisApi:
 
         self._update_headers(tr_id)
         
-        final_price = "0"
-        if float(price) > 0:
-            final_price = f"{float(price):.2f}" if float(price) >= 1.0 else f"{float(price):.4f}"
-            
+        if float(price) >= 1.0: final_price = f"{float(price):.2f}"
+        else: final_price = f"{float(price):.4f}"
+        
         body = {
             "CANO": Config.CANO,
             "ACNT_PRDT_CD": Config.ACNT_PRDT_CD,
-            "OVRS_EXCG_CD": "NAS",
+            "OVRS_EXCG_CD": exchange,
             "PDNO": symbol,
             "ORD_QTY": str(int(qty)),
             "OVRS_ORD_UNPR": final_price,
-            "ORD_SVR_DVSN_CD": "0", 
-            "ORD_DVSN": "00"
+            "ORD_SVR_DVSN_CD": "0", "ORD_DVSN": "00"
         }
         
-        try:
-            res = requests.post(f"{self.base_url}{path}", headers=self.headers, json=body)
-            data = res.json()
-            if data['rt_cd'] == '0':
-                return data['output'].get('ODNO')
-            else:
-                logger.error(f"주문 실패: {data.get('msg1')}")
-                return None
-        except Exception as e:
-            logger.error(f"주문 전송 중 에러: {e}")
+        res = requests.post(f"{self.base_url}{path}", headers=self.headers, json=body)
+        data = res.json()
+        if data['rt_cd'] == '0':
+            return data['output'].get('ODNO')
+        else:
+            logger.error(f"주문 실패 메시지: {data.get('msg1')}")
             return None
 
-    def buy_limit(self, symbol, price, qty):
-        return self._place_order(symbol, "BUY", qty, price)
+    @log_api_call("미체결 조회")
+    def get_unfilled_qty(self, exchange, symbol, order_no=None):
+        """미체결 수량 확인"""
+        path = "/uapi/overseas-stock/v1/trading/inquire-nccs"
+        self._update_headers("TTTS3018R")
+        params = {
+            "CANO": Config.CANO, "ACNT_PRDT_CD": Config.ACNT_PRDT_CD,
+            "OVRS_EXCG_CD": exchange, "SORT_SQN": "DS", 
+            "CTX_AREA_FK200": "", "CTX_AREA_NK200": ""
+        }
+        
+        res = requests.get(f"{self.base_url}{path}", headers=self.headers, params=params)
+        data = res.json()
+        if data['rt_cd'] != '0': return 0
+        
+        output = data.get('output', [])
+        for item in output:
+            if item.get('pdno') == symbol:
+                if order_no and item.get('odno') != order_no: continue
+                return int(item.get('nccs_qty', 0))
+        return 0
 
-    def sell_market(self, symbol, qty):
-        # 안전장치: 현재가 조회 후 -5% 가격으로 매도 (사실상 시장가)
-        curr = self.get_current_price(symbol)
-        if curr:
-            safe_price = curr['last'] * 0.95
-            return self._place_order(symbol, "SELL", qty, safe_price)
-        return self._place_order(symbol, "SELL", qty, "0")
-
-    def get_minute_candles(self, symbol, timeframe="1"):
-        """분봉 조회 -> DataFrame 변환"""
+    def get_minute_candles(self, exchange, symbol, timeframe="1"):
+        """
+        [Fix] 해외주식 분봉 조회
+        """
         path = "/uapi/overseas-price/v1/quotations/inquire-time-itemchartprice"
+        url = f"{self.base_url}{path}"
+        
         self._update_headers("HHDFS76950200")
         
+        exch_map = {"NASD": "NAS", "NYSE": "NYS", "AMEX": "AMS"}
+        kis_exch = exch_map.get(exchange, "NAS")
+        
         params = {
-            "AUTH": "", "EXCD": "NAS", "SYMB": symbol,
-            "NMIN": timeframe, "PINC": "1", "NEXT": "", "NREC": "100", "KEYB": ""
+            "AUTH": "",
+            "EXCD": kis_exch,
+            "SYMB": symbol,
+            "NMIN": timeframe, 
+            "PINC": "1",
+            "NEXT": "",
+            "NREC": "100", 
+            "KEYB": ""
         }
         
         try:
-            res = requests.get(f"{self.base_url}{path}", headers=self.headers, params=params)
+            res = requests.get(url, headers=self.headers, params=params)
+            
             if res.status_code == 200:
                 data = res.json()
                 if data['rt_cd'] == '0':
-                    items = data['output2']
-                    if not items: return pd.DataFrame()
-                    
-                    df = pd.DataFrame(items)
-                    df = df[['kymd', 'khms', 'open', 'high', 'low', 'last', 'evol']]
-                    df.columns = ['date', 'time', 'open', 'high', 'low', 'close', 'volume']
-                    
-                    df = df.astype({'open':float, 'high':float, 'low':float, 'close':float, 'volume':int})
-                    df = df.sort_values(by=['date', 'time']).reset_index(drop=True)
-                    return df
-            return pd.DataFrame()
+                    return data['output2'] 
+                else:
+                    logger.error(f"Candle Fail: {data['msg1']}")
+            else:
+                logger.error(f"API Error {res.status_code}")    
         except Exception as e:
-            logger.error(f"분봉 조회 에러: {e}")
-            return pd.DataFrame()
+            logger.error(f"Request Error: {e}")
 
+    # === [실전 필수 패치: 체결 확인 로직] ===
+    
     def check_order_filled(self, order_no):
-        """체결 확인"""
+        """특정 주문번호의 체결 상태 확인"""
         path = "/uapi/overseas-stock/v1/trading/inquire-lcc-order-res"
-        self._update_headers("TTTS3035R")
+        self._update_headers("TTTS3035R") 
         
         params = {
-            "CANO": Config.CANO, "ACNT_PRDT_CD": Config.ACNT_PRDT_CD,
-            "ODNO": order_no, "PRCS_DVSN": "00", 
-            "CTX_AREA_FK200": "", "CTX_AREA_NK200": ""
+            "CANO": self.tm.cano if hasattr(self.tm, 'cano') else Config.CANO,
+            "ACNT_PRDT_CD": self.tm.acnt_prdt_cd if hasattr(self.tm, 'acnt_prdt_cd') else Config.ACNT_PRDT_CD,
+            "ODNO": order_no,
+            "PRCS_DVSN": "00", 
+            "CTX_AREA_FK200": "",
+            "CTX_AREA_NK200": ""
         }
         
         try:
@@ -200,14 +247,15 @@ class KisApi:
                     ccld_qty = int(output[0].get('tot_ccld_qty', 0))
                     return ccld_qty >= ord_qty and ord_qty > 0
             return False
-        except:
+        except Exception as e:
+            logger.error(f"체결 확인 중 오류: {e}")
             return False
 
     def wait_for_fill(self, order_no, timeout=30):
-        """체결 대기"""
-        start = time.time()
-        while time.time() - start < timeout:
+        """최대 30초 대기하며 체결 확인"""
+        start_time = time.time()
+        while time.time() - start_time < timeout:
             if self.check_order_filled(order_no):
                 return True
-            time.sleep(1)
+            time.sleep(2) 
         return False
