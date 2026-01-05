@@ -53,7 +53,7 @@ class KisApi:
             "ACNT_PRDT_CD": Config.ACNT_PRDT_CD,
             "WCRC_FRCR_DVSN_CD": "02",
             "NATN_CD": "840",
-            "TR_MKET_CD": "00",
+            "TR_MKET_CD": "00", # 필수 파라미터
             "INQR_DVSN_CD": "00"
         }
         
@@ -127,14 +127,13 @@ class KisApi:
         if float(price) >= 1.0: final_price = f"{float(price):.2f}"
         else: final_price = f"{float(price):.4f}"
         
-        # [Fix] 주문용 4자리 코드 사용
         order_excd = self._get_order_excd(exchange)
         
         body = {
             "CANO": Config.CANO,
             "ACNT_PRDT_CD": Config.ACNT_PRDT_CD,
             "OVRS_EXCG_CD": order_excd,
-            "PDNO": symbol.upper(), # [Safety] 대문자 강제 변환
+            "PDNO": symbol.upper(), 
             "ORD_QTY": str(int(qty)),
             "OVRS_ORD_UNPR": final_price,
             "ORD_SVR_DVSN_CD": "0", "ORD_DVSN": "00"
@@ -161,6 +160,44 @@ class KisApi:
         if curr:
             price = curr['last'] * 0.95
         return self.place_order_final("NASD", symbol, "SELL", qty, price)
+
+    @log_api_call("주문 취소")
+    def cancel_order(self, order_no, exchange="NASD", symbol="", qty=0, price=0):
+        """미체결 주문 취소"""
+        path = "/uapi/overseas-stock/v1/trading/order-rvsecncl"
+        
+        if "vts" in self.base_url:
+            tr_id = "VTTT1004U"
+        else:
+            tr_id = "TTTT1004U"
+
+        self._update_headers(tr_id)
+        order_excd = self._get_order_excd(exchange)
+
+        body = {
+            "CANO": Config.CANO,
+            "ACNT_PRDT_CD": Config.ACNT_PRDT_CD,
+            "OVRS_EXCG_CD": order_excd, 
+            "PDNO": symbol.upper(),
+            "ORGN_ODNO": order_no,
+            "RVSE_CNCL_DVSN_CD": "02", 
+            "ORD_QTY": str(int(qty)), 
+            "OVRS_ORD_UNPR": "0", 
+            "ORD_SVR_DVSN_CD": "0" 
+        }
+        
+        try:
+            res = requests.post(f"{self.base_url}{path}", headers=self.headers, json=body)
+            data = res.json()
+            if data['rt_cd'] == '0':
+                logger.info(f"🗑️ 주문 취소 접수 완료: {order_no}")
+                return True
+            else:
+                logger.error(f"주문 취소 실패: {data.get('msg1')}")
+                return False
+        except Exception as e:
+            logger.error(f"주문 취소 중 에러: {e}")
+            return False
 
     def get_minute_candles(self, exchange, symbol, limit=100):
         path = "/uapi/overseas-price/v1/quotations/inquire-time-itemchartprice"
@@ -213,3 +250,25 @@ class KisApi:
             if self.check_order_filled(order_no): return True
             time.sleep(2)
         return False
+
+    # === [NEW] 부분 체결 수량 확인용 메서드 ===
+    def get_filled_qty(self, order_no):
+        """주문 번호로 '실제 체결 수량' 조회"""
+        path = "/uapi/overseas-stock/v1/trading/inquire-lcc-order-res"
+        # 체결 확인과 동일한 TR 사용
+        self._update_headers("TTTS3035R")
+        params = {
+            "CANO": Config.CANO, "ACNT_PRDT_CD": Config.ACNT_PRDT_CD,
+            "ODNO": order_no, "PRCS_DVSN": "00", 
+            "CTX_AREA_FK200": "", "CTX_AREA_NK200": ""
+        }
+        try:
+            res = requests.get(f"{self.base_url}{path}", headers=self.headers, params=params)
+            if res.status_code == 200:
+                data = res.json()
+                output = data.get('output', [])
+                if output:
+                    # tot_ccld_qty: 총 체결 수량
+                    return int(output[0].get('tot_ccld_qty', 0))
+            return 0
+        except: return 0

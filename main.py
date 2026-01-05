@@ -12,7 +12,6 @@ from infra.utils import get_logger
 from data.market_listener import MarketListener
 from config import Config
 from core.strategies.atom_ema200 import AtomSupEma200
-# [New] 상태 관리자 로드
 from core.state_manager import StateManager
 
 logger = get_logger("Main")
@@ -41,9 +40,7 @@ def main():
         kis = KisApi(auth)
         bot = TelegramBot()
         market_listener = MarketListener(kis)
-        
-        # [New] 상태 관리자 초기화 (금일 매매 기록 관리)
-        state_manager = StateManager()
+        state_manager = StateManager() # One-Shot 관리자
         
         # 2. 전략 장착
         if Config.ACTIVE_STRATEGY == "ATOM_SUP_EMA200":
@@ -75,7 +72,7 @@ def main():
             # ============================================
             if current_position:
                 symbol = current_position['symbol']
-                df = kis.get_minute_candles("NASD", symbol) # [Fix] 4자리 코드 사용 권장 (혹은 _get_lookup_excd 자동 변환 의존)
+                df = kis.get_minute_candles("NASD", symbol)
                 
                 if df.empty:
                     time.sleep(1)
@@ -124,7 +121,7 @@ def main():
             # B. ENTRY LOGIC (미보유)
             # ============================================
             else:
-                # 40% 이상 급등주 스캔 (메서드명 통일됨)
+                # 매분 실시간 스캔 (Real-time Scanning)
                 targets = market_listener.scan_markets(min_change=Config.MIN_CHANGE_PCT)
                 
                 for symbol in targets:
@@ -149,29 +146,67 @@ def main():
                         qty = int(buy_amt / entry_signal['price'])
                         
                         if qty > 0:
-                            res_odno = kis.buy_limit(symbol, entry_signal['price'], qty)
-                            if res_odno:
-                                if kis.wait_for_fill(res_odno): # 체결 완료 시에만 포지션 잡음
+                            # 1. 뜰채(지정가 주문) 투척
+                            ord_no = kis.buy_limit(symbol, entry_signal['price'], qty)
+                            
+                            if ord_no:
+                                logger.info(f"⏳ 뜰채 설치 (No: {ord_no}) - {symbol} @ ${entry_signal['price']} 대기 중...")
+                                
+                                # 2. 입질 대기 (60초)
+                                is_fully_filled = kis.wait_for_fill(ord_no, timeout=60)
+                                
+                                final_qty = 0
+                                
+                                # A. 완전 체결
+                                if is_fully_filled:
+                                    final_qty = qty
+                                # B. 타임아웃 -> 취소 시도 & 부분 체결 확인
+                                else:
+                                    logger.warning(f"⏳ 타임아웃. 주문 취소 및 체결량 확인 중... (No: {ord_no})")
+                                    
+                                    # 취소 재시도 로직 (3회)
+                                    cancel_success = False
+                                    for retry in range(3):
+                                        if kis.cancel_order(ord_no, "NASD", symbol, qty):
+                                            cancel_success = True
+                                            break
+                                        time.sleep(1)
+                                    
+                                    # [Kill Switch] 취소 실패 시 시스템 종료
+                                    if not cancel_success:
+                                        msg = f"🚨 CRITICAL: 주문 취소 실패 ({ord_no}). 봇을 긴급 정지합니다."
+                                        logger.critical(msg)
+                                        bot.send_message(msg)
+                                        sys.exit(1) # 강제 종료
+                                    
+                                    # 취소 성공 -> 부분 체결량 확인
+                                    final_qty = kis.get_filled_qty(ord_no)
+                                
+                                # 3. 결과 처리 (완전 or 부분 체결)
+                                if final_qty > 0:
                                     current_position = {
                                         'symbol': symbol,
-                                        'qty': qty,
+                                        'qty': final_qty, # 실제 체결된 수량 적용
                                         'entry_price': entry_signal['price'],
                                         'max_price': entry_signal['price']
                                     }
-                                    
-                                    # [One-Shot Rule] 매매 기록 저장 (중복 진입 방지)
-                                    state_manager.record_trade(symbol)
+                                    state_manager.record_trade(symbol) # One-Shot 기록
                                     
                                     log_trade({
                                         "symbol": symbol, "action": "BUY", 
-                                        "price": entry_signal['price'], "qty": qty, 
+                                        "price": entry_signal['price'], "qty": final_qty, 
                                         "reason": entry_signal['comment']
                                     })
                                     
-                                    msg = f"🎣 Entry {symbol} at ${entry_signal['price']} | Qty: {qty}"
+                                    msg = f"🎣 Entry Success {symbol} | Qty: {final_qty} (Partial: {qty != final_qty})"
                                     logger.info(msg)
                                     bot.send_message(msg)
-                                    break # 현재 스캔 루프 탈출 (보유 상태로 전환)
+                                    break # 보유 상태로 전환
+                                    
+                                else:
+                                    # 완전 미체결
+                                    logger.info(f"💨 미체결 종료. 뜰채 회수 완료.")
+                                    continue
 
             time.sleep(Config.CHECK_INTERVAL_SEC)
 
