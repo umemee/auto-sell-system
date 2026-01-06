@@ -37,18 +37,12 @@ class KisApi:
 
     @log_api_call("예수금 조회")
     def get_buyable_cash(self) -> float:
-        """예수금 조회"""
         path = "/uapi/overseas-stock/v1/trading/inquire-present-balance"
         tr_id = "VTRP6504R" if "vts" in self.base_url else "CTRP6504R"
         self._update_headers(tr_id)
-        
         params = {
-            "CANO": Config.CANO,
-            "ACNT_PRDT_CD": Config.ACNT_PRDT_CD,
-            "WCRC_FRCR_DVSN_CD": "02",
-            "NATN_CD": "840",
-            "TR_MKET_CD": "00", 
-            "INQR_DVSN_CD": "00"
+            "CANO": Config.CANO, "ACNT_PRDT_CD": Config.ACNT_PRDT_CD,
+            "WCRC_FRCR_DVSN_CD": "02", "NATN_CD": "840", "TR_MKET_CD": "00", "INQR_DVSN_CD": "00"
         }
         try:
             res = requests.get(f"{self.base_url}{path}", headers=self.headers, params=params)
@@ -63,19 +57,13 @@ class KisApi:
 
     @log_api_call("잔고 조회")
     def get_balance(self):
-        """보유 종목 잔고 조회"""
         path = "/uapi/overseas-stock/v1/trading/inquire-balance"
         tr_id = "TTTS3012R" if "vts" not in self.base_url else "VTTS3012R"
         self._update_headers(tr_id)
-        
         params = {
-            "CANO": Config.CANO,
-            "ACNT_PRDT_CD": Config.ACNT_PRDT_CD,
-            "OVRS_EXCG_CD": "NASD",
-            "TR_CRCY_CD": "USD",
-            "CTX_AREA_FK100": "", "CTX_AREA_NK100": ""
+            "CANO": Config.CANO, "ACNT_PRDT_CD": Config.ACNT_PRDT_CD,
+            "OVRS_EXCG_CD": "NASD", "TR_CRCY_CD": "USD", "CTX_AREA_FK100": "", "CTX_AREA_NK100": ""
         }
-        
         holdings = []
         try:
             res = requests.get(f"{self.base_url}{path}", headers=self.headers, params=params)
@@ -97,19 +85,12 @@ class KisApi:
 
     @log_api_call("랭킹 조회")
     def get_ranking(self):
-        """[NEW] 전일 대비 등락률 상위 종목 조회 (급등주 발굴용)"""
         path = "/uapi/overseas-stock/v1/ranking/fluctuation"
-        self._update_headers("HHDFS76410000") # 등락률 순위 TR 코드
-        
+        self._update_headers("HHDFS76410000")
         params = {
-            "AUTH": "",
-            "EXCD": "NAS",      # 나스닥
-            "GUBN": "0",        # 전체
-            "VOL_RANG": "0",    # 거래량 조건 없음
-            "KEYB": "",         # 다음 데이터 키
-            "V_RANK_SORT_CLS_CODE": "0" # 0: 상승순
+            "AUTH": "", "EXCD": "NAS", "GUBN": "0", "VOL_RANG": "0", 
+            "KEYB": "", "V_RANK_SORT_CLS_CODE": "0"
         }
-        
         try:
             res = requests.get(f"{self.base_url}{path}", headers=self.headers, params=params)
             data = res.json()
@@ -125,7 +106,6 @@ class KisApi:
         self._update_headers("HHDFS00000300")
         lookup_excd = self._get_lookup_excd(exchange)
         params = {"AUTH": "", "EXCD": lookup_excd, "SYMB": symbol}
-        
         try:
             res = requests.get(f"{self.base_url}{path}", headers=self.headers, params=params)
             data = res.json()
@@ -137,8 +117,7 @@ class KisApi:
                     "low": self._safe_float(data['output']['low']),
                     "volume": int(self._safe_float(data['output']['tvol']))
                 }
-        except Exception:
-            pass
+        except Exception: pass
         return None
 
     @log_api_call("주문 전송")
@@ -150,7 +129,12 @@ class KisApi:
         
         self._update_headers(tr_id)
         
-        final_price = f"{float(price):.2f}" if float(price) >= 1.0 else f"{float(price):.4f}"
+        # [핵심 수정] 한국투자증권 해외주식 호가 단위 엄격 적용
+        f_price = float(price)
+        if f_price >= 1.0:
+            final_price = f"{f_price:.2f}" # 1달러 이상: 소수점 2자리 (10.50)
+        else:
+            final_price = f"{f_price:.4f}" # 1달러 미만: 소수점 4자리 (0.9850)
         
         body = {
             "CANO": Config.CANO, "ACNT_PRDT_CD": Config.ACNT_PRDT_CD,
@@ -187,10 +171,7 @@ class KisApi:
                 for col in ['open', 'high', 'low', 'close', 'volume']:
                     df[col] = df[col].apply(self._safe_float)
                 return df.sort_values('time')
-        except Exception:
-            pass
+        except Exception: pass
         return pd.DataFrame()
     
-    def get_daily_candle(self, exchange, symbol, period=100):
-        # 전략에서 필요로 할 경우를 대비해 유지
-        return pd.DataFrame()
+    def get_daily_candle(self, exchange, symbol, period=100): return pd.DataFrame()
