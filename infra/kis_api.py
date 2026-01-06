@@ -162,8 +162,7 @@ class KisApi:
         headers = self._get_headers("TTTT1002U")
         formatted_price = f"{float(price):.2f}"
 
-        # [Fix 3] 거래소 코드 자동 재시도 로직 (NASD -> NAS)
-        # 어떤 계좌는 주문 시 NASD를, 어떤 계좌는 NAS를 요구할 수 있음 (특히 통합증거금 사용 시)
+        # 거래소 코드 자동 재시도 로직 (NASD -> NAS)
         target_markets = ["NASD", "NAS"]
 
         for market in target_markets:
@@ -174,7 +173,8 @@ class KisApi:
                 "PDNO": symbol,
                 "ORD_DVSN": "00",
                 "ORD_QTY": str(qty),
-                "ORD_UNPR": formatted_price,
+                # 🔴 [수정 완료] 해외주식 주문 가격 키값 변경 (ORD_UNPR -> OVRS_ORD_UNPR)
+                "OVRS_ORD_UNPR": formatted_price,
                 "ORD_SVR_DVSN_CD": "0"
             }
 
@@ -216,7 +216,8 @@ class KisApi:
                 "PDNO": symbol,
                 "ORD_DVSN": "00",
                 "ORD_QTY": str(qty),
-                "ORD_UNPR": "0",
+                # 🔴 [수정 완료] 해외주식 주문 가격 키값 변경 (ORD_UNPR -> OVRS_ORD_UNPR)
+                "OVRS_ORD_UNPR": "0",
                 "ORD_SVR_DVSN_CD": "0"
             }
 
@@ -232,7 +233,8 @@ class KisApi:
                 if last_price_info:
                     last = last_price_info['last']
                     if last > 0:
-                        data['ORD_UNPR'] = f"{last * 0.99:.2f}" # 1% 아래로 즉시 체결 유도
+                        # 🔴 [수정 완료] 재시도 시에도 키값 변경
+                        data['OVRS_ORD_UNPR'] = f"{last * 0.99:.2f}" 
                         res_retry = self._send_request("POST", path, headers, data=data)
                         if res_retry and res_retry.get('rt_cd') == '0':
                             self.logger.info("✅ Retry Success (Limit Sell)")
