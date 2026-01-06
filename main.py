@@ -2,9 +2,10 @@ import time
 import datetime
 from infra.utils import get_logger
 from infra.kis_api import KisApi
+from infra.kis_auth import KisAuth  # 👈 [추가 1] 인증 모듈 가져오기
 from infra.telegram_bot import TelegramBot
 from data.market_listener import MarketListener
-from strategy import GapZoneStrategy  # 👈 우리가 만든 레고 박스 임포트
+from strategy import GapZoneStrategy
 
 logger = get_logger("Main")
 
@@ -13,7 +14,10 @@ def main():
     
     # 1. 인프라 연결
     try:
-        kis = KisApi()
+        # 👈 [수정 1] 토큰 관리자(Auth)를 먼저 만들고 -> API에 주입(연결)합니다.
+        token_manager = KisAuth()
+        kis = KisApi(token_manager)
+        
         bot = TelegramBot()
         listener = MarketListener(kis) # 스캐너 연결
         engine = GapZoneStrategy()     # 전략 엔진 연결
@@ -42,14 +46,11 @@ def main():
     while True:
         try:
             now = datetime.datetime.now()
-            # (옵션) 장 운영 시간 체크: if not (09:30 < now < 16:00): sleep...
             
-            # A. 스캐닝 (10분마다 급등주 찾기)
-            # market_listener.py의 scan_markets()가 40% 급등주 리스트를 줍니다.
+            # A. 스캐닝 (market_listener.py의 로직 사용)
             targets = listener.scan_markets() 
             
             if not targets:
-                # 타겟 없으면 잠시 대기
                 time.sleep(60)
                 continue
 
@@ -59,7 +60,7 @@ def main():
                 balances = kis.get_balance()
                 if balances and len(balances) > 0:
                     logger.info("🛑 보유 종목 존재. 추가 진입 금지.")
-                    break # 루프 탈출
+                    break 
                 
                 # 1분봉 조회
                 df = kis.get_minute_candles("NASD", sym)
@@ -82,7 +83,6 @@ def main():
                         ord_no = kis.buy_limit(sym, price, qty)
                         if ord_no:
                             bot.send_message(f"✅ 주문 전송 완료: {ord_no}")
-                            # Zone 1 원칙: 하나 샀으면 오늘은 끝 (또는 청산 때까지 대기)
                             time.sleep(60) 
                             break 
 
