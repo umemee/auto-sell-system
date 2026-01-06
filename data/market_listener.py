@@ -29,6 +29,11 @@ class MarketListener:
                     except:
                         rate = 0.0
                     
+                    # [수정] 워런트(W) 및 파생상품 필터링 (5글자 이상 W로 끝남 or 이름에 워런트)
+                    name = item.get('name', '').upper() # 수정
+                    if (len(sym) >= 5 and sym.endswith('W')) or 'WARRANT' in name or '워런트' in name: # 수정
+                        continue # 수정
+
                     # 2. 40% 이상 급등주 필터링
                     if rate >= THRESHOLD:
                         # self.logger.info(f"🚨 [급등 포착] {sym} (+{rate}%)")
