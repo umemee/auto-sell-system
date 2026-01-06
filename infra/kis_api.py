@@ -155,10 +155,19 @@ class KisApi:
         return self.place_order_final("NASD", symbol, "BUY", qty, price)
 
     def sell_market(self, symbol, qty):
+        """시장가 매도 시뮬레이션 (현재가 -5% 지정가)"""
         curr = self.get_current_price("NASD", symbol)
-        price = "0"
+        price = 0
         if curr:
-            price = curr['last'] * 0.95
+            # [Fix] 틱 사이즈 호환성을 위해 반올림 처리
+            raw_price = curr['last'] * 0.95
+            price = round(raw_price, 2) 
+            
+        # 만약 시세 조회가 실패해서 price가 0이면? -> 주문 실패함.
+        if price <= 0:
+            logger.error(f"❌ {symbol} 시세 조회 실패로 매도 주문 불가")
+            return None
+            
         return self.place_order_final("NASD", symbol, "SELL", qty, price)
 
     @log_api_call("주문 취소")

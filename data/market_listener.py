@@ -7,9 +7,9 @@ class MarketListener:
         self.kis = kis_api
         self.logger = logging.getLogger("MarketListener")
         self.target_symbols = [] 
-        # [NEW] 외부 조회용 최신 타겟 리스트 저장소
         self.current_targets = []
         
+        # ETF 등 잡주 필터는 유지 (이건 필수)
         self.etf_keywords = ['ETF', 'ETN', 'BULL', 'BEAR', '2X', '3X', 'ULTRA', 'PROSHARES']
 
     def _is_garbage(self, name: str) -> bool:
@@ -18,19 +18,24 @@ class MarketListener:
             if kw in name_upper: return True
         return False
         
-    # [NEW] 현재 감시 중인 종목 리스트 반환
     def get_current_targets(self):
         return self.current_targets
 
-    def scan_markets(self, min_change=40.0) -> List[str]:
+    def scan_markets(self, min_change=40.0) -> List[str]: # 기본값 40
         """
-        급등주 스캔 (메서드명: scan_markets)
+        급등주 스캔 (넓은 뜰채 전략)
         """
         try:
+            # 1. 랭킹 데이터 가져오기
             raw_list = self.kis.get_ranking(sort_type="fluct") 
-            if not raw_list: 
+            
+            # [디버그] API가 실제로 몇 개를 줬는지 확인
+            if not raw_list:
+                self.logger.info("💨 스캔 결과: API가 빈 리스트를 반환했습니다.")
                 self.current_targets = []
                 return []
+            
+            # self.logger.info(f"🔍 API Raw Data Count: {len(raw_list)}") # 너무 시끄러우면 주석
 
             candidates = []
             for item in raw_list:
@@ -44,29 +49,34 @@ class MarketListener:
                 except:
                     continue
 
-                # 1. 가격 필터
-                if not (0.5 <= price <= 200.0): continue
-                # 2. 거래량 필터
-                if vol < 1000: continue
-                # 3. 급등 필터
+                # [필터 완화]
+                # 1. 가격: 최소한의 상장 요건 ($0.1) 이상이면 통과
+                if price < 0.1: continue
+                
+                # 2. 거래량: 아예 5만 아니면 통과 (초기 급등 포착)
+                if vol <= 5: continue
+                
+                # 3. 급등: min_change(40%) 이상이면 통과
                 if rate < min_change: continue
                 
-                # 4. ETF 필터
+                # 4. ETF 필터 (이건 유지)
                 if self._is_garbage(name): continue
 
                 candidates.append(symb)
 
+            # 상위 10개 후보 선정
             final_targets = candidates[:10]
-            
-            # [NEW] 최신 타겟 업데이트 (외부 조회용)
             self.current_targets = final_targets
             
             if final_targets:
-                self.logger.info(f"📡 Found Targets (>= {min_change}%): {final_targets}")
+                self.logger.info(f"📡 뜰채 포착 (>{min_change}%): {final_targets}")
+            else:
+                # 조건에 맞는게 하나도 없으면 로그 남김
+                self.logger.info(f"💨 뜰채 빈손 (API 수신 {len(raw_list)}개 중 조건 만족 0개)")
                 
             return final_targets
 
         except Exception as e:
             self.logger.error(f"Scan Error: {e}")
-            self.current_targets = [] # 에러 시 빈 리스트
+            self.current_targets = []
             return []
