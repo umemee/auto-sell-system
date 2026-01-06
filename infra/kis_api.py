@@ -89,12 +89,16 @@ class KisApi:
         
         # 1차 시도: 등락률 순위 (Fluctuation)
         try:
-            path = "/uapi/overseas-stock/v1/ranking/fluctuation"
-            self._update_headers("HHDFS76410000")
+            # 기존 404 에러가 나는 주소 대신, ranking_updater.py의 성공했던 주소로 교체
+            path = "/uapi/overseas-stock/v1/ranking/updown-rate" 
+            self._update_headers("HHDFS76290000") # TR_ID도 변경 (7641 -> 7629)
+            
+            # 파라미터 변경 (GUBN='1' 상승률순, NDAY='0' 당일)
             params = {
-                "AUTH": "", "EXCD": "NAS", "GUBN": "0", "VOL_RANG": "0", 
-                "KEYB": "", "V_RANK_SORT_CLS_CODE": "0"
+                "AUTH": "", "EXCD": "NAS", "GUBN": "1", "NDAY": "0", 
+                "VOL_RANG": "0", "KEYB": ""
             }
+            
             res = requests.get(f"{self.base_url}{path}", headers=self.headers, params=params)
             
             # 응답 검증 (HTML 에러 페이지인지 확인)
@@ -104,7 +108,8 @@ class KisApi:
 
             data = res.json()
             if data['rt_cd'] == '0':
-                return data.get('output', [])
+                # updown-rate API는 데이터가 'output'이 아니라 'output2'에 담겨 있습니다.
+                return data.get('output2', [])
                 
         except Exception:
             pass # 2차 시도로 넘어감
