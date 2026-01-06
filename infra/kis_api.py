@@ -3,245 +3,215 @@ import json
 import pandas as pd
 import time
 from config import Config
-from infra.utils import get_logger
+from infra.utils import get_logger, log_api_call
+
+logger = get_logger()
 
 class KisApi:
     def __init__(self, token_manager):
-        self.logger = get_logger("KisApi")
-        self.token_manager = token_manager
-        self.base_url = Config.BASE_URL
-
-        # [Fix 1] 계좌번호 정제 (앞 8자리 추출)
-        raw_account = str(Config.CANO).strip()
-        if '-' in raw_account:
-            self.account_no = raw_account.split('-')[0]
-        elif len(raw_account) > 8:
-            self.account_no = raw_account[:8]
-        else:
-            self.account_no = raw_account
-
-        # [Fix 2] 상품코드 Config 연동 (하드코딩 제거)
-        self.acnt_prdt_cd = str(getattr(Config, 'ACNT_PRDT_CD', '01'))
-
-        self.logger.info(f"✅ Account Configured: {self.account_no}-{self.acnt_prdt_cd}")
-
-    def _safe_float(self, val):
-        try:
-            if val == "" or val is None:
-                return 0.0
-            return float(val)
-        except Exception:
-            return 0.0
-
-    def _normalize_market_price(self, market):
-        market = market.upper()
-        if market in ["NASD", "NASDAQ"]: return "NAS"
-        if market in ["NYSE", "NYS"]: return "NYS"
-        if market in ["AMEX", "AMS"]: return "AMS"
-        return market
-
-    def _get_headers(self, tr_id):
-        return {
+        self.tm = token_manager
+        self.base_url = Config().BASE_URL
+        self.headers = {
             "content-type": "application/json; charset=utf-8",
-            "authorization": f"Bearer {self.token_manager.get_token()}",
+            "authorization": "",
             "appkey": Config.APP_KEY,
             "appsecret": Config.APP_SECRET,
-            "tr_id": tr_id
+            "tr_id": "",
+            "custtype": "P"
         }
 
-    def _send_request(self, method, path, headers, params=None, data=None):
-        url = f"{self.base_url}{path}"
-        try:
-            if method == "GET":
-                resp = requests.get(url, headers=headers, params=params, timeout=10)
-            else:
-                resp = requests.post(url, headers=headers, json=data, timeout=10)
+    def _update_headers(self, tr_id):
+        self.headers["authorization"] = f"Bearer {self.tm.get_token()}"
+        self.headers["tr_id"] = tr_id
 
-            try:
-                return resp.json()
-            except json.JSONDecodeError:
-                self.logger.error(f"Invalid JSON response: {resp.text[:200]}")
-                return None
-        except Exception as e:
-            self.logger.error(f"API Request Failed: {e}")
-            return None
+    def _get_lookup_excd(self, exchange):
+        excd_map = {"NASD": "NAS", "NYSE": "NYS", "AMEX": "AMS"}
+        return excd_map.get(exchange, exchange)
 
-    def get_current_price(self, market, symbol):
-        market_code = self._normalize_market_price(market)
-        path = "/uapi/overseas-price/v1/quotations/price-detail"
-        headers = self._get_headers("HHDFS76200200")
-        params = {"AUTH": "", "EXCD": market_code, "SYMB": symbol}
+    @log_api_call("예수금 조회")
+    def get_buyable_cash(self) -> float:
+        """예수금 조회 (통합 증거금 확인)"""
+        path = "/uapi/overseas-stock/v1/trading/inquire-present-balance"
+        tr_id = "VTRP6504R" if "vts" in self.base_url else "CTRP6504R"
+        self._update_headers(tr_id)
+        
+        # [Fix 1] debug_balance.py와 동일하게 파라미터 수정 (TR_MK -> TR_MKET_CD)
+        params = {
+            "CANO": Config.CANO,
+            "ACNT_PRDT_CD": Config.ACNT_PRDT_CD,
+            "WCRC_FRCR_DVSN_CD": "02",
+            "NATN_CD": "840",
+            "TR_MKET_CD": "00",  # 👈 여기가 수정되었습니다!
+            "INQR_DVSN_CD": "00"
+        }
+        
+        res = requests.get(f"{self.base_url}{path}", headers=self.headers, params=params)
+        data = res.json()
+        
+        if data['rt_cd'] == '0':
+            output2 = data.get('output2', [])
+            if output2 and len(output2) > 0:
+                cash_str = output2[0].get('frcr_dncl_amt_2') 
+                if not cash_str:
+                    cash_str = output2[0].get('frcr_drwg_psbl_amt_1')
+                if cash_str:
+                    return float(cash_str)
+        return 0.0
 
-        res = self._send_request("GET", path, headers, params)
-        if res and res.get('output'):
-            out = res['output']
-            return {
-                "symbol": symbol,
-                "last": self._safe_float(out.get('last')),
-                "open": self._safe_float(out.get('open')),
-                "high": self._safe_float(out.get('high')),
-                "low": self._safe_float(out.get('low')),
-                "base": self._safe_float(out.get('base'))
-            }
+    @log_api_call("랭킹 조회")
+    def get_ranking(self, sort_type="vol"):
+        """거래량/등락률 상위 종목 조회"""
+        path = "/uapi/overseas-stock/v1/ranking/trade-vol"
+        self._update_headers("HHDFS76310010") 
+        
+        params = {
+            "AUTH": "", "EXCD": "NAS", "NDAY": "0",
+            "PRC1": "", "PRC2": "", "VOL_RANG": "0", "KEYB": ""
+        }
+        
+        res = requests.get(f"{self.base_url}{path}", headers=self.headers, params=params)
+        data = res.json()
+        if data.get('rt_cd') == '0':
+            ranking_data = data.get('output2', [])
+            if not ranking_data:
+                    ranking_data = data.get('output', [])
+            return ranking_data
+        return []
+
+    @log_api_call("현재가 조회")
+    def get_current_price(self, exchange, symbol):
+        """현재가 조회"""
+        path = "/uapi/overseas-price/v1/quotations/price"
+        self._update_headers("HHDFS00000300")
+        lookup_excd = self._get_lookup_excd(exchange)
+        
+        params = {"AUTH": "", "EXCD": lookup_excd, "SYMB": symbol}
+        
+        res = requests.get(f"{self.base_url}{path}", headers=self.headers, params=params)
+        data = res.json()
+        if data['rt_cd'] == '0': 
+            return dict(
+                last=float(data['output']['last']),
+                open=float(data['output']['open']),
+                volume=int(data['output']['tvol'])
+            )
         return None
 
-    def get_minute_candles(self, market, symbol, limit=100):
-        market_code = self._normalize_market_price(market)
-        path = "/uapi/overseas-price/v1/quotations/inquire-time-itemchartprice"
-        headers = self._get_headers("HHDFS76950200")
+    @log_api_call("일봉 차트 조회")
+    def get_daily_candle(self, exchange, symbol, period=100):
+        """과거 n일 간의 일봉 데이터 조회 (OHLCV)"""
+        path = "/uapi/overseas-price/v1/quotations/dailyprice"
+        self._update_headers("HHDFS76240000")
+        lookup_excd = self._get_lookup_excd(exchange)
+        
         params = {
-            "AUTH": "", "EXCD": market_code, "SYMB": symbol,
+            "AUTH": "",
+            "EXCD": lookup_excd,
+            "SYMB": symbol,
+            "GUBN": "0",
+            "BYMD": "",
+            "MODP": "1"
+        }
+        
+        res = requests.get(f"{self.base_url}{path}", headers=self.headers, params=params)
+        data = res.json()
+        
+        if data['rt_cd'] == '0':
+            output2 = data.get('output2', [])
+            df = pd.DataFrame(output2)
+            if not df.empty:
+                df = df[['xymd', 'open', 'high', 'low', 'clos', 'tvol']]
+                df.columns = ['date', 'open', 'high', 'low', 'close', 'volume']
+                df = df.astype({'open': float, 'high': float, 'low': float, 'close': float, 'volume': int})
+                df = df.sort_values('date').tail(period)
+                return df
+        return None
+
+    @log_api_call("주문 전송")
+    def place_order_final(self, exchange, symbol, side, qty, price, trade_id=None):
+        """실제 주문 전송 (매수/매도 공통)"""
+        path = "/uapi/overseas-stock/v1/trading/order"
+        is_buy = (side == "BUY")
+        
+        if "vts" in self.base_url:
+            tr_id = "VTTT1002U" if is_buy else "VTTT1001U"
+        else:
+            tr_id = "TTTT1002U" if is_buy else "TTTT1006U"
+
+        self._update_headers(tr_id)
+        
+        if float(price) >= 1.0: final_price = f"{float(price):.2f}"
+        else: final_price = f"{float(price):.4f}"
+        
+        body = {
+            "CANO": Config.CANO,
+            "ACNT_PRDT_CD": Config.ACNT_PRDT_CD,
+            "OVRS_EXCG_CD": exchange,
+            "PDNO": symbol,
+            "ORD_QTY": str(int(qty)),
+            # [Fix 2 & 3] 매수/매도 모두 OVRS_ORD_UNPR 사용 (ORD_UNPR 아님!)
+            "OVRS_ORD_UNPR": final_price,  # 👈 여기가 수정되었습니다!
+            "ORD_SVR_DVSN_CD": "0", 
+            "ORD_DVSN": "00"
+        }
+        
+        res = requests.post(f"{self.base_url}{path}", headers=self.headers, json=body)
+        data = res.json()
+        if data['rt_cd'] == '0':
+            return data['output'].get('ODNO')
+        else:
+            logger.error(f"주문 실패 메시지: {data.get('msg1')}")
+            return None
+
+    # (호환성 유지) 구버전 buy_limit 함수
+    def buy_limit(self, symbol, price, qty):
+        return self.place_order_final("NASD", symbol, "BUY", qty, price)
+
+    # (호환성 유지) 구버전 sell_market 함수
+    def sell_market(self, symbol, qty):
+        # 시장가 매도라도 안전하게 가격 0으로 지정가 주문 전송 (해외주식 관행)
+        return self.place_order_final("NASD", symbol, "SELL", qty, 0)
+
+    @log_api_call("미체결 조회")
+    def get_unfilled_qty(self, exchange, symbol, order_no=None):
+        """미체결 수량 확인"""
+        path = "/uapi/overseas-stock/v1/trading/inquire-nccs"
+        self._update_headers("TTTS3018R")
+        params = {
+            "CANO": Config.CANO, "ACNT_PRDT_CD": Config.ACNT_PRDT_CD,
+            "OVRS_EXCG_CD": exchange, "SORT_SQN": "DS", 
+            "CTX_AREA_FK200": "", "CTX_AREA_NK200": ""
+        }
+        
+        res = requests.get(f"{self.base_url}{path}", headers=self.headers, params=params)
+        data = res.json()
+        if data['rt_cd'] != '0': return 0
+        
+        output = data.get('output', [])
+        for item in output:
+            if item.get('pdno') == symbol:
+                if order_no and item.get('odno') != order_no: continue
+                return int(item.get('nccs_qty', 0))
+        return 0
+    
+    # (호환성 유지) 분봉 차트 조회
+    def get_minute_candles(self, market, symbol, limit=100):
+        path = "/uapi/overseas-price/v1/quotations/inquire-time-itemchartprice"
+        self._update_headers("HHDFS76950200")
+        
+        params = {
+            "AUTH": "", "EXCD": market, "SYMB": symbol,
             "NMIN": "1", "PINC": "1", "NEXT": "", "NREC": "120", "KEYB": ""
         }
-        res = self._send_request("GET", path, headers, params)
-        if res and res.get('output2'):
-            df = pd.DataFrame(res['output2'])
+        res = requests.get(f"{self.base_url}{path}", headers=self.headers, params=params)
+        data = res.json()
+        if data and data.get('output2'):
+            df = pd.DataFrame(data['output2'])
             df = df.rename(columns={
                 'kymd': 'date', 'khms': 'time',
-                'open': 'open', 'high': 'high', 'low': 'low', 'last': 'close',
-                'evol': 'volume'
+                'open': 'open', 'high': 'high', 'low': 'low', 'last': 'close', 'vols': 'volume'
             })
-            if 'volume' not in df.columns and 'vols' in df.columns:
-                 df = df.rename(columns={'vols': 'volume'})
-
             cols = ['open', 'high', 'low', 'close', 'volume']
-            valid_cols = [c for c in cols if c in df.columns]
-            for col in valid_cols:
-                df[col] = df[col].apply(lambda x: self._safe_float(x))
+            df[cols] = df[cols].apply(pd.to_numeric)
             return df.sort_values('time')
         return pd.DataFrame()
-
-    def get_balance(self):
-        path = "/uapi/overseas-stock/v1/trading/inquire-balance"
-        headers = self._get_headers("TTTS3012R")
-        params = {
-            "CANO": self.account_no,
-            "ACNT_PRDT_CD": self.acnt_prdt_cd,
-            "OVRS_EXCG_CD": "NASD",
-            "TR_CRCY_CD": "USD",
-            "CTX_AREA_FK100": "", "CTX_AREA_NK100": ""
-        }
-        res = self._send_request("GET", path, headers, params)
-        holdings = []
-        output1 = res.get('output1') if res else []
-        if output1:
-            for item in output1:
-                qty = self._safe_float(item.get('ovrs_cblc_qty'))
-                if qty > 0:
-                    holdings.append({"symbol": item.get('ovrs_pdno'), "qty": int(qty)})
-        return holdings
-
-    def get_buyable_cash(self):
-        path = "/uapi/overseas-stock/v1/trading/foreign-margin"
-        headers = self._get_headers("TTTC2101R")
-        params = {
-            "CANO": self.account_no,
-            "ACNT_PRDT_CD": self.acnt_prdt_cd
-        }
-        res = self._send_request("GET", path, headers, params)
-        max_cash = 0.0
-        output = res.get('output') if res else []
-        if output:
-            for item in output:
-                if item.get('crcy_cd') == 'USD':
-                    ord_psbl = self._safe_float(item.get('frcr_ord_psbl_amt1'))
-                    itgr_psbl = self._safe_float(item.get('itgr_ord_psbl_amt'))
-                    max_cash = max(ord_psbl, itgr_psbl)
-        return max_cash
-
-    def buy_limit(self, symbol, price, qty):
-        # 1. 잔고 체크 (로그만 남김)
-        try:
-            cash = self.get_buyable_cash()
-            est_amt = float(price) * int(qty)
-            if est_amt > cash:
-                self.logger.warning(f"⚠️ Funds Check: Need ${est_amt:.2f}, Have ${cash:.2f}")
-        except: pass
-
-        path = "/uapi/overseas-stock/v1/trading/order"
-        headers = self._get_headers("TTTT1002U")
-        formatted_price = f"{float(price):.2f}"
-
-        # 거래소 코드 자동 재시도 로직 (NASD -> NAS)
-        target_markets = ["NASD", "NAS"]
-
-        for market in target_markets:
-            data = {
-                "CANO": self.account_no,
-                "ACNT_PRDT_CD": self.acnt_prdt_cd,
-                "OVRS_EXCG_CD": market,
-                "PDNO": symbol,
-                "ORD_DVSN": "00",
-                "ORD_QTY": str(qty),
-                # 🔴 [수정 완료] 해외주식 주문 가격 키값 변경 (ORD_UNPR -> OVRS_ORD_UNPR)
-                "OVRS_ORD_UNPR": formatted_price,
-                "ORD_SVR_DVSN_CD": "0"
-            }
-
-            self.logger.info(f"📡 Sending Buy Order ({market}): {symbol} ${formatted_price} (Acc: {self.account_no}-{self.acnt_prdt_cd})")
-
-            res = self._send_request("POST", path, headers, data=data)
-
-            if res:
-                if res.get('rt_cd') == '0':
-                    # 성공 시 바로 리턴
-                    return res.get('output', {}).get('ODNO')
-
-                # 실패 시 에러 코드 확인
-                err_code = res.get('msg_cd')
-                err_msg = res.get('msg1')
-
-                # IGW00014(금액확인) 또는 IGW00224(거래소코드오류) 발생 시 다음 마켓 코드로 재시도
-                if market == "NASD" and (err_code in ['IGW00014', 'IGW00224']):
-                    self.logger.warning(f"⚠️ 'NASD' Order Failed ({err_msg}). Retrying with 'NAS'...")
-                    continue
-
-                self.logger.error(f"❌ Buy Failed ({market}): {err_msg} (Code: {err_code})")
-                return None
-
-        return None
-
-    def sell_market(self, symbol, qty):
-        path = "/uapi/overseas-stock/v1/trading/order"
-        headers = self._get_headers("TTTT1006U")
-
-        # 매도 역시 NASD -> NAS 순차 적용 고려
-        target_markets = ["NASD", "NAS"]
-
-        for market in target_markets:
-            data = {
-                "CANO": self.account_no,
-                "ACNT_PRDT_CD": self.acnt_prdt_cd,
-                "OVRS_EXCG_CD": market,
-                "PDNO": symbol,
-                "ORD_DVSN": "00",
-                "ORD_QTY": str(qty),
-                # 🔴 [수정 완료] 해외주식 주문 가격 키값 변경 (ORD_UNPR -> OVRS_ORD_UNPR)
-                "OVRS_ORD_UNPR": "0",
-                "ORD_SVR_DVSN_CD": "0"
-            }
-
-            res = self._send_request("POST", path, headers, data=data)
-
-            if res and res.get('rt_cd') == '0':
-                return res.get('output', {}).get('ODNO')
-
-            # 시장가 매도 실패 시 (IGW00014 등) -> 지정가 매도로 전환 시도
-            if res and (res.get('msg_cd') == 'IGW00014' or '시장가' in str(res.get('msg1', ''))):
-                self.logger.warning(f"⚠️ Market Sell Failed ({market}). Retrying Limit Sell...")
-                last_price_info = self.get_current_price(market, symbol)
-                if last_price_info:
-                    last = last_price_info['last']
-                    if last > 0:
-                        # 🔴 [수정 완료] 재시도 시에도 키값 변경
-                        data['OVRS_ORD_UNPR'] = f"{last * 0.99:.2f}" 
-                        res_retry = self._send_request("POST", path, headers, data=data)
-                        if res_retry and res_retry.get('rt_cd') == '0':
-                            self.logger.info("✅ Retry Success (Limit Sell)")
-                            return res_retry.get('output', {}).get('ODNO')
-
-            # NASD 실패 후 NAS 시도를 위해 루프 계속
-            if market == "NASD": continue
-
-            self.logger.error(f"❌ Sell Failed: {res.get('msg1') if res else 'No Response'}")
-            return None
