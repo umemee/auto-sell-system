@@ -83,21 +83,50 @@ class KisApi:
             logger.error(f"잔고 조회 중 에러: {e}")
         return holdings
 
-    @log_api_call("랭킹 조회")
+    @log_api_call("랭킹 조회(통합)")
     def get_ranking(self):
-        path = "/uapi/overseas-stock/v1/ranking/fluctuation"
-        self._update_headers("HHDFS76410000")
-        params = {
-            "AUTH": "", "EXCD": "NAS", "GUBN": "0", "VOL_RANG": "0", 
-            "KEYB": "", "V_RANK_SORT_CLS_CODE": "0"
-        }
+        """등락률 순위 조회 시도 후 실패 시 거래량 순위로 대체"""
+        
+        # 1차 시도: 등락률 순위 (Fluctuation)
         try:
+            path = "/uapi/overseas-stock/v1/ranking/fluctuation"
+            self._update_headers("HHDFS76410000")
+            params = {
+                "AUTH": "", "EXCD": "NAS", "GUBN": "0", "VOL_RANG": "0", 
+                "KEYB": "", "V_RANK_SORT_CLS_CODE": "0"
+            }
             res = requests.get(f"{self.base_url}{path}", headers=self.headers, params=params)
+            
+            # 응답 검증 (HTML 에러 페이지인지 확인)
+            if res.status_code != 200 or not res.text.strip().startswith("{"):
+                logger.warning(f"⚠️ 등락률 조회 실패 (Status: {res.status_code}, Body: {res.text[:50]}...). 거래량 순위로 우회합니다.")
+                raise ValueError("Invalid Response")
+
             data = res.json()
             if data['rt_cd'] == '0':
                 return data.get('output', [])
+                
+        except Exception:
+            pass # 2차 시도로 넘어감
+
+        # 2차 시도: 거래량 순위 (Volume) - fallback
+        try:
+            return self._get_volume_ranking()
         except Exception as e:
-            logger.error(f"랭킹 조회 실패: {e}")
+            logger.error(f"❌ 랭킹 조회(거래량 포함) 최종 실패: {e}")
+            return []
+
+    def _get_volume_ranking(self):
+        """[Fallback] 거래량 상위 종목 조회"""
+        path = "/uapi/overseas-stock/v1/ranking/trade-vol"
+        self._update_headers("HHDFS76310010") # 거래량 순위 TR ID
+        params = {
+            "AUTH": "", "EXCD": "NAS", "GUBN": "0", "VOL_RANG": "0", "KEYB": ""
+        }
+        res = requests.get(f"{self.base_url}{path}", headers=self.headers, params=params)
+        data = res.json()
+        if data['rt_cd'] == '0':
+            return data.get('output', [])
         return []
 
     @log_api_call("현재가 조회")
@@ -129,12 +158,9 @@ class KisApi:
         
         self._update_headers(tr_id)
         
-        # [핵심 수정] 한국투자증권 해외주식 호가 단위 엄격 적용
         f_price = float(price)
-        if f_price >= 1.0:
-            final_price = f"{f_price:.2f}" # 1달러 이상: 소수점 2자리 (10.50)
-        else:
-            final_price = f"{f_price:.4f}" # 1달러 미만: 소수점 4자리 (0.9850)
+        if f_price >= 1.0: final_price = f"{f_price:.2f}" 
+        else: final_price = f"{f_price:.4f}" 
         
         body = {
             "CANO": Config.CANO, "ACNT_PRDT_CD": Config.ACNT_PRDT_CD,
