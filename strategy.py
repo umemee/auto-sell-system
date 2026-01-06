@@ -12,7 +12,7 @@ class GapZoneStrategy:
                 'enabled': True, 
                 'priority': 1, 
                 'stop_loss': -0.05, 
-                'take_profit': 0.12, 
+                'take_profit': 0.07, 
                 'description': 'Premarket High Support'
             },
             # [OFF] 2. ROD_B (안정형) - 필요 시 True로 변경
@@ -20,7 +20,7 @@ class GapZoneStrategy:
                 'enabled': False, 
                 'priority': 2, 
                 'stop_loss': -0.08, 
-                'take_profit': 0.10
+                'take_profit': 0.07
             },
             # ... 나머지 전략들 (기본 OFF)
         }
