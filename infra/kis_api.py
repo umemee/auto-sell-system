@@ -181,7 +181,22 @@ class KisApi:
         return None
 
     def buy_limit(self, s, p, q): return self.place_order_final("NASD", s, "BUY", q, p)
-    def sell_market(self, s, q): return self.place_order_final("NASD", s, "SELL", q, 0)
+    def sell_market(self, symbol, qty):
+        """[수정] 미국 주식 시장가 매도 시뮬레이션 (현재가 -5% 지정가 투척)"""
+        try:
+            # 1. 현재가 조회
+            price_info = self.get_current_price("NASD", symbol)
+            if not price_info: return None
+            
+            current_price = price_info['last']
+            
+            # 2. 시장가처럼 체결되도록 5% 낮게 주문 (매도 호가 공략)
+            limit_price = current_price * 0.95 
+            
+            return self.place_order_final("NASD", symbol, "SELL", qty, limit_price)
+        except Exception as e:
+            logger.error(f"매도 주문 실패: {e}")
+            return None
     
     def get_minute_candles(self, market, symbol, limit=100):
         path = "/uapi/overseas-price/v1/quotations/inquire-time-itemchartprice"
