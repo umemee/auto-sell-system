@@ -10,10 +10,8 @@ class KisApi:
         self.logger = get_logger("KisApi")
         self.token_manager = token_manager
         self.base_url = Config.BASE_URL
-        
-        # [핵심 Fix] 계좌번호 강제 정제 로직 (무조건 앞 8자리만 추출)
-        # 예: "12345678-01" -> "12345678"
-        # 예: "1234567801" -> "12345678"
+
+        # [Fix 1] 계좌번호 정제 (앞 8자리 추출)
         raw_account = str(Config.CANO).strip()
         if '-' in raw_account:
             self.account_no = raw_account.split('-')[0]
@@ -21,9 +19,12 @@ class KisApi:
             self.account_no = raw_account[:8]
         else:
             self.account_no = raw_account
-            
-        self.logger.info(f"✅ Account No Configured: {self.account_no} (Cleaned)")
-    
+
+        # [Fix 2] 상품코드 Config 연동 (하드코딩 제거)
+        self.acnt_prdt_cd = str(getattr(Config, 'ACNT_PRDT_CD', '01'))
+
+        self.logger.info(f"✅ Account Configured: {self.account_no}-{self.acnt_prdt_cd}")
+
     def _safe_float(self, val):
         try:
             if val == "" or val is None:
@@ -55,7 +56,7 @@ class KisApi:
                 resp = requests.get(url, headers=headers, params=params, timeout=10)
             else:
                 resp = requests.post(url, headers=headers, json=data, timeout=10)
-            
+
             try:
                 return resp.json()
             except json.JSONDecodeError:
@@ -70,7 +71,7 @@ class KisApi:
         path = "/uapi/overseas-price/v1/quotations/price-detail"
         headers = self._get_headers("HHDFS76200200")
         params = {"AUTH": "", "EXCD": market_code, "SYMB": symbol}
-        
+
         res = self._send_request("GET", path, headers, params)
         if res and res.get('output'):
             out = res['output']
@@ -97,12 +98,12 @@ class KisApi:
             df = pd.DataFrame(res['output2'])
             df = df.rename(columns={
                 'kymd': 'date', 'khms': 'time',
-                'open': 'open', 'high': 'high', 'low': 'low', 'last': 'close', 
-                'evol': 'volume' 
+                'open': 'open', 'high': 'high', 'low': 'low', 'last': 'close',
+                'evol': 'volume'
             })
             if 'volume' not in df.columns and 'vols' in df.columns:
                  df = df.rename(columns={'vols': 'volume'})
-            
+
             cols = ['open', 'high', 'low', 'close', 'volume']
             valid_cols = [c for c in cols if c in df.columns]
             for col in valid_cols:
@@ -115,7 +116,7 @@ class KisApi:
         headers = self._get_headers("TTTS3012R")
         params = {
             "CANO": self.account_no,
-            "ACNT_PRDT_CD": "01",
+            "ACNT_PRDT_CD": self.acnt_prdt_cd,
             "OVRS_EXCG_CD": "NASD",
             "TR_CRCY_CD": "USD",
             "CTX_AREA_FK100": "", "CTX_AREA_NK100": ""
@@ -135,7 +136,7 @@ class KisApi:
         headers = self._get_headers("TTTC2101R")
         params = {
             "CANO": self.account_no,
-            "ACNT_PRDT_CD": "01"
+            "ACNT_PRDT_CD": self.acnt_prdt_cd
         }
         res = self._send_request("GET", path, headers, params)
         max_cash = 0.0
@@ -149,74 +150,96 @@ class KisApi:
         return max_cash
 
     def buy_limit(self, symbol, price, qty):
-        # 1. 잔고 체크 (옵션)
+        # 1. 잔고 체크 (로그만 남김)
         try:
             cash = self.get_buyable_cash()
             est_amt = float(price) * int(qty)
             if est_amt > cash:
-                self.logger.warning(f"⚠️ Check: Need ${est_amt:.2f}, Have ${cash:.2f}")
-                # return None # 강제 차단 대신 경고만 하고 주문 시도
+                self.logger.warning(f"⚠️ Funds Check: Need ${est_amt:.2f}, Have ${cash:.2f}")
         except: pass
 
         path = "/uapi/overseas-stock/v1/trading/order"
-        headers = self._get_headers("TTTT1002U") 
-        
-        # 2. 가격 포맷팅 (소수점 2자리)
+        headers = self._get_headers("TTTT1002U")
         formatted_price = f"{float(price):.2f}"
-        
-        data = {
-            "CANO": self.account_no,  # 여기서 정제된 8자리가 들어감
-            "ACNT_PRDT_CD": "01",
-            "OVRS_EXCG_CD": "NASD",
-            "PDNO": symbol,
-            "ORD_DVSN": "00",
-            "ORD_QTY": str(qty),
-            "ORD_UNPR": formatted_price,
-            "ORD_SVR_DVSN_CD": "0"
-        }
-        
-        # [디버깅] 실제 전송 데이터 확인
-        self.logger.info(f"📡 Sending Buy Order: {symbol} ${formatted_price} (Acc: {self.account_no})")
-        
-        res = self._send_request("POST", path, headers, data=data)
-        
-        if res:
-            if res.get('rt_cd') == '0':
-                return res.get('output', {}).get('ODNO')
-            else:
-                # 에러 상세 출력
-                self.logger.error(f"❌ Buy Failed: {res.get('msg1')} (Code: {res.get('msg_cd')})")
+
+        # [Fix 3] 거래소 코드 자동 재시도 로직 (NASD -> NAS)
+        # 어떤 계좌는 주문 시 NASD를, 어떤 계좌는 NAS를 요구할 수 있음 (특히 통합증거금 사용 시)
+        target_markets = ["NASD", "NAS"]
+
+        for market in target_markets:
+            data = {
+                "CANO": self.account_no,
+                "ACNT_PRDT_CD": self.acnt_prdt_cd,
+                "OVRS_EXCG_CD": market,
+                "PDNO": symbol,
+                "ORD_DVSN": "00",
+                "ORD_QTY": str(qty),
+                "ORD_UNPR": formatted_price,
+                "ORD_SVR_DVSN_CD": "0"
+            }
+
+            self.logger.info(f"📡 Sending Buy Order ({market}): {symbol} ${formatted_price} (Acc: {self.account_no}-{self.acnt_prdt_cd})")
+
+            res = self._send_request("POST", path, headers, data=data)
+
+            if res:
+                if res.get('rt_cd') == '0':
+                    # 성공 시 바로 리턴
+                    return res.get('output', {}).get('ODNO')
+
+                # 실패 시 에러 코드 확인
+                err_code = res.get('msg_cd')
+                err_msg = res.get('msg1')
+
+                # IGW00014(금액확인) 또는 IGW00224(거래소코드오류) 발생 시 다음 마켓 코드로 재시도
+                if market == "NASD" and (err_code in ['IGW00014', 'IGW00224']):
+                    self.logger.warning(f"⚠️ 'NASD' Order Failed ({err_msg}). Retrying with 'NAS'...")
+                    continue
+
+                self.logger.error(f"❌ Buy Failed ({market}): {err_msg} (Code: {err_code})")
+                return None
+
         return None
 
     def sell_market(self, symbol, qty):
         path = "/uapi/overseas-stock/v1/trading/order"
         headers = self._get_headers("TTTT1006U")
-        data = {
-            "CANO": self.account_no,
-            "ACNT_PRDT_CD": "01",
-            "OVRS_EXCG_CD": "NASD",
-            "PDNO": symbol,
-            "ORD_DVSN": "00", 
-            "ORD_QTY": str(qty),
-            "ORD_UNPR": "0",
-            "ORD_SVR_DVSN_CD": "0"
-        }
-        res = self._send_request("POST", path, headers, data=data)
-        
-        if res and res.get('rt_cd') == '0':
-            return res.get('output', {}).get('ODNO')
-            
-        if res and (res.get('msg_cd') == 'IGW00014' or '시장가' in str(res.get('msg1', ''))):
-            self.logger.warning("Market Sell Failed. Retrying with Limit Sell...")
-            last_price_info = self.get_current_price("NASD", symbol)
-            if last_price_info:
-                last = last_price_info['last']
-                if last > 0:
-                    data['ORD_UNPR'] = f"{last * 0.99:.2f}"
-                    res_retry = self._send_request("POST", path, headers, data=data)
-                    if res_retry and res_retry.get('rt_cd') == '0':
-                        self.logger.info("✅ Retry Success")
-                        return res_retry.get('output', {}).get('ODNO')
 
-        self.logger.error(f"❌ Sell Failed: {res.get('msg1')}")
-        return None
+        # 매도 역시 NASD -> NAS 순차 적용 고려
+        target_markets = ["NASD", "NAS"]
+
+        for market in target_markets:
+            data = {
+                "CANO": self.account_no,
+                "ACNT_PRDT_CD": self.acnt_prdt_cd,
+                "OVRS_EXCG_CD": market,
+                "PDNO": symbol,
+                "ORD_DVSN": "00",
+                "ORD_QTY": str(qty),
+                "ORD_UNPR": "0",
+                "ORD_SVR_DVSN_CD": "0"
+            }
+
+            res = self._send_request("POST", path, headers, data=data)
+
+            if res and res.get('rt_cd') == '0':
+                return res.get('output', {}).get('ODNO')
+
+            # 시장가 매도 실패 시 (IGW00014 등) -> 지정가 매도로 전환 시도
+            if res and (res.get('msg_cd') == 'IGW00014' or '시장가' in str(res.get('msg1', ''))):
+                self.logger.warning(f"⚠️ Market Sell Failed ({market}). Retrying Limit Sell...")
+                last_price_info = self.get_current_price(market, symbol)
+                if last_price_info:
+                    last = last_price_info['last']
+                    if last > 0:
+                        data['ORD_UNPR'] = f"{last * 0.99:.2f}" # 1% 아래로 즉시 체결 유도
+                        res_retry = self._send_request("POST", path, headers, data=data)
+                        if res_retry and res_retry.get('rt_cd') == '0':
+                            self.logger.info("✅ Retry Success (Limit Sell)")
+                            return res_retry.get('output', {}).get('ODNO')
+
+            # NASD 실패 후 NAS 시도를 위해 루프 계속
+            if market == "NASD": continue
+
+            self.logger.error(f"❌ Sell Failed: {res.get('msg1') if res else 'No Response'}")
+            return None

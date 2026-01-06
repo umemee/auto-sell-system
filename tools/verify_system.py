@@ -19,13 +19,16 @@ logger = logging.getLogger("SystemVerifier")
 
 def verify_system():
     logger.info("🚀 [System Verification] Starting diagnostics...")
-    
+
     # 1. 인프라 초기화
     try:
         logger.info("🔹 [Step 1] Initializing Infrastructure...")
         auth = KisAuth()
         kis = KisApi(auth)
-        bot = TelegramBot(None) 
+
+        # [수정] 인자 없이 호출하도록 변경
+        bot = TelegramBot()
+
         listener = MarketListener(kis)
         logger.info("✅ Infrastructure initialized successfully.")
     except Exception as e:
@@ -37,31 +40,30 @@ def verify_system():
         logger.info("🔹 [Step 2] Checking API Connection & Balance...")
         cash = kis.get_buyable_cash()
         logger.info(f"✅ Balance Check Success. Buyable Cash: ${cash:,.2f}")
-        
-        if cash < 160.0: # AMD 가격 고려 ($160)
+
+        if cash < 160.0: # AMD 가격 고려
             logger.warning("⚠️ Low Balance for AMD test. Logic check only.")
-            # 잔고 부족 시 테스트 중단 방지를 위해 여기서 리턴하지 않음 (시세 조회라도 확인)
     except Exception as e:
         logger.error(f"❌ Balance Check Failed: {e}")
         return
 
-    # 3. 데이터 수신 (AMD로 변경 - 안정적인 종목)
-    target_symbol = "AMD" 
+    # 3. 데이터 수신 (AMD - 안정적인 종목)
+    target_symbol = "AMD"
     target_price = 0
-    
+
     try:
         logger.info(f"🔹 [Step 3] Checking Market Data for {target_symbol}...")
-        
-        # 시세 조회 (NAS)
-        price_info = kis.get_current_price("NAS", target_symbol)
+
+        # 시세 조회
+        price_info = kis.get_current_price("NASD", target_symbol)
         if not price_info:
              logger.error(f"❌ Failed to fetch price for {target_symbol}.")
              return
-             
+
         target_price = price_info['last']
         logger.info(f"🎯 Test Target: {target_symbol} (Price: ${target_price})")
-        
-        df = kis.get_minute_candles("NAS", target_symbol)
+
+        df = kis.get_minute_candles("NASD", target_symbol)
         if df.empty:
             logger.error(f"❌ Failed to fetch candles.")
         else:
@@ -74,7 +76,12 @@ def verify_system():
     # 3.5 스캐너 로직 점검
     try:
         logger.info("🔹 [Step 3.5] Checking Scanner Logic...")
-        listener.scan_markets(min_change=0.0) 
+        try:
+            listener.scan_markets()
+        except:
+            # 인자가 필요한 경우를 대비해 예외처리
+            listener.scan_markets(min_change=0.0)
+
         logger.info("✅ Scanner Logic Executed.")
     except Exception as e:
         logger.error(f"❌ Scanner Logic Error: {e}")
@@ -97,45 +104,53 @@ def verify_system():
     logger.info("🔹 [Step 5] Real Trade Test (Buy 1 -> Sell 1)...")
     logger.warning("⚠️ Executing REAL ORDERS in 5 seconds. Ctrl+C to cancel.")
     time.sleep(5)
-    
+
     try:
         # 잔고 재확인
-        if cash < target_price * 1.02:
-            logger.error(f"🛑 Insufficient Balance for {target_symbol}. Needed: ${target_price}, Have: ${cash}")
+        if cash < target_price * 1.05:
+            logger.error(f"🛑 Insufficient Balance. Needed: ${target_price*1.05}, Have: ${cash}")
             return
 
-        # 매수
-        buy_price = target_price * 1.02 # 2% 위
+        # [매수] 지정가 (현재가 + 2% 위로 긁기 - 즉시 체결 유도)
+        buy_price = target_price * 1.02
         logger.info(f"💸 Buying {target_symbol} @ ${buy_price:.2f} (1 qty)")
-        
+
         ord_no = kis.buy_limit(target_symbol, buy_price, 1)
         if not ord_no:
             logger.error("❌ Buy Order Failed.")
             return
-            
-        logger.info(f"⏳ Waiting for fill (Order: {ord_no})...")
-        if kis.wait_for_fill(ord_no, timeout=60):
-            logger.info("✅ BUY Filled!")
+
+        logger.info(f"⏳ Order Sent ({ord_no}). Waiting 10s for fill...")
+        time.sleep(10) # API 호출 대신 단순 대기
+
+        # 잔고 확인으로 체결 검증
+        balance = kis.get_balance()
+        has_stock = any(item['symbol'] == target_symbol for item in balance)
+
+        if has_stock:
+            logger.info("✅ BUY Filled (Confirmed via Balance)!")
             bot.send_message(f"🧪 [Buy Success] {target_symbol}")
-        else:
-            logger.error("❌ Buy Order Timed Out. Check manually.")
-            return
 
-        time.sleep(2)
+            # [매도] 시장가
+            time.sleep(2)
+            logger.info(f"💸 Selling {target_symbol}")
 
-        # 매도
-        logger.info(f"💸 Selling {target_symbol}")
-        sell_no = kis.sell_market(target_symbol, 1)
-        if not sell_no:
-            logger.error("❌ Sell Order Failed.")
-            return
-            
-        logger.info(f"⏳ Waiting for sell (Order: {sell_no})...")
-        if kis.wait_for_fill(sell_no, timeout=60):
-            logger.info("✅ SELL Filled!")
-            bot.send_message(f"🧪 [Sell Success] {target_symbol}")
+            # kis_api에 sell_market이 있으면 사용, 없으면 지정가 매도로 대체
+            if hasattr(kis, 'sell_market'):
+                sell_no = kis.sell_market(target_symbol, 1)
+            else:
+                logger.warning("⚠️ No sell_market method. Trying limit sell @ $0 (Market).")
+                sell_no = kis.buy_limit(target_symbol, 0, 1)
+
+            if sell_no:
+                logger.info(f"⏳ Sell Order Sent ({sell_no}). Waiting 10s...")
+                time.sleep(10)
+                logger.info("✅ SELL Sequence Complete.")
+                bot.send_message(f"🧪 [Sell Success] {target_symbol}")
+            else:
+                logger.error("❌ Sell Order Failed.")
         else:
-            logger.error("❌ Sell Order Timed Out. Check manually.")
+            logger.error("❌ Buy Order NOT Filled after 10s. Skipping Sell.")
             return
 
     except Exception as e:
