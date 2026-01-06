@@ -9,15 +9,16 @@ class KisApi:
     def __init__(self, token_manager):
         self.logger = get_logger("KisApi")
         self.token_manager = token_manager
-        self.base_url = Config.KIS_BASE_URL
-        self.account_no = Config.KIS_ACCOUNT_NO
+        # [Fix] Config 변수명 일치 (KIS_ 접두어 제거)
+        self.base_url = Config.BASE_URL
+        self.account_no = Config.CANO
         
     def _get_headers(self, tr_id):
         return {
             "content-type": "application/json; charset=utf-8",
             "authorization": f"Bearer {self.token_manager.get_token()}",
-            "appkey": Config.KIS_APPKEY,
-            "appsecret": Config.KIS_APPSECRET,
+            "appkey": Config.APP_KEY,
+            "appsecret": Config.APP_SECRET,
             "tr_id": tr_id
         }
 
@@ -34,22 +35,44 @@ class KisApi:
             return None
 
     def get_current_price(self, market, symbol):
-        path = "/uapi/overseas-price/v1/quotations/price"
+        # [Fix] 공식 문서 '해외주식 현재가상세' 반영
+        path = "/uapi/overseas-price/v1/quotations/price-detail"
         headers = self._get_headers("HHDFS76200200")
         params = {"AUTH": "", "EXCD": market, "SYMB": symbol}
+        
         res = self._send_request("GET", path, headers, params)
         if res and res.get('output'):
             out = res['output']
-            open_p = float(out.get('popen') or out.get('open') or out.get('base') or 0)
             return {
                 "symbol": symbol,
-                "last": float(out['last']),
-                "open": open_p,
-                "base": float(out['base']),
-                "high": float(out['high']),
-                "low": float(out['low'])
+                "last": float(out.get('last', 0)),
+                "open": float(out.get('open', 0)),
+                "high": float(out.get('high', 0)),
+                "low": float(out.get('low', 0)),
+                "base": float(out.get('base', 0))
             }
         return None
+
+    def get_minute_candles(self, market, symbol, limit=100):
+        # [Fix] 공식 문서 '해외주식분봉조회' 반영
+        path = "/uapi/overseas-price/v1/quotations/inquire-time-itemchartprice"
+        headers = self._get_headers("HHDFS76950200")
+        
+        params = {
+            "AUTH": "", "EXCD": market, "SYMB": symbol,
+            "NMIN": "1", "PINC": "1", "NEXT": "", "NREC": "120", "KEYB": ""
+        }
+        res = self._send_request("GET", path, headers, params)
+        if res and res.get('output2'):
+            df = pd.DataFrame(res['output2'])
+            df = df.rename(columns={
+                'kymd': 'date', 'khms': 'time',
+                'open': 'open', 'high': 'high', 'low': 'low', 'last': 'close', 'vols': 'volume'
+            })
+            cols = ['open', 'high', 'low', 'close', 'volume']
+            df[cols] = df[cols].apply(pd.to_numeric)
+            return df.sort_values('time')
+        return pd.DataFrame()
 
     def get_balance(self):
         path = "/uapi/overseas-stock/v1/trading/inquire-balance"
@@ -84,8 +107,10 @@ class KisApi:
         return 0.0
 
     def buy_limit(self, symbol, price, qty):
+        # [Fix] 미국 매수 TR ID (TTTT1002U)
         path = "/uapi/overseas-stock/v1/trading/order"
-        headers = self._get_headers("TTTS3011R")
+        headers = self._get_headers("TTTT1002U") 
+        
         data = {
             "CANO": self.account_no, "ACNT_PRDT_CD": "01", "OVRS_EXCG_CD": "NASD",
             "PDNO": symbol, "ORD_DVSN": "00", "ORD_QTY": str(qty),
@@ -94,23 +119,26 @@ class KisApi:
         res = self._send_request("POST", path, headers, data=data)
         if res and res.get('rt_cd') == '0':
             return res['output']['ODNO']
+        self.logger.error(f"Buy Failed: {res}")
         return None
 
-    def get_minute_candles(self, market, symbol, limit=100):
-        path = "/uapi/overseas-price/v1/quotations/inquire-time-itemchartprice"
-        headers = self._get_headers("HHDFS76240000")
-        params = {
-            "AUTH": "", "EXCD": market, "SYMB": symbol,
-            "NMIN": "1", "PINC": "1", "NEXT": "", "NREC": "120", "KEYB": ""
+    def sell_market(self, symbol, qty):
+        # [Fix] 미국 매도 TR ID (TTTT1006U)
+        path = "/uapi/overseas-stock/v1/trading/order"
+        headers = self._get_headers("TTTT1006U")
+        
+        data = {
+            "CANO": self.account_no,
+            "ACNT_PRDT_CD": "01",
+            "OVRS_EXCG_CD": "NASD",
+            "PDNO": symbol,
+            "ORD_DVSN": "00", 
+            "ORD_QTY": str(qty),
+            "ORD_UNPR": "0",
+            "ORD_SVR_DVSN_CD": "0"
         }
-        res = self._send_request("GET", path, headers, params)
-        if res and res.get('output2'):
-            df = pd.DataFrame(res['output2'])
-            df = df.rename(columns={
-                'kymd': 'date', 'khms': 'time',
-                'open': 'open', 'high': 'high', 'low': 'low', 'last': 'close', 'vols': 'volume'
-            })
-            cols = ['open', 'high', 'low', 'close', 'volume']
-            df[cols] = df[cols].apply(pd.to_numeric)
-            return df.sort_values('time')
-        return pd.DataFrame()
+        res = self._send_request("POST", path, headers, data=data)
+        if res and res.get('rt_cd') == '0':
+            return res['output']['ODNO']
+        self.logger.error(f"Sell Failed: {res}")
+        return None
