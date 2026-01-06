@@ -24,17 +24,16 @@ class KisApi:
         self.headers["authorization"] = f"Bearer {self.tm.get_token()}"
         self.headers["tr_id"] = tr_id
 
-    def _get_lookup_excd(self, exchange):
-        excd_map = {"NASD": "NAS", "NYSE": "NYS", "AMEX": "AMS"}
-        return excd_map.get(exchange, exchange)
-
-    # [Fix 2] 빈 문자열("")이 와도 에러 없이 0.0으로 변환하는 안전 장치
     def _safe_float(self, val):
         try:
             if not val: return 0.0
             return float(str(val).replace(",", ""))
         except Exception:
             return 0.0
+            
+    def _get_lookup_excd(self, exchange):
+        excd_map = {"NASD": "NAS", "NYSE": "NYS", "AMEX": "AMS"}
+        return excd_map.get(exchange, exchange)
 
     @log_api_call("예수금 조회")
     def get_buyable_cash(self) -> float:
@@ -62,7 +61,6 @@ class KisApi:
             logger.error(f"예수금 조회 실패: {e}")
         return 0.0
 
-    # [Fix 1] 누락되었던 get_balance 메서드 복구 (잔고 조회 기능)
     @log_api_call("잔고 조회")
     def get_balance(self):
         """보유 종목 잔고 조회"""
@@ -90,12 +88,36 @@ class KisApi:
                         holdings.append({
                             "symbol": item.get('ovrs_pdno'),
                             "qty": qty,
-                            "price": self._safe_float(item.get('ovrs_stck_evlu_amt')), # 평가금액
-                            "pnl_pct": self._safe_float(item.get('frcr_evlu_pfls_rt')) # 수익률
+                            "price": self._safe_float(item.get('ovrs_stck_evlu_amt')), 
+                            "pnl_pct": self._safe_float(item.get('frcr_evlu_pfls_rt'))
                         })
         except Exception as e:
             logger.error(f"잔고 조회 중 에러: {e}")
         return holdings
+
+    @log_api_call("랭킹 조회")
+    def get_ranking(self):
+        """[NEW] 전일 대비 등락률 상위 종목 조회 (급등주 발굴용)"""
+        path = "/uapi/overseas-stock/v1/ranking/fluctuation"
+        self._update_headers("HHDFS76410000") # 등락률 순위 TR 코드
+        
+        params = {
+            "AUTH": "",
+            "EXCD": "NAS",      # 나스닥
+            "GUBN": "0",        # 전체
+            "VOL_RANG": "0",    # 거래량 조건 없음
+            "KEYB": "",         # 다음 데이터 키
+            "V_RANK_SORT_CLS_CODE": "0" # 0: 상승순
+        }
+        
+        try:
+            res = requests.get(f"{self.base_url}{path}", headers=self.headers, params=params)
+            data = res.json()
+            if data['rt_cd'] == '0':
+                return data.get('output', [])
+        except Exception as e:
+            logger.error(f"랭킹 조회 실패: {e}")
+        return []
 
     @log_api_call("현재가 조회")
     def get_current_price(self, exchange, symbol):
@@ -108,7 +130,6 @@ class KisApi:
             res = requests.get(f"{self.base_url}{path}", headers=self.headers, params=params)
             data = res.json()
             if data['rt_cd'] == '0': 
-                # [Fix 2 적용] _safe_float 사용하여 빈 문자열 에러 방지
                 return {
                     "last": self._safe_float(data['output']['last']),
                     "open": self._safe_float(data['output']['open']),
@@ -116,30 +137,6 @@ class KisApi:
                     "low": self._safe_float(data['output']['low']),
                     "volume": int(self._safe_float(data['output']['tvol']))
                 }
-        except Exception:
-            pass
-        return None
-
-    @log_api_call("일봉 차트 조회")
-    def get_daily_candle(self, exchange, symbol, period=100):
-        path = "/uapi/overseas-price/v1/quotations/dailyprice"
-        self._update_headers("HHDFS76240000")
-        lookup_excd = self._get_lookup_excd(exchange)
-        
-        params = {
-            "AUTH": "", "EXCD": lookup_excd, "SYMB": symbol,
-            "GUBN": "0", "BYMD": "", "MODP": "1"
-        }
-        try:
-            res = requests.get(f"{self.base_url}{path}", headers=self.headers, params=params)
-            data = res.json()
-            if data['rt_cd'] == '0':
-                df = pd.DataFrame(data['output2'])
-                df = df.rename(columns={'xymd': 'date', 'clos': 'close', 'tvol': 'volume'})
-                df = df[['date', 'open', 'high', 'low', 'close', 'volume']]
-                for col in ['open', 'high', 'low', 'close', 'volume']:
-                     df[col] = df[col].apply(self._safe_float)
-                return df.sort_values('date').tail(period)
         except Exception:
             pass
         return None
@@ -168,11 +165,9 @@ class KisApi:
         except Exception as e: logger.error(f"API Error: {e}")
         return None
 
-    # 호환성 메서드
     def buy_limit(self, s, p, q): return self.place_order_final("NASD", s, "BUY", q, p)
     def sell_market(self, s, q): return self.place_order_final("NASD", s, "SELL", q, 0)
     
-    # 분봉 조회 (Main에서 사용)
     def get_minute_candles(self, market, symbol, limit=100):
         path = "/uapi/overseas-price/v1/quotations/inquire-time-itemchartprice"
         self._update_headers("HHDFS76950200")
@@ -194,4 +189,8 @@ class KisApi:
                 return df.sort_values('time')
         except Exception:
             pass
+        return pd.DataFrame()
+    
+    def get_daily_candle(self, exchange, symbol, period=100):
+        # 전략에서 필요로 할 경우를 대비해 유지
         return pd.DataFrame()
