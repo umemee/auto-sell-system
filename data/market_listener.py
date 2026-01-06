@@ -1,82 +1,63 @@
-import logging
-from typing import List
-from infra.kis_api import KisApi 
+import time
+from infra.utils import get_logger
 
 class MarketListener:
-    def __init__(self, kis_api: KisApi):
+    def __init__(self, kis_api):
         self.kis = kis_api
-        self.logger = logging.getLogger("MarketListener")
-        self.target_symbols = [] 
-        self.current_targets = []
+        self.logger = get_logger("Scanner")
+        # 감시할 종목 리스트 (여기에 실제 관심 종목들을 넣어야 합니다)
+        # KIS API는 전 종목 스캐닝이 어려우므로, 주요 급등 후보군을 미리 넣어두는 것이 좋습니다.
+        # 예시로 기술주/변동성 종목들을 넣어둡니다. 필요시 config에서 불러오도록 수정 가능합니다.
+        self.target_symbols = [
+            'TSLA', 'NVDA', 'AMD', 'AAPL', 'MSFT', 'AMZN', 'GOOGL', 'META',
+            'NFLX', 'COIN', 'MARA', 'PLTR', 'SOXL', 'TQQQ', 'SQQQ'
+        ]
         
-        # ETF 등 잡주 필터는 유지 (이건 필수)
-        self.etf_keywords = ['ETF', 'ETN', 'BULL', 'BEAR', '2X', '3X', 'ULTRA', 'PROSHARES']
-
-    def _is_garbage(self, name: str) -> bool:
-        name_upper = name.upper()
-        for kw in self.etf_keywords:
-            if kw in name_upper: return True
-        return False
+    def scan_markets(self):
+        """
+        [수정된 로직]
+        1. 기준 변경: 당일 시가(Open) -> 전일 종가(Base) 대비 등락률 확인
+        2. 목표: HTS상 수익률이 +20% 이상인 종목을 1차적으로 모두 가져옴 (40%는 너무 빡빡할 수 있음)
+        """
+        detected_stocks = []
         
-    def get_current_targets(self):
-        return self.current_targets
+        # self.logger.info(f"🔍 스캐닝 시작 ({len(self.target_symbols)}개 종목)...")
 
-    def scan_markets(self, min_change=40.0) -> List[str]: # 기본값 40
-        """
-        급등주 스캔 (넓은 뜰채 전략)
-        """
-        try:
-            # 1. 랭킹 데이터 가져오기
-            raw_list = self.kis.get_ranking(sort_type="fluct") 
-            
-            # [디버그] API가 실제로 몇 개를 줬는지 확인
-            if not raw_list:
-                self.logger.info("💨 스캔 결과: API가 빈 리스트를 반환했습니다.")
-                self.current_targets = []
-                return []
-            
-            # self.logger.info(f"🔍 API Raw Data Count: {len(raw_list)}") # 너무 시끄러우면 주석
-
-            candidates = []
-            for item in raw_list:
-                symb = item.get("symb")
-                name = item.get("name", "")
+        for sym in self.target_symbols:
+            try:
+                # 현재가 조회 (last:현재가, base:전일종가, open:시가)
+                price_info = self.kis.get_current_price("NASD", sym)
                 
-                try:
-                    price = float(item.get("last", 0))
-                    rate = float(item.get("rate", 0))
-                    vol = int(item.get("vol", 0))
-                except:
+                if not price_info:
                     continue
 
-                # [필터 완화]
-                # 1. 가격: 최소한의 상장 요건 ($0.1) 이상이면 통과
-                if price < 0.1: continue
+                curr_price = price_info.get('last', 0)
+                base_price = price_info.get('base', 0) # 전일 종가
                 
-                # 2. 거래량: 아예 5만 아니면 통과 (초기 급등 포착)
-                if vol <= 5: continue
-                
-                # 3. 급등: min_change(40%) 이상이면 통과
-                if rate < min_change: continue
-                
-                # 4. ETF 필터 (이건 유지)
-                if self._is_garbage(name): continue
+                # 데이터 유효성 체크
+                if curr_price <= 0 or base_price <= 0:
+                    continue
 
-                candidates.append(symb)
+                # [핵심 변경] 전일 종가 기준 변동률 계산 (HTS와 동일)
+                change_rate = (curr_price - base_price) / base_price
+                change_pct = change_rate * 100
 
-            # 상위 10개 후보 선정
-            final_targets = candidates[:10]
-            self.current_targets = final_targets
-            
-            if final_targets:
-                self.logger.info(f"📡 뜰채 포착 (>{min_change}%): {final_targets}")
-            else:
-                # 조건에 맞는게 하나도 없으면 로그 남김
-                self.logger.info(f"💨 뜰채 빈손 (API 수신 {len(raw_list)}개 중 조건 만족 0개)")
+                # 40% 이상 급등주 포착 (테스트를 위해 15%로 낮춰서 로그 확인 추천)
+                # 실제 운영 시에는 0.40 (40%)로 설정
+                THRESHOLD = 20.0 # 일단 20%만 넘어도 포착하도록 완화 (검증용)
+
+                if change_pct >= THRESHOLD:
+                    self.logger.info(f"🚨 [포착] {sym}: ${curr_price} (+{change_pct:.2f}%)")
+                    detected_stocks.append(sym)
                 
-            return final_targets
+                # API 호출 속도 조절 (너무 빠르면 차단됨)
+                time.sleep(0.1) 
 
-        except Exception as e:
-            self.logger.error(f"Scan Error: {e}")
-            self.current_targets = []
-            return []
+            except Exception as e:
+                self.logger.error(f"Scan Error ({sym}): {e}")
+                continue
+
+        if detected_stocks:
+            self.logger.info(f"✅ 최종 감시 대상: {detected_stocks}")
+        
+        return detected_stocks
