@@ -85,39 +85,35 @@ class KisApi:
 
     @log_api_call("랭킹 조회(통합)")
     def get_ranking(self):
-        """등락률 순위 조회 시도 후 실패 시 거래량 순위로 대체"""
-        
-        # 1차 시도: 등락률 순위 (Fluctuation)
         try:
-            # 기존 404 에러가 나는 주소 대신, ranking_updater.py의 성공했던 주소로 교체
             path = "/uapi/overseas-stock/v1/ranking/updown-rate" 
-            self._update_headers("HHDFS76290000") # TR_ID도 변경 (7641 -> 7629)
-            
-            # 파라미터 변경 (GUBN='1' 상승률순, NDAY='0' 당일)
+            self._update_headers("HHDFS76290000")
             params = {
                 "AUTH": "", "EXCD": "NAS", "GUBN": "1", "NDAY": "0", 
                 "VOL_RANG": "0", "KEYB": ""
             }
             res = requests.get(f"{self.base_url}{path}", headers=self.headers, params=params, timeout=10)
             
-            # 응답 검증 (HTML 에러 페이지인지 확인)
             if res.status_code != 200 or not res.text.strip().startswith("{"):
-                logger.warning(f"⚠️ 등락률 조회 실패 (Status: {res.status_code}, Body: {res.text[:50]}...). 거래량 순위로 우회합니다.")
-                raise ValueError("Invalid Response")
+                raise ValueError("Invalid Response Format")
 
             data = res.json()
             if data['rt_cd'] == '0':
-                # updown-rate API는 데이터가 'output'이 아니라 'output2'에 담겨 있습니다.
-                return data.get('output2', [])
+                result = data.get('output2', [])
+                # [논리 수정] 데이터가 비어있으면 실패로 간주하여 except로 보냄
+                if not result:
+                    raise ValueError("Ranking data is empty")
+                return result
                 
-        except Exception:
-            pass # 2차 시도로 넘어감
+        except Exception as e:
+            logger.warning(f"⚠️ 등락률 조회 실패 또는 데이터 없음: {e}. 거래량 순위로 우회합니다.")
+            # 여기서 자동으로 아래의 _get_volume_ranking() 시도로 넘어감
+            pass 
 
-        # 2차 시도: 거래량 순위 (Volume) - fallback
         try:
             return self._get_volume_ranking()
         except Exception as e:
-            logger.error(f"❌ 랭킹 조회(거래량 포함) 최종 실패: {e}")
+            logger.error(f"❌ 랭킹 조회 최종 실패: {e}")
             return []
 
     def _get_volume_ranking(self):
