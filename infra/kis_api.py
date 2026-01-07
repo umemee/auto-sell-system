@@ -35,24 +35,40 @@ class KisApi:
         excd_map = {"NASD": "NAS", "NYSE": "NYS", "AMEX": "AMS"}
         return excd_map.get(exchange, exchange)
 
-    @log_api_call("예수금 조회")
+    @log_api_call("예수금 조회(주문가능)")
     def get_buyable_cash(self) -> float:
-        path = "/uapi/overseas-stock/v1/trading/inquire-present-balance"
-        tr_id = "VTRP6504R" if "vts" in self.base_url else "CTRP6504R"
+        # [수정] 단순 출금가능액(inquire-present-balance)이 아니라 
+        # 실질 주문가능금액(inquire-balance)을 조회해야 합니다.
+        
+        # 잔고 조회(TTTS3012R) API 재활용
+        path = "/uapi/overseas-stock/v1/trading/inquire-balance"
+        tr_id = "TTTS3012R" if "vts" not in self.base_url else "VTTS3012R"
         self._update_headers(tr_id)
+        
         params = {
-            "CANO": Config.CANO, "ACNT_PRDT_CD": Config.ACNT_PRDT_CD,
-            "WCRC_FRCR_DVSN_CD": "02", "NATN_CD": "840", "TR_MKET_CD": "00", "INQR_DVSN_CD": "00"
+            "CANO": Config.CANO, 
+            "ACNT_PRDT_CD": Config.ACNT_PRDT_CD,
+            "OVRS_EXCG_CD": "NASD", 
+            "TR_CRCY_CD": "USD", 
+            "CTX_AREA_FK100": "", 
+            "CTX_AREA_NK100": ""
         }
+        
         try:
             res = requests.get(f"{self.base_url}{path}", headers=self.headers, params=params)
             data = res.json()
+            
             if data['rt_cd'] == '0':
                 output2 = data.get('output2', [])
                 if output2:
-                    return self._safe_float(output2[0].get('frcr_dncl_amt_2') or output2[0].get('frcr_drwg_psbl_amt_1'))
+                    # [핵심] ovrs_ord_psbl_amt: 해외주문가능금액 (매도 체결분 포함)
+                    return self._safe_float(output2[0].get('ovrs_ord_psbl_amt'))
+            else:
+                logger.warning(f"주문가능금액 조회 실패 Msg: {data.get('msg1')}")
+                
         except Exception as e:
-            logger.error(f"예수금 조회 실패: {e}")
+            logger.error(f"주문가능금액 조회 에러: {e}")
+            
         return 0.0
 
     @log_api_call("잔고 조회")
