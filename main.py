@@ -41,8 +41,16 @@ def main():
         engine = GapZoneStrategy()     
         
         # 2. 전략 파라미터 로딩
-        active_strat_name = "ATOM_SUP_EMA200"
+        # [수정] 하드코딩 제거 -> Config에서 전략 이름 가져오기 #
+        active_strat_name = Config.ACTIVE_STRATEGY
         strat_params = engine.strategies.get(active_strat_name, {})
+        
+        # 전략이 없을 경우를 대비한 안전장치
+        if not strat_params:
+            logger.warning(f"⚠️ 전략 '{active_strat_name}'을 찾을 수 없습니다. 기본값(NEW_PRE)을 사용합니다.")
+            active_strat_name = "NEW_PRE"
+            strat_params = engine.strategies.get(active_strat_name, {})
+
         tp_rate = strat_params.get('take_profit', 0.12)
         sl_rate = strat_params.get('stop_loss', -0.05)
         

@@ -98,8 +98,7 @@ class KisApi:
                 "AUTH": "", "EXCD": "NAS", "GUBN": "1", "NDAY": "0", 
                 "VOL_RANG": "0", "KEYB": ""
             }
-            
-            res = requests.get(f"{self.base_url}{path}", headers=self.headers, params=params)
+            res = requests.get(f"{self.base_url}{path}", headers=self.headers, params=params, timeout=10)
             
             # 응답 검증 (HTML 에러 페이지인지 확인)
             if res.status_code != 200 or not res.text.strip().startswith("{"):
@@ -158,7 +157,7 @@ class KisApi:
     def place_order_final(self, exchange, symbol, side, qty, price):
         path = "/uapi/overseas-stock/v1/trading/order"
         is_buy = (side == "BUY")
-        tr_id = "TTTT1002U" if is_buy else "TTTT1006U"
+        _id = "TTTT1002U" if is_buy else "TTTT1006U"
         if "vts" in self.base_url: tr_id = "VTTT1002U" if is_buy else "VTTT1001U"
         
         self._update_headers(tr_id)
@@ -181,22 +180,20 @@ class KisApi:
         return None
 
     def buy_limit(self, s, p, q): return self.place_order_final("NASD", s, "BUY", q, p)
+
+    # [수정] 미국 주식용 시장가 매도 (현재가 -5% 지정가로 투척) #
     def sell_market(self, symbol, qty):
-        """[수정] 미국 주식 시장가 매도 시뮬레이션 (현재가 -5% 지정가 투척)"""
+        """시장가 매도 시뮬레이션: 현재가 대비 5% 낮게 던져 즉시 체결 유도"""
         try:
-            # 1. 현재가 조회
             price_info = self.get_current_price("NASD", symbol)
             if not price_info: return None
             
-            current_price = price_info['last']
-            
-            # 2. 시장가처럼 체결되도록 5% 낮게 주문 (매도 호가 공략)
-            limit_price = current_price * 0.95 
+            # [수정] 하드코딩된 0.95를 명확한 변수로 분리 (추후 Config 연동 권장)
+            SELL_BUFFER = 0.95 
+            limit_price = price_info['last'] * SELL_BUFFER
             
             return self.place_order_final("NASD", symbol, "SELL", qty, limit_price)
-        except Exception as e:
-            logger.error(f"매도 주문 실패: {e}")
-            return None
+        except: return None
     
     def get_minute_candles(self, market, symbol, limit=100):
         path = "/uapi/overseas-price/v1/quotations/inquire-time-itemchartprice"
