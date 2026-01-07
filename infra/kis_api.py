@@ -158,10 +158,12 @@ class KisApi:
         self._update_headers("HHDFS00000300")
         lookup_excd = self._get_lookup_excd(exchange)
         params = {"AUTH": "", "EXCD": lookup_excd, "SYMB": symbol}
+        
         try:
             res = requests.get(f"{self.base_url}{path}", headers=self.headers, params=params)
             data = res.json()
-            if data['rt_cd'] == '0': 
+            
+            if data['rt_cd'] == '0':
                 return {
                     "last": self._safe_float(data['output']['last']),
                     "open": self._safe_float(data['output']['open']),
@@ -169,7 +171,14 @@ class KisApi:
                     "low": self._safe_float(data['output']['low']),
                     "volume": int(self._safe_float(data['output']['tvol']))
                 }
-        except Exception: pass
+            else:
+                # [수정] 실패 시 침묵하지 않고 경고 로그 출력
+                logger.warning(f"⚠️ 현재가 조회 실패 ({symbol}): {data.get('msg1')} (Code: {data.get('msg_cd')})")
+                
+        except Exception as e:
+            # [수정] 에러 발생 시 로그 출력
+            logger.error(f"❌ 현재가 조회 중 에러 ({symbol}): {e}")
+            
         return None
 
     @log_api_call("주문 전송")
