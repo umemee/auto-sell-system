@@ -204,9 +204,13 @@ def main():
                 
                 df = kis.get_minute_candles("NASD", sym)
                 if df.empty: continue
+
+                # [추가] 현재가 정보를 미리 가져옵니다.
+                price_info = kis.get_current_price("NASD", sym)
                 
-                signal = engine.get_buy_signal(df, sym)
-                
+                # 정보를 같이 넘겨줍니다.
+                signal = engine.get_buy_signal(df, sym, current_price_data=price_info)
+                                
                 if signal:
                     price = signal['price']
                     qty = get_buy_qty(price)

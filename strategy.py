@@ -50,7 +50,7 @@ class GapZoneStrategy:
         # 추가 지표 (VWAP 등 필요시 여기에 구현)
         return df
 
-    def get_buy_signal(self, df, symbol):
+    def get_buy_signal(self, df, symbol, current_price_data=None):
         """현재 데이터(df)를 보고 매수 신호가 있는지 판단"""
         if df.empty or len(df) < 5: return None
         
@@ -68,7 +68,12 @@ class GapZoneStrategy:
             limit_price = 0
             
             if name == 'NEW_PRE': 
-                limit_price = row.get('day_open', 0)
+                # [논리 수정] 캔들(df)의 첫 값이 아니라, API가 준 '진짜 시가'를 사용
+                if current_price_data and 'open' in current_price_data:
+                    limit_price = current_price_data['open']
+                else:
+                    # 데이터가 없으면 기존 방식(불완전하지만) 사용
+                    limit_price = row.get('day_open', 0)
             
             elif name == 'ATOM_SUP_EMA200':
                 limit_price = row.get('ema_200', 0)
