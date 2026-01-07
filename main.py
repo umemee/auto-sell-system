@@ -1,6 +1,7 @@
 import time
 import datetime
 import pytz 
+from config import Config
 from infra.utils import get_logger
 from infra.kis_api import KisApi
 from infra.kis_auth import KisAuth
