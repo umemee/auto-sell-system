@@ -37,21 +37,19 @@ class KisApi:
 
     @log_api_call("예수금 조회(주문가능)")
     def get_buyable_cash(self) -> float:
-        # [수정] 단순 출금가능액(inquire-present-balance)이 아니라 
-        # 실질 주문가능금액(inquire-balance)을 조회해야 합니다.
-        
         # 잔고 조회(TTTS3012R) API 재활용
         path = "/uapi/overseas-stock/v1/trading/inquire-balance"
         tr_id = "TTTS3012R" if "vts" not in self.base_url else "VTTS3012R"
         self._update_headers(tr_id)
         
+        # [수정] FK100 -> FK200, NK100 -> NK200 (해외주식 전용 키)
         params = {
             "CANO": Config.CANO, 
             "ACNT_PRDT_CD": Config.ACNT_PRDT_CD,
             "OVRS_EXCG_CD": "NASD", 
             "TR_CRCY_CD": "USD", 
-            "CTX_AREA_FK100": "", 
-            "CTX_AREA_NK100": ""
+            "CTX_AREA_FK200": "",  # <-- 여기 수정됨
+            "CTX_AREA_NK200": ""   # <-- 여기 수정됨
         }
         
         try:
@@ -61,7 +59,7 @@ class KisApi:
             if data['rt_cd'] == '0':
                 output2 = data.get('output2', [])
                 if output2:
-                    # [핵심] ovrs_ord_psbl_amt: 해외주문가능금액 (매도 체결분 포함)
+                    # ovrs_ord_psbl_amt: 해외주문가능금액
                     return self._safe_float(output2[0].get('ovrs_ord_psbl_amt'))
             else:
                 logger.warning(f"주문가능금액 조회 실패 Msg: {data.get('msg1')}")
@@ -76,9 +74,15 @@ class KisApi:
         path = "/uapi/overseas-stock/v1/trading/inquire-balance"
         tr_id = "TTTS3012R" if "vts" not in self.base_url else "VTTS3012R"
         self._update_headers(tr_id)
+        
+        # [수정] FK100 -> FK200, NK100 -> NK200 (해외주식 전용 키)
         params = {
-            "CANO": Config.CANO, "ACNT_PRDT_CD": Config.ACNT_PRDT_CD,
-            "OVRS_EXCG_CD": "NASD", "TR_CRCY_CD": "USD", "CTX_AREA_FK100": "", "CTX_AREA_NK100": ""
+            "CANO": Config.CANO, 
+            "ACNT_PRDT_CD": Config.ACNT_PRDT_CD,
+            "OVRS_EXCG_CD": "NASD", 
+            "TR_CRCY_CD": "USD", 
+            "CTX_AREA_FK200": "",  # <-- 여기 수정됨
+            "CTX_AREA_NK200": ""   # <-- 여기 수정됨
         }
         holdings = []
         try:
