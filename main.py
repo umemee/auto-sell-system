@@ -137,6 +137,7 @@ def main():
             if was_sleeping:
                 bot.send_message("🌅 [Wake Up] 시장 감시 재개!")
                 was_sleeping = False
+                last_heartbeat_time = 0
 
             # 2. 하트비트
             if time.time() - last_heartbeat_time > HEARTBEAT_INTERVAL:
@@ -193,6 +194,7 @@ def main():
             current_watchlist = scanned_targets
             
             if not scanned_targets:
+                logger.info("🔭 감시 대상 없음 (Scanning...)")
                 time.sleep(60)
                 continue
 

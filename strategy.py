@@ -9,7 +9,7 @@ class GapZoneStrategy:
         # 🏆 챔피언십 리포트 기반 11개 전략 전체 로드
         self.strategies = {
             # 1. NEW_PRE (현재 우승 전략)
-            'NEW_PRE': { 'enabled': True, 'priority': 1, 'stop_loss': -0.05, 'take_profit': 0.12 },
+            'NEW_PRE': { 'enabled': True, 'priority': 1, 'stop_loss': -0.05, 'take_profit': 0.07 },
             
             # 2. ATOM_SUP_EMA200 (안정성)
             'ATOM_SUP_EMA200': { 'enabled': True, 'priority': 2, 'stop_loss': -0.05, 'take_profit': 0.10 },
