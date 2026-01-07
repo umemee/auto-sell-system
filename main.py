@@ -152,21 +152,19 @@ def main():
                 for item in balances:
                     sym = item['symbol']
                     qty = item['qty']
-                    pnl_pct = item.get('pnl_pct', 0.0) / 100.0 # API는 보통 %단위(예: 3.5)로 줌 -> 0.035로 변환 필요할 수도 있음. 
-                    # *KIS API frcr_evlu_pfls_rt는 퍼센트(%) 단위입니다. (예: 12.5 -> 12.5%)
-                    # 따라서 설정값 tp_rate(0.12)와 비교하려면 pnl_pct를 그대로 쓰거나 단위를 맞춰야 합니다.
-                    # 여기서는 안전하게 API 값(%)을 소수점(0.12) 단위로 변환해서 비교합니다.
+                    # [버그 수정] API의 % 값을 소수점 단위로 한 번만 변환
+                    raw_pnl = item.get('pnl_pct', 0.0) 
+                    current_pnl_rate = raw_pnl / 100.0 
                     
-                    current_pnl_rate = pnl_pct / 100.0 
                     holding_symbols.append(sym)
                     
-                    # [매도 조건 체크]
                     sell_signal = False
                     reason = ""
                     
+                    # 설정값(예: 0.07)과 변환된 수익률(예: 0.08) 비교
                     if current_pnl_rate >= tp_rate:
                         sell_signal = True
-                        reason = f"TP 달성 (+{pnl_pct:.2f}%)"
+                        reason = f"TP 달성 (+{raw_pnl:.2f}%)"
                     elif current_pnl_rate <= sl_rate:
                         sell_signal = True
                         reason = f"SL 발동 ({pnl_pct:.2f}%)"
