@@ -37,19 +37,22 @@ class KisApi:
 
     @log_api_call("예수금 조회(주문가능)")
     def get_buyable_cash(self) -> float:
-        # 잔고 조회(TTTS3012R) API 재활용
-        path = "/uapi/overseas-stock/v1/trading/inquire-balance"
-        tr_id = "TTTS3012R" if "vts" not in self.base_url else "VTTS3012R"
+        """
+        [수정 완료] 단순 잔고(Balance)가 아닌, '매수 가능 금액(Buying Power)'을 조회합니다.
+        API: 해외주식 매수가능금액조회 (TTTS3007R)
+        """
+        path = "/uapi/overseas-stock/v1/trading/inquire-psamount"
+        
+        # 실전: TTTS3007R / 모의: VTTS3007R
+        tr_id = "TTTS3007R" if "vts" not in self.base_url else "VTTS3007R"
         self._update_headers(tr_id)
         
-        # [수정] FK100 -> FK200, NK100 -> NK200 (해외주식 전용 키)
         params = {
             "CANO": Config.CANO, 
             "ACNT_PRDT_CD": Config.ACNT_PRDT_CD,
             "OVRS_EXCG_CD": "NASD", 
-            "TR_CRCY_CD": "USD", 
-            "CTX_AREA_FK200": "",  # <-- 여기 수정됨
-            "CTX_AREA_NK200": ""   # <-- 여기 수정됨
+            "OVRS_ORD_UNPR": "0",  # 시장가 기준 계산
+            "ITEM_CD": "AAPL"      # 기준 종목 (애플 기준)
         }
         
         try:
@@ -57,19 +60,15 @@ class KisApi:
             data = res.json()
             
             if data['rt_cd'] == '0':
-                output2 = data.get('output2')
-                # [수정] output2는 리스트가 아니라 딕셔너리(Object)입니다.
-                if output2 and isinstance(output2, dict):
-                    return self._safe_float(output2.get('ovrs_ord_psbl_amt'))
-                # 만약 리스트로 오는 경우를 대비 (방어 코드)
-                elif output2 and isinstance(output2, list):
-                     return self._safe_float(output2[0].get('ovrs_ord_psbl_amt'))
+                # API 명세서 기준: output은 리스트가 아니라 객체(Dictionary)입니다.
+                output = data.get('output', {})
+                # frcr_ord_psbl_amt1: 외화주문가능금액 (실제 사용할 수 있는 돈)
+                return self._safe_float(output.get('frcr_ord_psbl_amt1'))
             else:
                 logger.warning(f"주문가능금액 조회 실패 Msg: {data.get('msg1')}")
                 
         except Exception as e:
-            # 상세 에러 확인을 위해 e를 그대로 찍지 않고 repr() 사용 권장
-            logger.error(f"주문가능금액 조회 에러: {repr(e)}")
+            logger.error(f"주문가능금액 조회 에러: {e}")
             
         return 0.0
 
