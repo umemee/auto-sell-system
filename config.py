@@ -26,7 +26,7 @@ class Config:
     ACTIVE_STRATEGY = "NEW_PRE"
     
     # KIS 실전 서버 URL
-    URL_BASE = "https://openapi.koreainvestment.com:9443"
+    BASE_URL = "https://openapi.koreainvestment.com:9443"
     
     # 40% 급등주 필터
     MIN_CHANGE_PCT = 40.0 
