@@ -57,15 +57,19 @@ class KisApi:
             data = res.json()
             
             if data['rt_cd'] == '0':
-                output2 = data.get('output2', [])
-                if output2:
-                    # ovrs_ord_psbl_amt: 해외주문가능금액
-                    return self._safe_float(output2[0].get('ovrs_ord_psbl_amt'))
+                output2 = data.get('output2')
+                # [수정] output2는 리스트가 아니라 딕셔너리(Object)입니다.
+                if output2 and isinstance(output2, dict):
+                    return self._safe_float(output2.get('ovrs_ord_psbl_amt'))
+                # 만약 리스트로 오는 경우를 대비 (방어 코드)
+                elif output2 and isinstance(output2, list):
+                     return self._safe_float(output2[0].get('ovrs_ord_psbl_amt'))
             else:
                 logger.warning(f"주문가능금액 조회 실패 Msg: {data.get('msg1')}")
                 
         except Exception as e:
-            logger.error(f"주문가능금액 조회 에러: {e}")
+            # 상세 에러 확인을 위해 e를 그대로 찍지 않고 repr() 사용 권장
+            logger.error(f"주문가능금액 조회 에러: {repr(e)}")
             
         return 0.0
 
