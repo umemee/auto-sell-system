@@ -47,7 +47,7 @@ class TelegramBot:
         try:
             url = f"{self.base_url}/sendMessage"
             params = {"chat_id": self.chat_id, "text": text, "parse_mode": "HTML"}
-            requests.get(url, params=params, timeout=5)
+            requests.get(url, params=params, timeout=15)
         except Exception as e:
             logger.error(f"Telegram Send Error: {e}")
 
