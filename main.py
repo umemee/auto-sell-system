@@ -94,7 +94,7 @@ def main():
     
     # 시스템 상태 초기화
     state = SystemState()
-    HEARTBEAT_INTERVAL = Config. HEARTBEAT_INTERVAL_SEC
+    HEARTBEAT_INTERVAL = Config.HEARTBEAT_INTERVAL_SEC
     was_sleeping = False  
 
     try:
@@ -140,7 +140,7 @@ def main():
         bot.send_message(start_msg)
                 
         # 5. Telegram Bot 양방향 연결
-        bot. start()  # 명령어 수신 시작
+        bot.start()  # 명령어 수신 시작
         
         # 상태 제공 함수 연결
         def get_status_data():
@@ -343,7 +343,7 @@ def main():
                     # 가격 변동 체크
                     price_change_pct = abs(fresh_price - signal['price']) / signal['price']
                     if price_change_pct > (Config.MAX_PRICE_DEVIATION_PCT / 100):
-                        logger.warning(f"⚠️ {sym} 가격 급변 ({price_change_pct*100:. 2f}%) - 매수 스킵")
+                        logger.warning(f"⚠️ {sym} 가격 급변 ({price_change_pct*100:.2f}%) - 매수 스킵")
                         continue
                     
                     qty = get_buy_qty(fresh_price)
@@ -385,6 +385,7 @@ def main():
 if __name__ == "__main__":
 
     main()
+
 
 
 
