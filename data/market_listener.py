@@ -29,10 +29,36 @@ class MarketListener:
                     except:
                         rate = 0.0
                     
-                    # [수정] 워런트(W) 및 파생상품 필터링 (5글자 이상 W로 끝남 or 이름에 워런트)
-                    name = item.get('name', '').upper() # 수정
-                    if (len(sym) >= 5 and sym.endswith('W')) or 'WARRANT' in name or '워런트' in name: # 수정
-                        continue # 수정
+                    # ==========================================
+                    # 🛑 악성 종목 필터링 (SPAC Unit, Warrant, Rights 등)
+                    # ==========================================
+                    name = item.get('name', '').upper()
+
+                    # 1. 티커 접미사(Suffix) 체크
+                    # 미국 주식(NASDAQ 등)은 5글자일 때 마지막 글자가 특수 유형을 의미함
+                    if len(sym) >= 5:
+                        last_char = sym[-1]
+                        # U: Unit(스팩유닛), W: Warrant(워런트), R: Rights(신주인수권), Q: Bankruptcy(파산), P: Preferred(우선주)
+                        if last_char in ['U', 'W', 'R', 'Q', 'P']:
+                            # self.logger.info(f"🚫 필터링됨(유형): {sym} (사유: {last_char} type)")
+                            continue
+
+                    # 2. 회사 이름(Name) 키워드 체크
+                    # SPAC(기업인수목적회사), 인수권, 펀드 등 제외
+                    exclude_keywords = [
+                        'WARRANT', '워런트',   # 워런트
+                        'UNIT', '유닛',        # 유닛 (스팩 묶음)
+                        'ACQUISITION',         # 스팩(SPAC) 이름에 주로 들어감
+                        'SPAC',                # 스팩 명시
+                        'RIGHTS',              # 신주인수권
+                        'FUND',                # 펀드/ETF (개별 급등주 원할 경우 제외 고려)
+                        'NOTE', 'DEBENTURE'    # 채권형 상품
+                    ]
+
+                    # 이름에 금지 키워드가 하나라도 포함되면 제외
+                    if any(keyword in name for keyword in exclude_keywords):
+                        # self.logger.info(f"🚫 필터링됨(이름): {sym} - {name}")
+                        continue
 
                     # 2. 40% 이상 급등주 필터링
                     if rate >= THRESHOLD:
