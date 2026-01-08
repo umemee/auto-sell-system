@@ -1,5 +1,5 @@
 import pandas as pd
-#import numpy as np
+import numpy as np
 from config import Config
 
 
@@ -44,58 +44,120 @@ class GapZoneStrategy:
         # [공통] 당일 시가
         df['day_open'] = df['open'].iloc[0] 
 
-        # [지표] EMA / SMA 계산 (Shift 1 적용)
-        df['ema_200'] = df['close'].ewm(span=200, adjust=False).mean().shift(1)
+        # [지표 1] EMA (5종)
+        df['ema_5'] = df['close'].ewm(span=5, adjust=False).mean().shift(1)
+        df['ema_20'] = df['close'].ewm(span=20, adjust=False).mean().shift(1)
         df['ema_50'] = df['close'].ewm(span=50, adjust=False).mean().shift(1)
-        df['sma_200'] = df['close'].rolling(window=200).mean().shift(1)
+        df['ema_200'] = df['close'].ewm(span=200, adjust=False).mean().shift(1)
         
-        # 추가 지표 (VWAP 등 필요시 여기에 구현)
+        # [지표 2] SMA (2종)
+        df['sma_50'] = df['close']. rolling(window=50).mean().shift(1)
+        df['sma_200'] = df['close'].rolling(window=200).mean().shift(1)
+
+        # [지표 3] Bollinger Bands (DIP_SNIPER용)
+        sma_20 = df['close'].rolling(window=20).mean().shift(1)
+        std_20 = df['close']. rolling(window=20).std().shift(1)
+        df['bb_lower'] = sma_20 - (2 * std_20)
+
+        # [지표 4] VWAP
+        try:
+            # 일별로 VWAP 계산 (volume weighted average price)
+            df['cum_vol'] = df['volume'].cumsum()
+            df['cum_vol_price'] = (df['volume'] * (df['high'] + df['low'] + df['close']) / 3).cumsum()
+            df['vwap'] = (df['cum_vol_price'] / df['cum_vol']).shift(1)
+        except:
+            df['vwap'] = np.nan
+
+        # [지표 5] ORB (Opening Range Breakout) - NEW_ORB용
+        # 프리마켓/오프닝 30분간의 최고가
+        try:
+            # 간단 구현:  첫 30개 봉의 최고가
+            if len(df) >= 30:
+                df['orb_high'] = df['high'].iloc[:30].max()
+            else:
+                df['orb_high'] = df['high'].max()
+        except:
+            df['orb_high'] = np.nan
+        
         return df
 
     def get_buy_signal(self, df, symbol, current_price_data=None):
         """현재 데이터(df)를 보고 매수 신호가 있는지 판단"""
-        if df.empty or len(df) < 5: return None
+        if df. empty or len(df) < 5: return None
         
         # 지표 계산
         df = self.calculate_indicators(df)
-        row = df.iloc[-1] # 현재 봉
+        row = df.iloc[-1]  # 현재 봉
         
         # 활성화된 전략만 체크
         for name, params in self.strategies.items():
-            # config.ACTIVE_STRATEGY와 일치하는 전략만 실행하도록 외부에서 제어하지만,
-            # 혹시 모를 내부 필터링을 위해 enabled 체크 유지
             if not params['enabled']: continue
             
             # 전략별 진입가(Limit Price) 계산
             limit_price = 0
             
-            if name == 'NEW_PRE': 
-                # [논리 수정] 캔들(df)의 첫 값이 아니라, API가 준 '진짜 시가'를 사용
+            # === [Momentum Group] ===
+            if name == 'NEW_ORB': 
+                # ORB High (Opening Range Breakout)
+                orb_high = row.get('orb_high', 0)
+                if orb_high > 0:
+                    limit_price = orb_high
+                    
+            elif name == 'NEW_PRE':  
+                # 프리마켓 시가
                 if current_price_data and 'open' in current_price_data:
                     limit_price = current_price_data['open']
-                else:
-                    # 데이터가 없으면 기존 방식(불완전하지만) 사용
-                    limit_price = row.get('day_open', 0)
+                else: 
+                    limit_price = row. get('day_open', 0)
             
-            elif name == 'ATOM_SUP_EMA200':
-                limit_price = row.get('ema_200', 0)
-
-            elif name == 'ROD_B':
-                limit_price = row.get('sma_200', 0)
-
+            # === [Support Group:  Moving Averages] ===
+            elif name == 'ATOM_SUP_EMA5': 
+                limit_price = row.get('ema_5', 0)
+                
+            elif name == 'ATOM_SUP_EMA20':
+                limit_price = row.get('ema_20', 0)
+                
             elif name == 'ATOM_SUP_EMA50':
                 limit_price = row.get('ema_50', 0)
                 
-            # (나머지 전략들은 기본 로직이 비슷하므로 필요시 추가)
+            elif name == 'ATOM_SUP_EMA200':
+                limit_price = row.get('ema_200', 0)
+
+            # === [Support Group: VWAP & BB] ===
+            elif name == 'ATOM_SUP_VWAP':
+                limit_price = row.get('vwap', 0)
+                
+            elif name == 'DIP_SNIPER':
+                # Bollinger Lower Band
+                limit_price = row.get('bb_lower', 0)
+
+            # === [Mean Reversion / Value] ===
+            elif name == 'MOL_CONFLUENCE':
+                # EMA 20 Confluence
+                limit_price = row. get('ema_20', 0)
+                
+            elif name == 'ROD_A':
+                # SMA 50 / EMA 50 Confluence (더 높은 값)
+                sma_50 = row.get('sma_50', 0)
+                ema_50 = row.get('ema_50', 0)
+                limit_price = max(sma_50, ema_50)
+                
+            elif name == 'ROD_B':
+                # SMA 200 Deep Value
+                limit_price = row.get('sma_200', 0)
+                
+            elif name == 'ROD_C':
+                # SMA 50 Value
+                limit_price = row.get('sma_50', 0)
             
             # 유효성 체크
-            if limit_price <= 0: continue
+            if pd.isna(limit_price) or limit_price <= 0: 
+                continue
             
-            # [수정] 매수 버퍼 (변수화)
+            # 매수 버퍼
             BUY_TOLERANCE = Config.BUY_TOLERANCE
-
             
-            # 진입 조건: 현재 저가(Low)가 지정가(Limit)를 건드렸는가?
+            # 진입 조건: 현재 저가(Low)가 지정가(Limit)를 건드렸는가? 
             current_low = row['low']
             
             if current_low <= limit_price * BUY_TOLERANCE:
@@ -105,5 +167,5 @@ class GapZoneStrategy:
                     'comment': f"{name} Signal"
                 }
         
-
         return None
+
