@@ -50,10 +50,9 @@ class RiskManager:
             if balances:
                 for item in balances:
                     qty = item['qty']
-                    # 현재가는 API에서 제공하는 필드명 확인 필요
-                    # 'current_price' 또는 'price' 등
-                    current_price = item.get('current_price', item.get('price', 0))
-                    total_value += qty * current_price
+                    # 'price' 필드는 이미 (qty * 현재가) 값임
+                    position_value = item.get('price', 0)
+                    total_value += position_value
             
             if self.daily_start_cash == 0:
                 return True, 0.0
@@ -339,7 +338,7 @@ def main():
                 if signal: 
                     # [수정] Price Staleness 방지: 주문 직전 가격 재확인
                     fresh_price_info = kis.get_current_price("NASD", sym)
-                    fresh_price = fresh_price_info. get('current_price', signal['price'])
+                    fresh_price = fresh_price_info.get('last', signal['price'])
                     
                     # 가격 변동 체크 (2% 이상 변동 시 스킵)
                     price_change_pct = abs(fresh_price - signal['price']) / signal['price']
@@ -386,3 +385,4 @@ def main():
 if __name__ == "__main__":
 
     main()
+
