@@ -127,11 +127,14 @@ def main():
         try:
             # 1. 수면 모드 체크
             is_active, reason = is_active_market_time()
+            logger.info(f"🕐 시간 체크: {reason} | 활성화={is_active}")
+
             if not is_active:
                 if not was_sleeping:
+                    logger.warning(f"💤 Sleep 모드 진입: {reason}")  # 강조
                     bot.send_message(f"💤 [Sleep Mode] {reason}")
                     was_sleeping = True
-                time.sleep(60) 
+                time.sleep(60)
                 continue
             
             if was_sleeping:
