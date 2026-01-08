@@ -111,7 +111,7 @@ class KisAuth:
             
             return {
                 'valid': self._is_token_valid(),
-                'expires_at': self.token_expired. strftime("%Y-%m-%d %H:%M:%S"),
+                'expires_at': self.token_expired.strftime("%Y-%m-%d %H:%M:%S"),
                 'remaining_seconds': int(remaining)
             }
                 
@@ -152,4 +152,5 @@ class KisAuth:
         except Exception as e:
 
             logger.error(f"토큰 파일 로드 중 오류: {e}")
+
 
