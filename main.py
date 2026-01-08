@@ -72,7 +72,7 @@ class RiskManager:
         if self.daily_start_time is None: 
             return True
         now = datetime.datetime.now(pytz.timezone('US/Eastern'))
-        if now.date() > self.daily_start_time. date():
+        if now.date() > self.daily_start_time.date():
             return True
         return False
 
@@ -340,10 +340,10 @@ def main():
                     fresh_price_info = kis.get_current_price("NASD", sym)
                     fresh_price = fresh_price_info.get('last', signal['price'])
                     
-                    # 가격 변동 체크 (2% 이상 변동 시 스킵)
+                    # 가격 변동 체크
                     price_change_pct = abs(fresh_price - signal['price']) / signal['price']
-                    if price_change_pct > 0.02:
-                        logger.warning(f"⚠️ {sym} 가격 급변 ({price_change_pct*100:.2f}%) - 매수 스킵")
+                    if price_change_pct > (Config.MAX_PRICE_DEVIATION_PCT / 100):
+                        logger.warning(f"⚠️ {sym} 가격 급변 ({price_change_pct*100:. 2f}%) - 매수 스킵")
                         continue
                     
                     qty = get_buy_qty(fresh_price)
@@ -356,7 +356,7 @@ def main():
                         ord_no = kis.buy_limit(sym, fresh_price, qty)
                         if ord_no:
                             bot.send_message(f"✅ 매수 주문 완료: {ord_no}")
-                            time.sleep(Config. MAIN_LOOP_INTERVAL_SEC)
+                            time.sleep(Config.MAIN_LOOP_INTERVAL_SEC)
                             break 
             time.sleep(10)
 
@@ -385,5 +385,6 @@ def main():
 if __name__ == "__main__":
 
     main()
+
 
 
