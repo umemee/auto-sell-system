@@ -1,7 +1,7 @@
 import requests
 import json
 import pandas as pd
-import time
+#import time
 from config import Config
 from infra.utils import get_logger, log_api_call
 
@@ -99,8 +99,8 @@ class KisApi:
                         holdings.append({
                             "symbol": item.get('ovrs_pdno'),
                             "qty": qty,
-                            "price": self._safe_float(item.get('ovrs_stck_evlu_amt')), 
-                            "pnl_pct": self._safe_float(item.get('frcr_evlu_pfls_rt'))
+                            "price": self._safe_float(item.get('ovrs_stck_evlu_amt')),  # 평가금액 (qty * 현재가)
+                            "pnl_pct": self._safe_float(item.get('frcr_evlu_pfls_rt'))  # 수익률 (%)
                         })
         except Exception as e:
             logger.error(f"잔고 조회 중 에러: {e}")
@@ -285,5 +285,6 @@ class KisApi:
             
         return pd.DataFrame()
 
-    def get_daily_candle(self, exchange, symbol, period=100): 
-        return pd.DataFrame()
+    # [DEPRECATED] 미구현 함수 - 사용 안 함
+    # def get_daily_candle(self, exchange, symbol, period=100): 
+    #     return pd. DataFrame()
