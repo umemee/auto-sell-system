@@ -32,7 +32,7 @@ class Config:
     
     # === [리스크 관리] ===
     MAX_POSITIONS = 1               # 동시 보유 종목 수
-    MAX_DAILY_LOSS_PCT = 6.0        # 하루 최대 손실률
+    MAX_DAILY_LOSS_PCT = 6.0        # 하루 최대 손실률 (%) - 초과 시 거래 중단
     ALL_IN_RATIO = 0.98             # 예수금의 98% 사용
     
     # === [시간 설정] ===
@@ -46,3 +46,14 @@ class Config:
     # === [주문 설정] ===
     BUY_TOLERANCE = 1.005           # 매수 허용 범위 (지정가 대비 +0.5%)
     SELL_BUFFER = 0.95              # 시장가 매도 버퍼 (현재가 대비 -5%)
+    
+    # === [안전장치 설정] ===
+    PRICE_RECHECK_ENABLED = True      # 주문 전 가격 재확인 활성화
+    MAX_PRICE_DEVIATION_PCT = 2.0     # 허용 가격 변동폭 (2%)
+    BALANCE_RECHECK_ENABLED = True    # 매수 전 잔고 재확인 활성화
+    TOKEN_AUTO_REFRESH = True         # 토큰 자동 갱신 활성화
+    
+    # === [모니터링 설정] ===
+    ENABLE_DETAILED_LOGGING = True    # 상세 로그 활성화
+    LOG_PRICE_CHECKS = True           # 가격 체크 로그 기록
+    LOG_BALANCE_CHECKS = True         # 잔고 체크 로그 기록
