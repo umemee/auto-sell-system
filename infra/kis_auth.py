@@ -77,6 +77,44 @@ class KisAuth:
             logger.error(f"Token 발급 실패: {e}")
             raise
 
+    def refresh_token(self):
+        """
+        외부에서 호출 가능한 토큰 강제 갱신 메서드
+        - main.py의 에러 핸들링에서 사용
+        - 인증 에러 발생 시 명시적 갱신 시도
+        """
+        with self._lock:
+            logger.info("🔑 토큰 강제 갱신 요청...")
+            try:
+                token = self._issue_new_token()
+                logger.info("✅ 토큰 강제 갱신 성공")
+                return token
+            except Exception as e:
+                logger. error(f"❌ 토큰 강제 갱신 실패: {e}")
+                raise
+    
+    def get_token_info(self):
+        """
+        토큰 상태 정보 반환 (디버깅/모니터링용)
+        Returns:  dict with 'valid', 'expires_at', 'remaining_seconds'
+        """
+        with self._lock:
+            if self.access_token is None or self.token_expired is None:
+                return {
+                    'valid': False,
+                    'expires_at': None,
+                    'remaining_seconds': 0
+                }
+            
+            now = datetime.now()
+            remaining = (self.token_expired - now).total_seconds()
+            
+            return {
+                'valid': self._is_token_valid(),
+                'expires_at': self.token_expired. strftime("%Y-%m-%d %H:%M:%S"),
+                'remaining_seconds': int(remaining)
+            }
+                
     def _save_token_to_disk(self):
         """토큰 정보를 파일로 저장 (캐싱)"""
         data = {
@@ -112,4 +150,5 @@ class KisAuth:
                 else:
                     logger.info("저장된 토큰이 만료되었습니다.")
         except Exception as e:
+
             logger.error(f"토큰 파일 로드 중 오류: {e}")
