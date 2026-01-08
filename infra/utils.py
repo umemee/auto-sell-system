@@ -63,7 +63,7 @@ def get_us_time():
     main.py는 내장된 시간 체크 로직을 사용합니다.
     하위 호환성을 위해 유지됩니다.
     """
-    us_eastern = pytz. timezone('America/New_York')
+    us_eastern = pytz.timezone('America/New_York')
     return datetime.datetime.now(us_eastern)
 
 def is_market_open():
@@ -111,3 +111,4 @@ def get_next_market_open():
         
 
     return target
+
