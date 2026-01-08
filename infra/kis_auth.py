@@ -90,7 +90,7 @@ class KisAuth:
                 logger.info("✅ 토큰 강제 갱신 성공")
                 return token
             except Exception as e:
-                logger. error(f"❌ 토큰 강제 갱신 실패: {e}")
+                logger.error(f"❌ 토큰 강제 갱신 실패: {e}")
                 raise
     
     def get_token_info(self):
@@ -152,3 +152,4 @@ class KisAuth:
         except Exception as e:
 
             logger.error(f"토큰 파일 로드 중 오류: {e}")
+
