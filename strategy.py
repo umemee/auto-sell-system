@@ -51,7 +51,7 @@ class GapZoneStrategy:
         df['ema_200'] = df['close'].ewm(span=200, adjust=False).mean().shift(1)
         
         # [지표 2] SMA (2종)
-        df['sma_50'] = df['close']. rolling(window=50).mean().shift(1)
+        df['sma_50'] = df['close'].rolling(window=50).mean().shift(1)
         df['sma_200'] = df['close'].rolling(window=200).mean().shift(1)
 
         # [지표 3] Bollinger Bands (DIP_SNIPER용)
@@ -83,7 +83,7 @@ class GapZoneStrategy:
 
     def get_buy_signal(self, df, symbol, current_price_data=None):
         """현재 데이터(df)를 보고 매수 신호가 있는지 판단"""
-        if df. empty or len(df) < 5: return None
+        if df.empty or len(df) < 5: return None
         
         # 지표 계산
         df = self.calculate_indicators(df)
@@ -108,7 +108,7 @@ class GapZoneStrategy:
                 if current_price_data and 'open' in current_price_data:
                     limit_price = current_price_data['open']
                 else: 
-                    limit_price = row. get('day_open', 0)
+                    limit_price = row.get('day_open', 0)
             
             # === [Support Group:  Moving Averages] ===
             elif name == 'ATOM_SUP_EMA5': 
@@ -134,7 +134,7 @@ class GapZoneStrategy:
             # === [Mean Reversion / Value] ===
             elif name == 'MOL_CONFLUENCE':
                 # EMA 20 Confluence
-                limit_price = row. get('ema_20', 0)
+                limit_price = row.get('ema_20', 0)
                 
             elif name == 'ROD_A':
                 # SMA 50 / EMA 50 Confluence (더 높은 값)
@@ -168,4 +168,5 @@ class GapZoneStrategy:
                 }
         
         return None
+
 
