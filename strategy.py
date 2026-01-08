@@ -56,7 +56,7 @@ class GapZoneStrategy:
 
         # [지표 3] Bollinger Bands (DIP_SNIPER용)
         sma_20 = df['close'].rolling(window=20).mean().shift(1)
-        std_20 = df['close']. rolling(window=20).std().shift(1)
+        std_20 = df['close'].rolling(window=20).std().shift(1)
         df['bb_lower'] = sma_20 - (2 * std_20)
 
         # [지표 4] VWAP
@@ -168,5 +168,6 @@ class GapZoneStrategy:
                 }
         
         return None
+
 
 
