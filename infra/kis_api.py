@@ -84,8 +84,8 @@ class KisApi:
             "ACNT_PRDT_CD": Config.ACNT_PRDT_CD,
             "OVRS_EXCG_CD": "NASD", 
             "TR_CRCY_CD": "USD", 
-            "CTX_AREA_FK200": "",  # <-- 여기 수정됨
-            "CTX_AREA_NK200": ""   # <-- 여기 수정됨
+            "CTX_AREA_FK200": "", 
+            "CTX_AREA_NK200": ""
         }
         holdings = []
         try:
@@ -130,7 +130,6 @@ class KisApi:
                 
         except Exception as e:
             logger.warning(f"⚠️ 등락률 조회 실패 또는 데이터 없음: {e}. 거래량 순위로 우회합니다.")
-            # 여기서 자동으로 아래의 _get_volume_ranking() 시도로 넘어감
             pass 
 
         try:
@@ -152,31 +151,40 @@ class KisApi:
             return data.get('output', [])
         return []
 
-    @log_api_call("현재가 조회")
+    @log_api_call("현재가 상세 조회")
     def get_current_price(self, exchange, symbol):
-        path = "/uapi/overseas-price/v1/quotations/price"
-        self._update_headers("HHDFS00000300")
-        lookup_excd = self._get_lookup_excd(exchange)
-        params = {"AUTH": "", "EXCD": lookup_excd, "SYMB": symbol}
+        # [수정] URL 변경: price -> price-detail (상세 시세)
+        path = "/uapi/overseas-price/v1/quotations/price-detail"
+        
+        # [수정] TR_ID 변경: HHDFS00000300(기본) -> HHDFS76200200(상세)
+        self._update_headers("HHDFS76200200")
+        
+        lookup_excd = self._get_lookup_excd(exchange) 
+        
+        params = {
+            "AUTH": "", 
+            "EXCD": lookup_excd, 
+            "SYMB": symbol
+        }
         
         try:
-            res = requests.get(f"{self.base_url}{path}", headers=self.headers, params=params)
+            res = requests.get(f"{self.base_url}{path}", headers=self.headers, params=params, timeout=10)
             data = res.json()
             
             if data['rt_cd'] == '0':
+                output = data['output']
+                # [수정] 상세 API는 open, high, low를 모두 제공합니다.
                 return {
-                    "last": self._safe_float(data['output']['last']),
-                    "open": self._safe_float(data['output']['open']),
-                    "high": self._safe_float(data['output']['high']),
-                    "low": self._safe_float(data['output']['low']),
-                    "volume": int(self._safe_float(data['output']['tvol']))
+                    "last": self._safe_float(output.get('last', 0)),
+                    "open": self._safe_float(output.get('open', 0)),
+                    "high": self._safe_float(output.get('high', 0)),
+                    "low": self._safe_float(output.get('low', 0)),
+                    "volume": int(self._safe_float(output.get('tvol', 0)))
                 }
             else:
-                # [수정] 실패 시 침묵하지 않고 경고 로그 출력
                 logger.warning(f"⚠️ 현재가 조회 실패 ({symbol}): {data.get('msg1')} (Code: {data.get('msg_cd')})")
                 
         except Exception as e:
-            # [수정] 에러 발생 시 로그 출력
             logger.error(f"❌ 현재가 조회 중 에러 ({symbol}): {e}")
             
         return None
@@ -185,44 +193,63 @@ class KisApi:
     def place_order_final(self, exchange, symbol, side, qty, price):
         path = "/uapi/overseas-stock/v1/trading/order"
         is_buy = (side == "BUY")
-        _id = "TTTT1002U" if is_buy else "TTTT1006U"
-        if "vts" in self.base_url: tr_id = "VTTT1002U" if is_buy else "VTTT1001U"
         
+        # [수정] 변수명을 tr_id로 명확히 통일했습니다.
+        if "vts" in self.base_url:
+            # 모의투자
+            tr_id = "VTTT1002U" if is_buy else "VTTT1001U"
+        else:
+            # 실전투자
+            tr_id = "TTTT1002U" if is_buy else "TTTT1006U"
+
         self._update_headers(tr_id)
-        
+
         f_price = float(price)
-        if f_price >= 1.0: final_price = f"{f_price:.2f}" 
-        else: final_price = f"{f_price:.4f}" 
-        
+        if f_price >= 1.0: final_price = f"{f_price:.2f}"
+        else: final_price = f"{f_price:.4f}"
+
         body = {
-            "CANO": Config.CANO, "ACNT_PRDT_CD": Config.ACNT_PRDT_CD,
-            "OVRS_EXCG_CD": exchange, "PDNO": symbol, "ORD_QTY": str(int(qty)),
-            "OVRS_ORD_UNPR": final_price, "ORD_SVR_DVSN_CD": "0", "ORD_DVSN": "00"
+            "CANO": Config.CANO, 
+            "ACNT_PRDT_CD": Config.ACNT_PRDT_CD,
+            "OVRS_EXCG_CD": exchange, 
+            "PDNO": symbol, 
+            "ORD_QTY": str(int(qty)),
+            "OVRS_ORD_UNPR": final_price, 
+            "ORD_SVR_DVSN_CD": "0", 
+            "ORD_DVSN": "00"
         }
+        
         try:
-            res = requests.post(f"{self.base_url}{path}", headers=self.headers, json=body)
+            res = requests.post(f"{self.base_url}{path}", headers=self.headers, json=body, timeout=10)
             data = res.json()
-            if data['rt_cd'] == '0': return data['output'].get('ODNO')
-            else: logger.error(f"주문실패 ({symbol}): {data.get('msg1')}")
-        except Exception as e: logger.error(f"API Error: {e}")
+            
+            if data['rt_cd'] == '0': 
+                return data['output'].get('ODNO')
+            else: 
+                logger.error(f"❌ 주문실패 ({symbol}): {data.get('msg1')} (Code: {data.get('msg_cd')})")
+        except Exception as e: 
+            logger.error(f"❌ API Error: {e}")
+            
         return None
 
-    def buy_limit(self, s, p, q): return self.place_order_final("NASD", s, "BUY", q, p)
+    # [중요] buy_limit 편의 함수 복원
+    def buy_limit(self, s, p, q): 
+        return self.place_order_final("NASD", s, "BUY", q, p)
 
-    # [수정] 미국 주식용 시장가 매도 (현재가 -5% 지정가로 투척) #
+    # [중요] sell_market 편의 함수 복원
     def sell_market(self, symbol, qty):
         """시장가 매도 시뮬레이션: 현재가 대비 5% 낮게 던져 즉시 체결 유도"""
         try:
             price_info = self.get_current_price("NASD", symbol)
             if not price_info: return None
-            
-            # [수정] 하드코딩된 0.95를 명확한 변수로 분리 (추후 Config 연동 권장)
-            SELL_BUFFER = 0.95 
+
+            SELL_BUFFER = Config.SELL_BUFFER
+
             limit_price = price_info['last'] * SELL_BUFFER
-            
+
             return self.place_order_final("NASD", symbol, "SELL", qty, limit_price)
         except: return None
-    
+
     def get_minute_candles(self, market, symbol, limit=100):
         path = "/uapi/overseas-price/v1/quotations/inquire-time-itemchartprice"
         self._update_headers("HHDFS76950200")
@@ -231,18 +258,32 @@ class KisApi:
             "NMIN": "1", "PINC": "1", "NEXT": "", "NREC": str(limit), "KEYB": ""
         }
         try:
-            res = requests.get(f"{self.base_url}{path}", headers=self.headers, params=params)
+            res = requests.get(f"{self.base_url}{path}", headers=self.headers, params=params, timeout=10)
             data = res.json()
             if data['rt_cd'] == '0' and data.get('output2'):
                 df = pd.DataFrame(data['output2'])
+                
+                # [수정] 거래량 필드명을 'vols'와 'evol' 모두 대응하도록 처리
                 df = df.rename(columns={
                     'kymd': 'date', 'khms': 'time',
-                    'open': 'open', 'high': 'high', 'low': 'low', 'last': 'close', 'vols': 'volume'
+                    'open': 'open', 'high': 'high', 'low': 'low', 
+                    'last': 'close', 
+                    'vols': 'volume', 
+                    'evol': 'volume'  # 해외주식 분봉 특화
                 })
+                
                 for col in ['open', 'high', 'low', 'close', 'volume']:
-                    df[col] = df[col].apply(self._safe_float)
+                    if col in df.columns:
+                        df[col] = df[col].apply(self._safe_float)
+                    
                 return df.sort_values('time')
-        except Exception: pass
+            else:
+                logger.warning(f"⚠️ 캔들 조회 실패 ({symbol}): {data.get('msg1')}")
+
+        except Exception as e:
+            logger.error(f"❌ 캔들 데이터 에러: {e}")
+            
         return pd.DataFrame()
-    
-    def get_daily_candle(self, exchange, symbol, period=100): return pd.DataFrame()
+
+    def get_daily_candle(self, exchange, symbol, period=100): 
+        return pd.DataFrame()

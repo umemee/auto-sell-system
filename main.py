@@ -12,8 +12,8 @@ from strategy import GapZoneStrategy
 logger = get_logger("Main")
 
 # [시간 설정] 미국 동부 시간(ET) 기준
-ACTIVE_START_HOUR = 4
-ACTIVE_END_HOUR = 16 
+ACTIVE_START_HOUR = Config.ACTIVE_START_HOUR
+ACTIVE_END_HOUR = Config.ACTIVE_END_HOUR
 
 def is_active_market_time():
     """현재 시간이 활동 시간(Pre~Close)인지, 주말인지 확인"""
@@ -29,7 +29,7 @@ def main():
     
     # 전역 변수 초기화
     last_heartbeat_time = time.time()
-    HEARTBEAT_INTERVAL = 30 * 60 
+    HEARTBEAT_INTERVAL = Config.HEARTBEAT_INTERVAL_SEC
     current_watchlist = [] 
     was_sleeping = False   
 
@@ -116,7 +116,7 @@ def main():
         try:
             cash = kis.get_buyable_cash()
             if cash < 50: return 0 
-            amount = cash * 0.98
+            amount = cash * Config.ALL_IN_RATIO
             return int(amount / price)
         except: return 0
 
@@ -170,7 +170,7 @@ def main():
                         reason = f"TP 달성 (+{raw_pnl:.2f}%)"
                     elif current_pnl_rate <= sl_rate:
                         sell_signal = True
-                        reason = f"SL 발동 ({pnl_pct:.2f}%)"
+                        reason = f"SL 발동 ({raw_pnl:.2f}%)"
                         
                     if sell_signal:
                         msg = f"👋 [{reason}] 매도 시도: {sym} ({qty}주)"
@@ -224,7 +224,7 @@ def main():
                         ord_no = kis.buy_limit(sym, price, qty)
                         if ord_no:
                             bot.send_message(f"✅ 매수 주문 완료: {ord_no}")
-                            time.sleep(60)
+                            time.sleep(Config.MAIN_LOOP_INTERVAL_SEC)
                             break 
 
             time.sleep(10)

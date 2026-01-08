@@ -1,5 +1,7 @@
 import pandas as pd
 import numpy as np
+from config import Config
+
 
 # ==========================================
 # 🎯 GAPZONE STRATEGY LEGOS (Zone 1)
@@ -90,7 +92,8 @@ class GapZoneStrategy:
             if limit_price <= 0: continue
             
             # [수정] 매수 버퍼 (변수화)
-            BUY_TOLERANCE = 1.005 # 0.5% 위까지는 매수 허용
+            BUY_TOLERANCE = Config.BUY_TOLERANCE
+
             
             # 진입 조건: 현재 저가(Low)가 지정가(Limit)를 건드렸는가?
             current_low = row['low']
