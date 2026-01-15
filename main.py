@@ -164,9 +164,9 @@ def main():
 
                 # 3. 매도 실행
                 if sell_signal:
-                    order_manager.execute_sell(portfolio, ticker, reason)
-                    bot.send_message(f"👋 [{reason}] 매도 실행: {ticker}")
-
+                    result_msg = order_manager.execute_sell(portfolio, ticker, reason)
+                    if result_msg:
+                        bot.send_message(result_msg)
 
             # 4. [ENTRY] 진입 로직
             # 슬롯이 꽉 찼으면 스캔조차 하지 않음 (API 절약 & 뇌동매매 방지)
@@ -196,18 +196,14 @@ def main():
                 
                 if signal:
                     signal['ticker'] = sym
+                    # execute_buy가 이제 메시지를 통째로 리턴함
+                    result_msg = order_manager.execute_buy(portfolio, signal)
                     
-                    # [Double Engine] OrderManager에게 매수 위임
-                    # 자금 계산, 호가 계산, 로컬 업데이트 등은 매니저가 알아서 함
-                    ord_no = order_manager.execute_buy(portfolio, signal)
-                    
-                    if ord_no:
-                        msg = f"⚡ [{active_strategy.name}] 매수 체결! {sym}\n주문번호: {ord_no}"
-                        bot.send_message(msg)
+                    if result_msg:
+                        bot.send_message(result_msg) # 깔끔하게 메시지만 전송
                         
-                        # 체결 후 슬롯이 다 찼는지 확인해보고 루프 탈출
                         if not portfolio.has_open_slot():
-                            break 
+                            break
             
             # 5. 생존 신고
             if time.time() - last_heartbeat_time > HEARTBEAT_INTERVAL:
