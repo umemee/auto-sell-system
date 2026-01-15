@@ -1,127 +1,50 @@
-# requirements.txt - 해외주식 자동매도 시스템 (기획서 v2.0)
+# requirements.txt - 해외주식 자동매도 시스템 (기획서 v2.0 & 실전 매매 통합)
 # 작성일: 2025-10-21
 # Python 3.8 이상 필요
 
 # ================================
-# 핵심 의존성 (기획서 필수)
+# 1. 핵심 의존성 (System Core)
 # ================================
 
 # HTTP 클라이언트 (한국투자증권 API 호출)
-# - auth.py: 토큰 발급
-# - order.py: 주문 API
-# - telegram_bot.py: 텔레그램 API
 requests~=2.31.0
 
 # WebSocket 클라이언트 (실시간 체결 데이터)
-# - websocket_client.py: 정규장 실시간 체결 수신
 websocket-client~=1.8.0
 
-# YAML 파서 (설정 파일 로드)
-# - config.py: config.yaml 읽기
+# YAML 파서 & 환경 변수 (설정 로드)
 PyYAML~=6.0.1
-
-# 환경 변수 관리 (.env 파일)
-# - config.py: API 키, 계좌번호 등
 python-dotenv~=1.0.0
 
-# 시간대 처리 (미국 동부시간)
-# - order.py: is_market_hours() 함수
-# - websocket_client.py: 정규장 시간 판별
+# 시간대 처리 (미국 동부시간 계산)
 pytz~=2024.1
 
 # ================================
-# 보안 관련 의존성
+# 2. 데이터 분석 (Data Science)
+# ================================
+# 전략 계산(EMA) 및 캔들 데이터 처리에 필수
+pandas~=2.2.0
+numpy>=1.24.0
+
+# ================================
+# 3. 보안 관련 (Security)
 # ================================
 
-# HTTP 라이브러리 (requests 의존성)
-# 보안 패치가 적용된 최신 버전 사용
+# HTTP 라이브러리 보안 패치
 urllib3~=2.1.0
-pandas
 
 # SSL 인증서 (HTTPS 통신)
-# 한국투자증권 API SSL 인증
 certifi>=2023.11.17
-pandas~=2.2.0
+
 # ================================
-# 선택적 의존성
+# 4. 선택적 의존성 (Optional)
 # ================================
 
-# 웹 인터페이스 (선택 사항)
-# - web_interface.py: 모니터링 대시보드
-# 주의: 기획서에 포함되지 않은 선택적 기능
-# 설치 방법: pip install -r requirements.txt
-# 미설치 시: 시스템은 정상 작동 (텔레그램으로 모니터링)
+# 웹 대시보드 (필요 시에만 설치)
 flask~=3.0.0
-
-# Flask 보안 강화 (flask 의존성)
 werkzeug~=3.0.1
 
 # ================================
-# 버전 관리 정책
+# 설치 가이드
 # ================================
-# ~= : 호환 릴리스 (권장)
-#      예: ~=2.31.0 → 2.31.x만 허용
-# >= : 최소 버전 (보안상 명시)
-#      예: >=2023.11.17 → 보안 패치 버전 이상
-
-# ================================
-# 설치 방법
-# ================================
-# 전체 설치 (웹 인터페이스 포함):
-#   pip install -r requirements.txt
-#
-# 핵심만 설치 (웹 제외):
-#   pip install requests websocket-client PyYAML python-dotenv pytz urllib3 certifi
-#
-# 업그레이드:
-#   pip install --upgrade -r requirements.txt
-
-# ================================
-# 보안 취약점 검사
-# ================================
-# 정기적으로 실행 권장:
-#   pip install safety
-#   safety check -r requirements.txt
-#
-# 또는:
-#   pip-audit
-
-# ================================
-# 호환성 정보
-# ================================
-# Python 버전: 3.8, 3.9, 3.10, 3.11, 3.12
-# OS: Linux (AWS EC2 Ubuntu), macOS, Windows
-# 테스트: Ubuntu 22.04 LTS, Python 3.10
-
-# ================================
-# 라이선스 정보
-# ================================
-# requests: Apache 2.0
-# websocket-client: Apache 2.0
-# PyYAML: MIT
-# python-dotenv: BSD-3-Clause
-# pytz: MIT
-# flask: BSD-3-Clause
-# urllib3: MIT
-# certifi: MPL-2.0
-
-# ================================
-# 알려진 문제
-# ================================
-# 1. websocket-client 1.7.0: 일부 환경에서 reconnect 이슈
-#    → 1.8.0 사용 권장
-#
-# 2. PyYAML 5.x: 보안 취약점 (CVE-2020-14343)
-#    → 6.0.1 이상 필수
-#
-# 3. urllib3 < 2.0.7: HTTPS 연결 취약점
-#    → 2.1.0 권장
-
-# ================================
-# 개발 도구 (별도 설치)
-# ================================
-# requirements-dev.txt 참조:
-# - pytest: 테스트
-# - black: 코드 포매팅
-# - flake8: 린터
-# - mypy: 타입 체크
+# pip install -r requirements.txt
