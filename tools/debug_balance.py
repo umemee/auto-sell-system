@@ -12,7 +12,7 @@ from infra.kis_api import KisApi
 logging.basicConfig(level=logging.INFO)
 
 def debug_balance():
-    print("🔍 [Balance Debugger] 계좌 잔고 정밀 분석 시작...")
+    print("🔍 [Balance Debugger] 계좌 '주문 가능 금액(Buying Power)' 정밀 분석")
     
     try:
         auth = KisAuth()
@@ -21,11 +21,18 @@ def debug_balance():
         print(f"❌ 초기화 실패: {e}")
         return
 
-    print(f"📋 설정된 계좌 정보: {Config.CANO} - {Config.ACNT_PRDT_CD}")
+    print(f"📋 계좌 정보: {Config.CANO} - {Config.ACNT_PRDT_CD}")
     
-    path = "/uapi/overseas-stock/v1/trading/inquire-present-balance"
-    tr_id = "VTRP6504R" if "vts" in kis.base_url else "CTRP6504R"
+    # ---------------------------------------------------------
+    # [Target API] inquire-psamount (실제 주문 가능 금액)
+    # ---------------------------------------------------------
+    path = "/uapi/overseas-stock/v1/trading/inquire-psamount"
+    tr_id = "TTTS3007R" # 실전 투자용 ID
     
+    # 모의투자인 경우 URL/TR_ID 변경 필요 (Config 확인)
+    if "vts" in kis.base_url:
+        tr_id = "VTTS3007R"
+
     headers = {
         "content-type": "application/json; charset=utf-8",
         "authorization": f"Bearer {auth.get_token()}",
@@ -35,19 +42,17 @@ def debug_balance():
         "custtype": "P"
     }
     
-    # [Critical Fix] TR_MK -> TR_MKET_CD 수정
     params = {
         "CANO": Config.CANO,
         "ACNT_PRDT_CD": Config.ACNT_PRDT_CD,
-        "WCRC_FRCR_DVSN_CD": "02",
-        "NATN_CD": "840",
-        "TR_MKET_CD": "00", # 올바른 파라미터명
-        "INQR_DVSN_CD": "00"
+        "OVRS_EXCG_CD": "NASD",
+        "OVRS_ORD_UNPR": "",
+        "ITEM_CD": ""
     }
     
-    import requests
     print(f"📡 API 요청 중... (TR_ID: {tr_id})")
     try:
+        import requests
         res = requests.get(f"{kis.base_url}{path}", headers=headers, params=params)
         data = res.json()
         
@@ -57,30 +62,20 @@ def debug_balance():
         
         if data.get('rt_cd') != '0':
             print(f"❌ 조회 실패: {data.get('msg1')} (Code: {data.get('rt_cd')})")
-            print("👉 힌트: 계좌번호 확인, .env 파일 확인")
             return
 
-        output2 = data.get('output2', [])
-        if output2:
-            balance_info = output2[0]
-            usd_cash = balance_info.get('frcr_dncl_amt_2')
-            withdrawable = balance_info.get('frcr_drwg_psbl_amt_1')
-            print(f"💰 외화예수금 (USD): ${usd_cash}")
-            print(f"💰 출금가능액 (USD): ${withdrawable}")
-        else:
-            print("⚠️ 잔고 데이터가 비어있습니다.")
-
-        print("-" * 30)
-        output1 = data.get('output1', [])
-        print(f"📦 보유 종목 수: {len(output1)}")
-        for item in output1:
-            sym = item.get('ovrs_pdno')
-            name = item.get('ovrs_item_name')
-            qty = item.get('ovrs_cblc_qty')
-            print(f"   - {sym} ({name}): {qty}주")
+        output = data.get('output', {})
+        
+        # [중요] 실제 주문에 사용되는 필드
+        buying_power = output.get('frcr_ord_psbl_amt1', '0')
+        
+        print(f"💰 주문 가능 외화(USD): ${buying_power}")
+        print(f"👉 이 금액이 RealPortfolio에서 'self.balance'로 사용됩니다.")
+        print("-" * 40)
+        print(f"Raw Output: {json.dumps(output, indent=2, ensure_ascii=False)}")
 
     except Exception as e:
-        print(f"❌ 에러 발생: {e}")
+        print(f"❌ 실행 중 에러 발생: {e}")
 
 if __name__ == "__main__":
     debug_balance()

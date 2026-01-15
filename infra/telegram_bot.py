@@ -86,45 +86,43 @@ class TelegramBot:
 
     # === [Commands] ===
     def _cmd_status(self):
-        """/status: 현재 시스템 상태 조회"""
+        """/status: 현재 시스템 상태 조회 (Double Engine 호환)"""
         if not self.status_provider:
             self.send_message("⚠️ 시스템 연결 대기 중...")
             return
 
-        # main.py에서 데이터 가져오기
         data = self.status_provider()
         
-        # 포지션 정보 포맷팅
-        pos_info = "없음 (스캐닝 중... 🔭)"
-        if data['position']:
-            p = data['position']
-            curr_price = p.get('current_price', p['entry_price'])
-            pnl_pct = ((curr_price - p['entry_price']) / p['entry_price']) * 100
-            icon = "🔴" if pnl_pct < 0 else "🟢"
-            pos_info = (
-                f"\n   📦 <b>{p['symbol']}</b> {p['qty']}주"
-                f"\n   평단: ${p['entry_price']}"
-                f"\n   현재: ${curr_price} ({icon} {pnl_pct:.2f}%)"
-            )
+        # [수정] 포지션 정보 (딕셔너리 순회)
+        positions = data.get('positions', {})
+        pos_msg = ""
+        
+        if not positions:
+            pos_msg = "없음 (Empty Slot)"
+        else:
+            for ticker, p in positions.items():
+                # RealPortfolio가 주는 키값 사용
+                pnl = p.get('pnl_pct', 0.0)
+                icon = "🔴" if pnl < 0 else "🟢"
+                pos_msg += (
+                    f"\n   📦 <b>{ticker}</b> {p['qty']}주"
+                    f"\n      수익률: {icon} {pnl:.2f}%"
+                    f"\n      평가액: ${p['eval_value']:.2f}\n"
+                )
 
-        # 타겟 리스트 포맷팅
-        targets = data['targets']
+        # 타겟 리스트
+        targets = data.get('targets', [])
         target_str = ", ".join(targets) if targets else "없음"
 
-        # One-Shot 졸업생
-        oneshot_list = list(data['oneshot'])
-        oneshot_str = ", ".join(oneshot_list) if oneshot_list else "없음"
-
         msg = (
-            f"📊 <b>[GapZone Dashboard]</b>\n"
+            f"📊 <b>[GapZone Dashboard v4]</b>\n"
             f"━━━━━━━━━━━━━━━━\n"
-            f"💰 <b>예수금:</b> ${data['cash']:,.2f}\n"
-            f"📉 <b>금일 손실:</b> ${data['loss']:.2f} (Limit: ${data['loss_limit']})\n"
+            f"💰 <b>총 자산:</b> ${data['total_equity']:,.2f}\n"
+            f"💵 <b>현금:</b> ${data['cash']:,.2f}\n"
             f"━━━━━━━━━━━━━━━━\n"
-            f"🔭 <b>감시 중 ({len(targets)}):</b>\n"
+            f"🔭 <b>감시 중:</b>\n"
             f"👉 {target_str}\n\n"
-            f"🎣 <b>현재 포지션:</b> {pos_info}\n\n"
-            f"✅ <b>One-Shot 완료:</b> {oneshot_str}\n"
+            f"🎣 <b>보유 포지션 ({len(positions)}):</b>{pos_msg}\n"
             f"⏰ <b>Update:</b> {datetime.now().strftime('%H:%M:%S')}"
         )
         self.send_message(msg)

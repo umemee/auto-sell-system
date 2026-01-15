@@ -22,7 +22,7 @@ class Config:
     TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
     # === [Zone 1 전략 설정] ===
-    ACTIVE_STRATEGY = "NEW_PRE"
+    ACTIVE_STRATEGY = "EMA_ZONE1"
     
     # === [KIS API] ===
     BASE_URL = "https://openapi.koreainvestment.com:9443"
@@ -57,3 +57,31 @@ class Config:
     ENABLE_DETAILED_LOGGING = True    # 상세 로그 활성화
     LOG_PRICE_CHECKS = True           # 가격 체크 로그 기록
     LOG_BALANCE_CHECKS = True         # 잔고 체크 로그 기록
+
+    # ==========================================
+    # 🎯 ACTIVE STRATEGY CONTROL (전략 스위치)
+    # ==========================================
+    # 사용할 전략의 이름을 정확히 입력하세요 (EMA_ZONE1, NEW_PRE, GAP_ZONE2 등)
+    ACTIVE_STRATEGY = "EMA_ZONE1"
+
+    # ==========================================
+    # ⚙️ STRATEGY PARAMETERS (Zone 1: EMA High Beta)
+    # ==========================================
+    # 🧪 Optimization Results (최적화 결과 적용)
+    # ==========================================
+    # Optimizer가 찾아낸 최적 값을 여기에 적으세요.
+    EMA_LENGTH = 10       # 안정성과 반응속도의 균형
+    
+    # [Exit Strategy]
+    # TP_PCT는 트레일링 스탑 발동 기준(Activation)으로 사용됩니다.
+    TP_PCT = 0.06         # 6% 수익 시 트레일링 스탑 발동 (Trigger)
+    TS_CALLBACK = 0.01    # 고점 대비 1% 하락 시 매도 (Trail)
+    
+    SL_PCT = 0.45         # 45% 손절 (생존 우선, 휩소 방지)
+    
+    # [Double Engine Setting]
+    MAX_SLOTS = 2         # 2 슬롯 체제
+    ALL_IN_RATIO = 0.98   # 예수금의 98% 사용
+    
+    # [Scan Setting]
+    MIN_CHANGE_PCT = 40.0 # 필터 약간 완화 (40)하여 기회 포착 증대
