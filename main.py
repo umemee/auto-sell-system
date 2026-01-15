@@ -93,6 +93,25 @@ def main():
     # ---------------------------------------------------------
     while True:
         try:
+            now_et = datetime.datetime.now(pytz.timezone('US/Eastern'))
+            
+            # 15시 50분 이후라면 (장 마감 10분 전)
+            if now_et.hour == 15 and now_et.minute >= 50:
+                if portfolio.positions: # 보유 포지션이 있다면
+                    bot.send_message("🚨 [장 마감 임박] 모든 포지션을 강제 청산합니다. (End of Session)")
+                    logger.warning("🚨 [EOS] Force Liquidation Triggered!")
+                    
+                    # 모든 종목 매도
+                    for ticker in list(portfolio.positions.keys()):
+                        msg = order_manager.execute_sell(portfolio, ticker, "End of Session (EOS)")
+                        if msg: bot.send_message(msg)
+                        time.sleep(1) # API 과부하 방지
+                
+                # 청산 후에는 60초 대기 (장 마감까지 불필요한 연산 방지)
+                logger.info(f"💤 장 마감 대기 중... ({now_et.strftime('%H:%M')})")
+                time.sleep(60)
+                continue
+            
             # 1. 시간 체크
             is_active, reason = is_active_market_time()
             if not is_active:

@@ -30,37 +30,33 @@ class EmaStrategy:
         # 실전에서는 속도를 위해 TA-Lib 대신 Pandas ewm 사용 (충분히 빠름)
         ema = df['close'].ewm(span=self.ma_length, adjust=False).mean()
         
-        # 2. 로직 검증 (백테스팅과 100% 동일해야 함)
-        # Condition:
-        #  (1) 이전 봉 저가 < 이전 EMA (Dip 발생)
-        #  (2) 현재 봉 종가 > 현재 EMA (Rebound 성공)
+        # [백테스트 로직 동기화]
+        # iloc[-1]: 현재 실시간 진행 중인 봉 (Current Bar)
+        # iloc[-2]: 직전에 완성된 봉 (Previous Bar)
         
-        prev_close = df['close'].iloc[-2]
-        prev_low = df['low'].iloc[-2]
-        prev_ema = ema.iloc[-2]
-
-        curr_close = df['close'].iloc[-1]
+        # 1. 현재 가격 정보
+        curr_price = df['close'].iloc[-1] 
         curr_ema = ema.iloc[-1]
-        curr_time = df['time'].iloc[-1] # 혹은 index
-
-        # [Logic Core]
-        is_dip = prev_low < prev_ema
-        is_rebound = curr_close > curr_ema
         
-        # 추가 필터: 거래량이 너무 없으면 제외 (선택 사항)
-        # if df['volume'].iloc[-1] < 1000: return None
+        # 2. 직전 봉 정보 (완성된 봉 기준)
+        prev_low = df['low'].iloc[-2]  # 전 봉의 저가
+        prev_ema = ema.iloc[-2]        # 전 봉의 EMA
 
+        # [전략 핵심 로직]
+        # 조건 1 (Dip): 전 봉의 저가가 EMA보다 낮았어야 함 (눌림목 발생)
+        # 조건 2 (Rebound): 현재 가격이 EMA보다 높아야 함 (반등 성공)
+        is_dip = prev_low < prev_ema
+        is_rebound = curr_price > curr_ema
+        
         if is_dip and is_rebound:
-            self.logger.info(f"✨ [Signal] {self.name} Dip & Rebound Confirmed!")
-            self.logger.info(f"   Prev Low(${prev_low:.2f}) < EMA(${prev_ema:.2f})")
-            self.logger.info(f"   Curr Close(${curr_close:.2f}) > EMA(${curr_ema:.2f})")
-            
+            # 매수 신호 발생
             return {
                 'type': 'BUY',
                 'strategy': self.name,
-                'price': curr_close,
-                'time': curr_time,
-                'reason': f"Dip({prev_low} < {prev_ema:.2f}) -> Rebound"
+                'price': curr_price,
+                'ticker': "UNKNOWN", 
+                'time': df['time'].iloc[-1],
+                'reason': f"Dip(Low {prev_low} < EMA) & Rebound(Price {curr_price} > EMA)"
             }
             
         return None
