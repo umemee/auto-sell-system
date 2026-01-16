@@ -73,7 +73,7 @@ class RealOrderManager:
         return None
 
     def execute_sell(self, portfolio, ticker, reason="Unknown"):
-        """매도 집행"""
+        """매도 집행: 전량 매도 -> API 주문 -> 로컬 장부 반영"""
         # 1. 포지션 확인
         pos = portfolio.get_position(ticker)
         if not pos:
@@ -81,9 +81,16 @@ class RealOrderManager:
             return None
             
         qty = pos['qty']
-        current_price = pos['current_price']
-        pnl_pct = pos.get('pnl_pct', 0.0)
-        total_val = qty * current_price
+        current_price = pos['current_price'] # 현재가 (예상 매도가)
+        
+        # [수정 위치] 수익률 계산을 주문 전송 '전'에 미리 수행 (삭제되기 전에)
+        entry_price = pos.get('entry_price', 0)
+        if entry_price > 0:
+            pnl_pct = ((current_price - entry_price) / entry_price) * 100
+        else:
+            pnl_pct = 0.0
+            
+        total_val = qty * current_price # 예상 총액
         
         logger.info(f"👋 [SELL EXEC] {ticker} {qty}주 (Reason: {reason})")
 
@@ -91,16 +98,16 @@ class RealOrderManager:
         ord_no = self.kis.sell_market(ticker, qty)
         
         if ord_no:
-            # 3. [중요] 주문 성공 시 Portfolio에서 즉시 삭제 (Phantom Sell 방지)
+            # 3. 로컬 반영 (포지션 삭제)
             fill_data = {
                 'type': 'SELL',
                 'ticker': ticker,
                 'qty': qty,
-                'price': current_price # 단순 기록용
+                'price': current_price 
             }
             portfolio.update_local_after_order(fill_data)
             
-            # [NEW] 텔레그램 전송용 상세 메시지 생성
+            # [메시지 생성] - 미리 계산해둔 pnl_pct 사용
             icon = "🔴" if pnl_pct < 0 else "🟢"
             msg = (
                 f"👋 <b>매도 체결 완료</b> [{reason}]\n"
@@ -111,6 +118,9 @@ class RealOrderManager:
                 f"📊 수익률: {icon} {pnl_pct:.2f}%\n"
                 f"📝 주문번호: {ord_no}"
             )
-            return msg # 메시지 문자열 반환
+            return msg # 메시지 리턴
             
+        return None
+            
+
         return None
