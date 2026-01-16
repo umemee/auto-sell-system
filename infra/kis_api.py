@@ -173,10 +173,16 @@ class KisApi:
         return []
 
     @log_api_call("현재가 상세 조회")
-    def get_current_price(self, exchange, symbol):
+    def get_current_price(self, symbol, exchange="NAS"):
+        """
+        [실시간 현재가 조회]
+        - 반환값: 현재가(float) 단일 값
+        - main.py와의 호환성을 위해 exchange="NAS" 기본값 설정 및 반환 타입 수정
+        """
         path = "/uapi/overseas-price/v1/quotations/price-detail"
         self._update_headers("HHDFS76200200")
         
+        # exchange가 없으면 NAS(나스닥)으로 간주 (필요 시 로직 추가)
         lookup_excd = self._get_lookup_excd(exchange) 
         
         params = {
@@ -186,25 +192,20 @@ class KisApi:
         }
         
         try:
-            res = requests.get(f"{self.base_url}{path}", headers=self.headers, params=params, timeout=10)
+            res = requests.get(f"{self.base_url}{path}", headers=self.headers, params=params, timeout=5)
             data = res.json()
             
             if data['rt_cd'] == '0':
                 output = data['output']
-                return {
-                    "last": self._safe_float(output.get('last', 0)),
-                    "open": self._safe_float(output.get('open', 0)),
-                    "high": self._safe_float(output.get('high', 0)),
-                    "low": self._safe_float(output.get('low', 0)),
-                    "volume": int(self._safe_float(output.get('tvol', 0)))
-                }
+                # [중요] 딕셔너리 전체가 아니라 '현재가(last)' 숫자만 반환해야 함!
+                return self._safe_float(output.get('last', 0))
             else:
-                self.logger.warning(f"⚠️ 현재가 조회 실패 ({symbol}): {data.get('msg1')} (Code: {data.get('msg_cd')})")
+                self.logger.warning(f"⚠️ 현재가 조회 실패 ({symbol}): {data.get('msg1')}")
+                return None
                 
         except Exception as e:
             self.logger.error(f"❌ 현재가 조회 중 에러 ({symbol}): {e}")
-            
-        return None
+            return None
 
     @log_api_call("주문 전송")
     def place_order_final(self, exchange, symbol, side, qty, price):

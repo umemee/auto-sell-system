@@ -33,8 +33,7 @@ def main():
     # [시스템 상태 변수]
     last_heartbeat_time = time.time()
     HEARTBEAT_INTERVAL = getattr(Config, 'HEARTBEAT_INTERVAL_SEC', 1800)
-    was_sleeping = False
-    current_watchlist = []
+    current_date_str = datetime.datetime.now(pytz.timezone('US/Eastern')).strftime("%Y-%m-%d")
 
     try:
         # 1. 인프라 초기화
@@ -93,153 +92,122 @@ def main():
     # ---------------------------------------------------------
     while True:
         try:
+            # 🗓️ 0. [Daily Reset] 날짜 변경 감지 및 밴 리스트 초기화
+            # 최초 시행시 날짜 설정
             now_et = datetime.datetime.now(pytz.timezone('US/Eastern'))
+            new_date_str = now_et.strftime("%Y-%m-%d")
             
-            # 15시 50분 이후라면 (장 마감 10분 전)
-            if now_et.hour == 15 and now_et.minute >= 50:
-                if portfolio.positions: # 보유 포지션이 있다면
-                    bot.send_message("🚨 [장 마감 임박] 모든 포지션을 강제 청산합니다. (End of Session)")
-                    logger.warning("🚨 [EOS] Force Liquidation Triggered!")
-                    
-                    # 모든 종목 매도
-                    for ticker in list(portfolio.positions.keys()):
-                        msg = order_manager.execute_sell(portfolio, ticker, "End of Session (EOS)")
-                        if msg: bot.send_message(msg)
-                        time.sleep(1) # API 과부하 방지
+            # 날짜가 바뀌었으면 (미국 시간 기준)
+            if new_date_str != current_date_str:
+                logger.info(f"📅 [New Day] 날짜 변경 감지: {current_date_str} -> {new_date_str}")
                 
-                # 청산 후에는 60초 대기 (장 마감까지 불필요한 연산 방지)
-                logger.info(f"💤 장 마감 대기 중... ({now_et.strftime('%H:%M')})")
-                time.sleep(60)
-                continue
-            
-            # 1. 시간 체크
-            is_active, reason = is_active_market_time()
+                # 금일 매매 금지 리스트 초기화
+                portfolio.ban_list.clear()
+                logger.info("✨ 금일 매매 금지 리스트(Ban List) 초기화 완료")
+                
+                # 날짜 업데이트
+                current_date_str = new_date_str
+            # 1. 장 운영 시간 체크
+            is_active, market_status = is_active_market_time()
             if not is_active:
-                if not was_sleeping:
-                    logger.warning(f"💤 Sleep Mode: {reason}")
-                    bot.send_message(f"💤 [Sleep] {reason}")
-                    was_sleeping = True
+                if time.time() - last_heartbeat_time > HEARTBEAT_INTERVAL:
+                    logger.info(f"💤 장 마감/대기 중 ({market_status})")
+                    last_heartbeat_time = time.time()
                 time.sleep(60)
                 continue
+
+            # 2. 시장 스캔 (급등주 포착)
+            # market_listener.py의 scan_markets()는 리스트를 반환해야 합니다.
+            detected_stocks = listener.scan_markets() 
             
-            if was_sleeping:
-                bot.send_message("🌅 [Wake Up] 시장 감시 재개!")
-                was_sleeping = False
-                portfolio.sync_with_kis() # 자고 일어났으니 계좌 확인
-
-            # 2. [SYNC] 현실 동기화 (가장 중요)
-            # 매 루프마다 내 장부와 증권사 장부를 맞춤
-            portfolio.sync_with_kis()
-
-            # 3. [EXIT] 청산 로직 (보유 종목 순회)
-            # 딕셔너리 변경 에러 방지를 위해 list(keys) 사용
-            for ticker in list(portfolio.positions.keys()):
-                pos = portfolio.positions[ticker]
-                
-                # 현재가 및 수익률 계산
-                current_price = pos['current_price']
-                entry_price = pos['entry_price']
-                pnl_rate = pos['pnl_pct'] / 100.0
-                
-                # -------------------------------------------------------
-                # [Logic] Trailing Stop & Hard Stop Loss
-                # -------------------------------------------------------
-                sell_signal = False
-                reason = ""
-                
-                # 1. 고가 갱신 (High Water Mark) 트래킹
-                # 포지션 딕셔너리에 'highest_price'가 없으면 초기화
-                if 'highest_price' not in pos:
-                    pos['highest_price'] = current_price
-                
-                # 고가 갱신
-                if current_price > pos['highest_price']:
-                    pos['highest_price'] = current_price
-                    # (선택) 고가 갱신 로그가 너무 많으면 주석 처리
-                    # logger.debug(f"📈 [{ticker}] 고점 갱신: ${pos['highest_price']:.2f}")
-
-                # 2. 트레일링 스탑 계산
-                # Config에서 설정 로드
-                ts_trigger = Config.TP_PCT       # 예: 0.06 (6%)
-                ts_callback = getattr(Config, 'TS_CALLBACK', 0.01) # 예: 0.01 (1%)
-                
-                # 최고 수익률 계산
-                max_pnl_rate = (pos['highest_price'] - entry_price) / entry_price
-                
-                # A. 트레일링 스탑 발동 조건 충족? (수익이 Trigger 이상 났었는가?)
-                if max_pnl_rate >= ts_trigger:
-                    # 매도 기준가 계산 (최고가 대비 Callback 만큼 하락한 가격)
-                    trail_stop_price = pos['highest_price'] * (1 - ts_callback)
+            # ------------------------------------------------------
+            # 3. 매수 신호 처리 (진입) - Buy Loop
+            # ------------------------------------------------------
+            if detected_stocks:
+                # [수정 요청하신 부분] 감지된 종목을 하나씩 순회합니다.
+                for sym in detected_stocks:
                     
-                    if current_price <= trail_stop_price:
-                        sell_signal = True
-                        reason = f"Trailing Stop (High: ${pos['highest_price']:.2f} -> Now: ${current_price:.2f})"
-                
-                # B. 하드 손절 (Hard Stop Loss)
-                # Config.SL_PCT (예: 0.45)
-                elif pnl_rate <= -Config.SL_PCT:
-                    sell_signal = True
-                    reason = f"Stop Loss ({pnl_rate*100:.2f}%)"
-
-                # 3. 매도 실행
-                if sell_signal:
-                    result_msg = order_manager.execute_sell(portfolio, ticker, reason)
-                    if result_msg:
-                        bot.send_message(result_msg)
-
-            # 4. [ENTRY] 진입 로직
-            # 슬롯이 꽉 찼으면 스캔조차 하지 않음 (API 절약 & 뇌동매매 방지)
-            if not portfolio.has_open_slot():
-                # logger.debug("🔒 슬롯 Full - 스캔 건너뜀")
-                time.sleep(10)
-                continue
-
-            # 슬롯 남음 -> 스캔 시작
-            scanned_targets = listener.scan_markets()
-            current_watchlist = scanned_targets
-            
-            if not scanned_targets:
-                time.sleep(10) # 감시 대상 없으면 대기
-                continue
-
-            for sym in scanned_targets:
-                # 이미 보유중이면 패스
-                if portfolio.is_holding(sym): continue
-                
-                # 전략 검증을 위한 캔들 조회
-                df = kis.get_minute_candles("NASD", sym)
-                if df.empty: continue
-
-                # 전략 판정
-                signal = active_strategy.check_buy_signal(df)
-                
-                if signal:
-                    signal['ticker'] = sym
-                    # execute_buy가 이제 메시지를 통째로 리턴함
-                    result_msg = order_manager.execute_buy(portfolio, signal)
-                    
-                    if result_msg:
-                        bot.send_message(result_msg) # 깔끔하게 메시지만 전송
+                    # A. 이미 보유 중인지 체크 (중복 진입 방지)
+                    if sym in portfolio.positions:
+                        continue
                         
-                        if not portfolio.has_open_slot():
-                            break
+                    # B. 금일 매매 금지(Ban) 목록 체크
+                    if sym in portfolio.ban_list:
+                        continue
+
+                    # C. 슬롯 여유 확인 (Double Engine)
+                    # Config.MAX_SLOTS(2)를 사용
+                    if not portfolio.has_open_slot():
+                        logger.warning(f"🔒 [Slot Full] {sym} 포착했으나 슬롯 꽉 참 (Max: {Config.MAX_SLOTS})")
+                        break # 슬롯이 없으면 더 볼 필요 없음
+
+                    # D. 전략 검증 (EMA Dip & Rebound)
+                    # 현재가 데이터 조회
+                    df = kis.get_minute_chart(sym) # 1분봉 조회
+                    if df is None or df.empty:
+                        continue
+                        
+                    buy_signal = strategy.check_buy_signal(df)
+                    
+                    if buy_signal:
+                        logger.info(f"⚡ [BUY SIGNAL] {sym} | 전략 조건 만족")
+                        
+                        # E. 주문 실행 (RealOrderManager)
+                        # signal에 필요한 정보 보강
+                        buy_signal['ticker'] = sym
+                        buy_signal['price'] = df['close'].iloc[-1]
+                        buy_signal['time'] = datetime.datetime.now()
+                        
+                        result_msg = order_manager.execute_buy(portfolio, buy_signal)
+                        if result_msg:
+                            bot.send_message(result_msg)
             
-            # 5. 생존 신고
+            # ------------------------------------------------------
+            # 4. 보유 종목 청산 관리 (청산) - Exit Loop (새로 추가됨)
+            # ------------------------------------------------------
+            if portfolio.positions:
+                # 딕셔너리 변경 방지를 위해 리스트로 키 복사
+                for ticker in list(portfolio.positions.keys()):
+                    pos = portfolio.positions[ticker]
+                    
+                    # A. 현재가 조회
+                    current_price = kis.get_current_price(ticker)
+                    if not current_price:
+                        continue
+                        
+                    # B. 고가 갱신 (트레일링 스탑용)
+                    # RealPortfolio에 update_highest_price 메서드가 있어야 함
+                    portfolio.update_highest_price(ticker, current_price)
+                    
+                    # C. 매도 신호 확인 (Strategy에 위임)
+                    highest_price = pos.get('highest_price', pos['entry_price'])
+                    
+                    exit_signal = strategy.check_exit_signal(
+                        current_price=current_price,
+                        entry_price=pos['entry_price'],
+                        highest_price=highest_price
+                    )
+                    
+                    # D. 매도 실행
+                    if exit_signal:
+                        logger.info(f"👋 [EXIT SIGNAL] {ticker} | {exit_signal['reason']}")
+                        result_msg = order_manager.execute_sell(portfolio, ticker, exit_signal)
+                        if result_msg:
+                            bot.send_message(result_msg)
+
+            # 5. 생존 신고 (Heartbeat)
             if time.time() - last_heartbeat_time > HEARTBEAT_INTERVAL:
-                # 간단한 요약본 전송
                 eq = portfolio.total_equity
                 pos_cnt = len(portfolio.positions)
-                bot.send_message(f"💓 [생존] 자산 ${eq:,.0f} | 보유 {pos_cnt}종목")
+                bot.send_message(f"💓 [생존] 자산 ${eq:,.0f} | 보유 {pos_cnt}/{Config.MAX_SLOTS}")
                 last_heartbeat_time = time.time()
 
-            time.sleep(5) # 루프 딜레이
+            time.sleep(1) # 루프 과부하 방지 (1초 대기)
 
-        except KeyboardInterrupt:
-            logger.info("🛑 수동 종료")
-            break
         except Exception as e:
-            logger.error(f"⚠️ Main Loop Error: {e}")
-            time.sleep(30)
+            logger.error(f"메인 루프 에러: {e}")
+            bot.send_message(f"🚨 [에러] 메인 루프 중단: {e}")
+            time.sleep(10)
             # 인증 에러 시 토큰 갱신 로직은 KisApi 내부나 별도 처리가능
 
 if __name__ == "__main__":

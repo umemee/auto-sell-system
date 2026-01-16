@@ -149,24 +149,27 @@ class RealPortfolio:
 
     def get_max_order_amount(self):
         """
-        [자금 관리 코어]
-        Target = Total Equity * 0.5
-        Available = Buying Power * 0.98 (안전 버퍼)
-        Result = Min(Target, Available)
+        [Double Engine 자금 관리]
+        목표: 전체 자산의 50% 베팅 (단, 현금 범위 내에서)
         """
-        # 목표 금액 (자산의 50%)
-        target_amount = self.total_equity * self.SLOT_RATIO
-
-        # 가용 현금 (98%)
-        usable_cash = self.balance * getattr(Config, 'ALL_IN_RATIO', 0.98)
-
-        # 최종 주문 가능 금액
-        final_amount = min(target_amount, usable_cash)
-
-        # 최소 주문 금액 미만이면 주문 불가
-        if final_amount < self.MIN_ORDER_AMT:
+        # 1. 현재 슬롯 확인 (이미 꽉 찼으면 0 반환)
+        if len(self.positions) >= self.MAX_SLOTS:
             return 0.0
 
+        # 2. 1슬롯당 목표 금액 계산 (총 자산 / 2)
+        target_amount = self.total_equity / self.MAX_SLOTS
+        
+        # 3. [안전 장치] 주문 가능 현금의 98% (수수료/슬리피지 버퍼)
+        # 중요: 목표 금액이 아무리 커도, 내 수중에 있는 현금보다 많이 주문할 순 없음
+        safe_cash = self.balance * 0.98 
+        
+        # 4. 최종 주문 금액 (둘 중 작은 값)
+        final_amount = min(target_amount, safe_cash)
+        
+        # 최소 주문 금액 ($50 미만은 주문 안 함 - 수수료 효율 고려)
+        if final_amount < 50:
+            return 0.0
+            
         return final_amount
 
     def update_local_after_order(self, fill):
@@ -218,7 +221,17 @@ class RealPortfolio:
                 del self.positions[ticker]
                 self.ban_list.add(ticker) # 매도 시 즉시 밴 리스트 추가
                 self.logger.info(f"👋 [Local Update] SELL {ticker} -> Added to Ban List")
-
+    def update_highest_price(self, ticker, current_price):
+        """
+        [Backtest Logic 이식] 트레일링 스탑을 위한 고가 갱신
+        """
+        if ticker in self.positions:
+            # 기존 고가보다 현재가가 높으면 갱신
+            if current_price > self.positions[ticker]['highest_price']:
+                old_high = self.positions[ticker]['highest_price']
+                self.positions[ticker]['highest_price'] = current_price
+                # (선택) 로그가 너무 많으면 주석 처리 가능
+                # self.logger.info(f"📈 [{ticker}] 고가 갱신: ${old_high} -> ${current_price}")
     def _log_status(self):
         """현재 상태 로그 출력 (디버깅용)"""
         pos_str = ", ".join([f"{k}({v.get('pnl_pct',0):.1f}%)" for k, v in self.positions.items()])
