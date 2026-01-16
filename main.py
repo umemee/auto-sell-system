@@ -64,7 +64,7 @@ def main():
         
         # [긴급 추가] 재시작 시 아까 밴 당한 종목들 복구
         # 시스템 재시작 후 이 줄은 나중에 지워도 됩니다.
-        portfolio.ban_list.update(['PRFX', 'ACCL', 'PTLE', 'BIYA', 'VERO', 'JAGX']) 
+        portfolio.ban_list.update(['PRFX', 'ACCL', 'PTLE', 'BIYA', 'VERO', 'JAGX', 'LCFY', 'JFBR', 'AFJK', 'SVRE']) 
         logger.info(f"🚫 수동 밴 리스트 적용 완료: {portfolio.ban_list}")
         
         start_msg = (

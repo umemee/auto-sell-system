@@ -254,36 +254,50 @@ class KisApi:
 
     def sell_market(self, symbol, qty, price_hint=None):
         """
-        시장가 매도 (IGW00009 에러 방지 버전)
+        시장가 매도 (Robust Version)
+        - 핵심 개선: 시세 조회 재시도 로직 추가 & 가격 괴리율 축소
         """
         path = "/uapi/overseas-stock/v1/trading/order"
         self._update_headers("TTTT1006U") 
 
-        # 1. 현재가 조회 시도
+        # -------------------------------------------------------
+        # 1. 현재가 조회 (Retry Logic 적용)
+        # -------------------------------------------------------
         current_price = 0.0
-        try:
-            price_data = self.get_current_price("NASD", symbol)
-            if price_data:
-                current_price = float(price_data['last'])
-        except:
-            pass
+        import time # 시간 지연을 위해 import
 
-        # 2. 가격 결정 로직 (IGW00009 방지)
+        for i in range(3): # 최대 3번 시도
+            try:
+                price_data = self.get_current_price("NASD", symbol)
+                if price_data:
+                    current_price = float(price_data['last'])
+                    break # 성공하면 탈출
+            except:
+                self.logger.warning(f"⚠️ [매도] 시세 조회 일시적 실패 ({i+1}/3) - {symbol}")
+            
+            time.sleep(0.2) # 0.2초 휴식 후 재시도 (API 과부하 해소)
+
+        # -------------------------------------------------------
+        # 2. 가격 결정 로직 (IGW00009 방어)
+        # -------------------------------------------------------
         final_price = 0.0
         
         if current_price > 0:
-            # 시세 조회 성공: 현재가보다 5% 낮게 (Safe)
-            final_price = current_price * 0.95
+            # 시세 조회 성공: 현재가보다 2% 낮게 (확실한 체결 + 안전 범위)
+            final_price = current_price * 0.98
         elif price_hint and price_hint > 0:
-            # [수정] 힌트(Portfolio 현재가)가 있으면 믿고 5%만 할인
-            # 매수가 기준 15% 할인은 상승장에서 '주문 가격 오류'를 유발함.
-            self.logger.warning(f"⚠️ [매도] 시세 조회 실패 -> 장부가격(${price_hint}) 기준 -5% 주문")
-            final_price = price_hint * 0.95 
+            # [수정] 끝내 시세 조회 실패 시 -> 장부가의 98% 가격 사용
+            # 이유: 85%~95%는 증권사 필터(Fat Finger)에 걸릴 확률이 높음.
+            # 98% 정도면 시장가 범위 내로 인식될 확률 높음.
+            self.logger.warning(f"⚠️ [매도] 시세 조회 최종 실패 -> 장부가(${price_hint}) 기준 -2% 주문")
+            final_price = price_hint * 0.98
         else:
-            self.logger.error(f"🚨 [매도] 가격 정보 전무. 0.01로 시도.")
-            final_price = 0.01 
+            self.logger.error(f"🚨 [매도] 가격 정보 전무. 주문 불가.")
+            return None # 0.01로 던지는 것보다 안전하게 스킵 후 다음 루프 기약
 
-        # 가격 포맷팅
+        # -------------------------------------------------------
+        # 3. 가격 포맷팅 및 주문
+        # -------------------------------------------------------
         if final_price < 1.0:
             formatted_price = f"{final_price:.4f}"
         else:
@@ -306,6 +320,7 @@ class KisApi:
             try:
                 data = res.json()
             except:
+                self.logger.error(f"❌ 매도 응답 파싱 에러")
                 return None
 
             if data['rt_cd'] == '0':
