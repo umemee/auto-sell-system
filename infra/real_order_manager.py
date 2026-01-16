@@ -83,10 +83,14 @@ class RealOrderManager:
             
         qty = pos['qty']
         
-        # 힌트 가격 결정
-        entry_price = pos.get('entry_price', 0.0)
+        # [Critical Fix] 가격 힌트 우선순위 변경
+        # 1순위: 최근 업데이트된 현재가 (가장 시장가에 근접)
+        # 2순위: 매수가 (데이터가 없을 경우 최후의 수단)
         current_price = pos.get('current_price', 0.0)
-        hint_price = entry_price if entry_price > 0 else current_price
+        entry_price = pos.get('entry_price', 0.0)
+        
+        # 현재가가 0보다 크면 그걸 쓰고, 아니면 매수가를 씀
+        hint_price = current_price if current_price > 0 else entry_price
         
         # 수익률 계산
         if entry_price > 0:
@@ -125,12 +129,12 @@ class RealOrderManager:
             return {"status": "success", "msg": msg}
         
         else:
-            # [긴급 추가] 실패 시 에러 메시지 리턴
+            # 실패 시 에러 메시지
             fail_msg = (
                 f"🚨 <b>매도 주문 실패!</b>\n"
                 f"📦 종목: {ticker}\n"
-                f"⚠️ 이유: API 오류 또는 거부됨.\n"
-                f"👉 로그를 확인하고 수동 매도 요망!"
+                f"⚠️ 상태: 주문 거부됨 (IGW 오류 등)\n"
+                f"👉 <b>수동 매도 권장!</b>"
             )
-            return {"status": "fail", "msg": fail_msg} 
+            return {"status": "fail", "msg": fail_msg}
         

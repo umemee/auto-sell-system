@@ -254,7 +254,7 @@ class KisApi:
 
     def sell_market(self, symbol, qty, price_hint=None):
         """
-        시장가 매도 (안전 장치 강화 버전)
+        시장가 매도 (IGW00009 에러 방지 버전)
         """
         path = "/uapi/overseas-stock/v1/trading/order"
         self._update_headers("TTTT1006U") 
@@ -268,20 +268,20 @@ class KisApi:
         except:
             pass
 
-        # 2. 가격 결정 로직 (수정됨)
+        # 2. 가격 결정 로직 (IGW00009 방지)
         final_price = 0.0
         
         if current_price > 0:
-            # 시세 조회 성공: 현재가보다 5% 낮게
+            # 시세 조회 성공: 현재가보다 5% 낮게 (Safe)
             final_price = current_price * 0.95
         elif price_hint and price_hint > 0:
-            # [수정] 매수가의 50%는 너무 과격하여 거부됨. -> 15% 할인으로 변경
-            self.logger.warning(f"⚠️ [매도] 시세 조회 실패 -> 매수가(${price_hint}) 기준 -15% 가격으로 주문")
-            final_price = price_hint * 0.85 
+            # [수정] 힌트(Portfolio 현재가)가 있으면 믿고 5%만 할인
+            # 매수가 기준 15% 할인은 상승장에서 '주문 가격 오류'를 유발함.
+            self.logger.warning(f"⚠️ [매도] 시세 조회 실패 -> 장부가격(${price_hint}) 기준 -5% 주문")
+            final_price = price_hint * 0.95 
         else:
-            self.logger.error(f"🚨 [매도] 가격 정보 전무. 주문 실패 가능성 높음.")
-            # 가격 정보가 아예 없으면 0.01로 시도하기보다 안전하게 중단하거나 0 처리
-            final_price = 0.0 
+            self.logger.error(f"🚨 [매도] 가격 정보 전무. 0.01로 시도.")
+            final_price = 0.01 
 
         # 가격 포맷팅
         if final_price < 1.0:
@@ -303,17 +303,14 @@ class KisApi:
         try:
             res = requests.post(f"{self.base_url}{path}", headers=self.headers, data=json.dumps(data))
             
-            # [수정] JSON 파싱 에러 방어
             try:
                 data = res.json()
-            except Exception:
-                self.logger.error(f"❌ 매도 응답 파싱 실패 (Body: {res.text})")
+            except:
                 return None
 
             if data['rt_cd'] == '0':
                 return data['output']['ODNO']
             else:
-                # 에러 메시지 상세 출력
                 self.logger.error(f"❌ 매도 실패 [{symbol}]: {data['msg1']} (Code: {data['msg_cd']})")
                 return None
         except Exception as e:
