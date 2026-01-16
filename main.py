@@ -186,9 +186,11 @@ def main():
 
                 # 매도 실행
                 if sell_signal:
-                    result_msg = order_manager.execute_sell(portfolio, ticker, reason)
-                    if result_msg:
-                        bot.send_message(result_msg)
+                    result = order_manager.execute_sell(portfolio, ticker, reason)
+                    
+                    if result:
+                        # 성공이든 실패든 메시지 전송
+                        bot.send_message(result['msg'])
 
             # ---------------------------------------------------------
             # 🔭 5. [Entry] 진입 로직 (Shadow Scanning 포함)
@@ -222,12 +224,15 @@ def main():
                     # [Core Logic] 슬롯 확인
                     if portfolio.has_open_slot():
                         # A. 자리가 있으면 -> 매수
-                        result_msg = order_manager.execute_buy(portfolio, signal)
-                        if result_msg:
-                            bot.send_message(result_msg)
-                            # 슬롯 다 찼으면 스캔 중단하고 루프 처음으로
-                            if not portfolio.has_open_slot():
-                                break 
+                        result = order_manager.execute_buy(portfolio, signal)
+                        
+                        if result and result.get('msg'):
+                            bot.send_message(result['msg'])
+                            
+                            # 성공했다면 슬롯 체크 후 탈출
+                            if result['status'] == 'success':
+                                if not portfolio.has_open_slot():
+                                    break
                     else:
                         # B. 자리가 없으면 -> 그림자 밴(Shadow Ban)
                         logger.warning(f"🔒 [Shadow Scan] {sym} 기회 포착했으나 슬롯 Full. 금일 제외.")
