@@ -143,7 +143,7 @@ def main():
 
                     # D. 전략 검증 (EMA Dip & Rebound)
                     # 현재가 데이터 조회
-                    df = kis.get_minute_chart(sym) # 1분봉 조회
+                    df = kis.get_minute_candles(sym) # 1분봉 조회
                     if df is None or df.empty:
                         continue
                         
