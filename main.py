@@ -62,6 +62,11 @@ def main():
         logger.info("📡 증권사 서버와 동기화 중...")
         portfolio.sync_with_kis()
         
+        # [긴급 추가] 재시작 시 아까 밴 당한 종목들 복구
+        # 시스템 재시작 후 이 줄은 나중에 지워도 됩니다.
+        portfolio.ban_list.update(['PRFX', 'ACCL', 'PTLE', 'BIYA', 'VERO', 'JAGX']) 
+        logger.info(f"🚫 수동 밴 리스트 적용 완료: {portfolio.ban_list}")
+        
         start_msg = (
             f"⚔️ [시스템 가동 v5.0]\n"
             f"🧠 전략: {strategy.name}\n"
@@ -144,24 +149,15 @@ def main():
             # ---------------------------------------------------------
             # 📉 4. [Exit] 청산 로직 (Trailing Stop & Stop Loss)
             # ---------------------------------------------------------
-            
-            # [Step 1] 미체결 주문 확인 (중복 매도 방지: 좀비 포지션 해결)
-            unfilled_stocks = kis.get_unfilled_orders()
-            
             for ticker in list(portfolio.positions.keys()):
-                # [Critical] 이미 매도 주문이 나가있는 종목은 건너뜀
-                if ticker in unfilled_stocks:
-                    continue
-
                 pos = portfolio.positions[ticker]
                 
-                # ... (이 아래 코드는 그대로 두거나, 덮어쓰기 했다면 아래 로직이 이어져야 함)
                 current_price = pos['current_price']
                 entry_price = pos['entry_price']
                 pnl_rate = pos['pnl_pct'] / 100.0
                 
-                # (이하 기존 로직 동일...)
-                # 고가 갱신 로직
+                # 고가 갱신 (Portfolio가 이미 update_highest_price를 가지고 있다면 호출, 아니면 직접 처리)
+                # 여기서는 직접 로직을 수행하여 안전성 확보
                 if 'highest_price' not in pos:
                     pos['highest_price'] = max(current_price, entry_price)
                 
@@ -173,9 +169,11 @@ def main():
                 reason = ""
                 
                 # A. Trailing Stop
+                # 최고 수익률 계산
                 max_pnl_rate = (pos['highest_price'] - entry_price) / entry_price
                 
-                if max_pnl_rate >= tp_rate: 
+                if max_pnl_rate >= tp_rate: # 목표 수익(예: 6%) 도달 했었음
+                    # 고점 대비 하락폭 계산
                     trail_stop_price = pos['highest_price'] * (1 - ts_callback)
                     if current_price <= trail_stop_price:
                         sell_signal = True
@@ -254,5 +252,4 @@ def main():
             time.sleep(10) # 에러 발생 시 잠시 대기 후 재시도
 
 if __name__ == "__main__":
-
     main()

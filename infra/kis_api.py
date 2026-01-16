@@ -206,38 +206,7 @@ class KisApi:
         except Exception as e:
             self.logger.error(f"❌ 현재가 조회 중 에러 ({symbol}): {e}")
             return None
-    
-    def get_unfilled_orders(self):
-        """미체결 내역 조회 (TTTS3018R) - 중복 주문 방지용"""
-        path = "/uapi/overseas-stock/v1/trading/inquire-nccs"
-        self._update_headers("TTTS3018R")
-        
-        params = {
-            "CANO": Config.CANO,
-            "ACNT_PRDT_CD": Config.ACNT_PRDT_CD,
-            "OVRS_EXCG_CD": "NASD",
-            "SORT_SQN": "DS",
-            "CTX_AREA_FK200": "",
-            "CTX_AREA_NK200": ""
-        }
-        
-        try:
-            res = requests.get(f"{self.base_url}{path}", headers=self.headers, params=params)
-            data = res.json()
-            
-            unfilled_set = set()
-            if data['rt_cd'] == '0':
-                output = data.get('output', [])
-                for item in output:
-                    # 미체결 수량(nccs_qty)이 0보다 큰 것만 담기
-                    if int(item.get('nccs_qty', 0)) > 0:
-                        unfilled_set.add(item.get('pdno'))
-            return unfilled_set
-            
-        except Exception as e:
-            self.logger.error(f"❌ 미체결 조회 실패: {e}")
-            return set()
-            
+
     @log_api_call("주문 전송")
     def place_order_final(self, exchange, symbol, side, qty, price):
         path = "/uapi/overseas-stock/v1/trading/order"
@@ -283,25 +252,65 @@ class KisApi:
             
         return None
 
-    def sell_market(self, symbol, qty):
+    def sell_market(self, symbol, qty, price_hint=None):
         """
-        시장가 매도 (강제 청산)
+        시장가 매도 (API 시세 조회 실패 시 매수가 기반 투척)
         """
-        try:
-            price_info = self.get_current_price("NASD", symbol)
-            
-            limit_price = 0.0
-            if price_info and price_info['last'] > 0:
-                # 10% 아래로 지정가 매도 -> 시장가 효과
-                limit_price = price_info['last'] * 0.90
-            else:
-                self.logger.warning(f"🚨 {symbol} 시세 조회 실패! 최저가 강제 매도 시도")
-                limit_price = 0.01 
+        path = "/uapi/overseas-stock/v1/trading/order"
+        self._update_headers("TTTT1006U") 
 
-            return self.place_order_final("NASD", symbol, "SELL", qty, limit_price)
-            
+        # 1. 현재가 조회 시도
+        current_price = 0.0
+        try:
+            price_data = self.get_current_price("NASD", symbol)
+            if price_data:
+                current_price = float(price_data['last'])
+        except:
+            pass
+
+        # 2. 가격 결정 로직
+        final_price = 0.0
+        
+        if current_price > 0:
+            # 정상 상황: 현재가보다 5% 낮게 (즉시 체결)
+            final_price = current_price * 0.95
+        elif price_hint and price_hint > 0:
+            # [비상 상황] 시세 조회 실패 -> 매수가(Entry Price) 기반
+            # 중요: 손절 상황(-45%)을 고려하여 매수가의 50% 가격으로 '시장가성 지정가' 제출
+            # 실제로는 현재 시장가에 체결되므로 손해가 아님. (단지 주문을 확실히 넣기 위함)
+            self.logger.warning(f"⚠️ [매도] 시세 조회 실패 -> 매수가(${price_hint})의 50% 가격으로 투척")
+            final_price = price_hint * 0.5 
+        else:
+            self.logger.error(f"🚨 [매도] 가격 정보 전무. 주문 실패 가능성 높음.")
+            final_price = 0.0 
+
+        # 3. 가격 포맷팅
+        if final_price < 1.0:
+            formatted_price = f"{final_price:.4f}"
+        else:
+            formatted_price = f"{final_price:.2f}"
+
+        data = {
+            "CANO": Config.CANO,
+            "ACNT_PRDT_CD": Config.ACNT_PRDT_CD,
+            "OVRS_EXCG_CD": "NASD",
+            "PDNO": symbol,
+            "ORD_DVSN": "00", 
+            "ORD_QTY": str(int(qty)),
+            "OVRS_ORD_UNPR": formatted_price, 
+            "ORD_SVR_DVSN_CD": "0"
+        }
+        
+        try:
+            res = requests.post(f"{self.base_url}{path}", headers=self.headers, data=json.dumps(data))
+            data = res.json()
+            if data['rt_cd'] == '0':
+                return data['output']['ODNO']
+            else:
+                self.logger.error(f"❌ 매도 실패 [{symbol}]: {data['msg1']}")
+                return None
         except Exception as e:
-            self.logger.error(f"❌ 시장가 매도 로직 에러: {e}")
+            self.logger.error(f"❌ API Error (sell): {e}")
             return None
 
     def get_minute_candles(self, market, symbol, limit=100):
@@ -336,5 +345,4 @@ class KisApi:
         except Exception as e:
             self.logger.error(f"❌ 캔들 데이터 에러: {e}")
             
-
         return pd.DataFrame()

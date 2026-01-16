@@ -74,31 +74,36 @@ class RealOrderManager:
 
     def execute_sell(self, portfolio, ticker, reason="Unknown"):
         """매도 집행: 전량 매도 -> API 주문 -> 로컬 장부 반영"""
-        # 1. 포지션 확인
         pos = portfolio.get_position(ticker)
         if not pos:
             logger.warning(f"🚫 [Sell Reject] 보유하지 않음 ({ticker})")
             return None
             
         qty = pos['qty']
-        current_price = pos['current_price'] # 현재가 (예상 매도가)
         
-        # [수정 위치] 수익률 계산을 주문 전송 '전'에 미리 수행 (삭제되기 전에)
-        entry_price = pos.get('entry_price', 0)
+        # [수정 1] 힌트 가격을 '매수가(Entry Price)'로 변경
+        # 매수가가 없으면 현재가라도 씀
+        entry_price = pos.get('entry_price', 0.0)
+        current_price = pos.get('current_price', 0.0)
+        
+        # Fallback Price 결정: 매수가 우선, 없으면 현재가
+        hint_price = entry_price if entry_price > 0 else current_price
+        
+        # 수익률 계산 (로그용)
         if entry_price > 0:
             pnl_pct = ((current_price - entry_price) / entry_price) * 100
         else:
             pnl_pct = 0.0
             
-        total_val = qty * current_price # 예상 총액
+        total_val = qty * current_price 
         
         logger.info(f"👋 [SELL EXEC] {ticker} {qty}주 (Reason: {reason})")
 
-        # 2. API 주문 전송 (시장가 매도)
-        ord_no = self.kis.sell_market(ticker, qty)
+        # 2. API 주문 전송
+        # [수정 2] price_hint에 매수가(entry_price)를 전달
+        ord_no = self.kis.sell_market(ticker, qty, price_hint=hint_price)
         
         if ord_no:
-            # 3. 로컬 반영 (포지션 삭제)
             fill_data = {
                 'type': 'SELL',
                 'ticker': ticker,
@@ -107,7 +112,6 @@ class RealOrderManager:
             }
             portfolio.update_local_after_order(fill_data)
             
-            # [메시지 생성] - 미리 계산해둔 pnl_pct 사용
             icon = "🔴" if pnl_pct < 0 else "🟢"
             msg = (
                 f"👋 <b>매도 체결 완료</b> [{reason}]\n"
@@ -118,9 +122,6 @@ class RealOrderManager:
                 f"📊 수익률: {icon} {pnl_pct:.2f}%\n"
                 f"📝 주문번호: {ord_no}"
             )
-            return msg # 메시지 리턴
+            return msg 
             
-        return None
-            
-
         return None
