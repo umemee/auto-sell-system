@@ -254,7 +254,7 @@ class KisApi:
 
     def sell_market(self, symbol, qty, price_hint=None):
         """
-        시장가 매도 (API 시세 조회 실패 시 매수가 기반 투척)
+        시장가 매도 (안전 장치 강화 버전)
         """
         path = "/uapi/overseas-stock/v1/trading/order"
         self._update_headers("TTTT1006U") 
@@ -268,23 +268,22 @@ class KisApi:
         except:
             pass
 
-        # 2. 가격 결정 로직
+        # 2. 가격 결정 로직 (수정됨)
         final_price = 0.0
         
         if current_price > 0:
-            # 정상 상황: 현재가보다 5% 낮게 (즉시 체결)
+            # 시세 조회 성공: 현재가보다 5% 낮게
             final_price = current_price * 0.95
         elif price_hint and price_hint > 0:
-            # [비상 상황] 시세 조회 실패 -> 매수가(Entry Price) 기반
-            # 중요: 손절 상황(-45%)을 고려하여 매수가의 50% 가격으로 '시장가성 지정가' 제출
-            # 실제로는 현재 시장가에 체결되므로 손해가 아님. (단지 주문을 확실히 넣기 위함)
-            self.logger.warning(f"⚠️ [매도] 시세 조회 실패 -> 매수가(${price_hint})의 50% 가격으로 투척")
-            final_price = price_hint * 0.5 
+            # [수정] 매수가의 50%는 너무 과격하여 거부됨. -> 15% 할인으로 변경
+            self.logger.warning(f"⚠️ [매도] 시세 조회 실패 -> 매수가(${price_hint}) 기준 -15% 가격으로 주문")
+            final_price = price_hint * 0.85 
         else:
             self.logger.error(f"🚨 [매도] 가격 정보 전무. 주문 실패 가능성 높음.")
+            # 가격 정보가 아예 없으면 0.01로 시도하기보다 안전하게 중단하거나 0 처리
             final_price = 0.0 
 
-        # 3. 가격 포맷팅
+        # 가격 포맷팅
         if final_price < 1.0:
             formatted_price = f"{final_price:.4f}"
         else:
@@ -303,11 +302,19 @@ class KisApi:
         
         try:
             res = requests.post(f"{self.base_url}{path}", headers=self.headers, data=json.dumps(data))
-            data = res.json()
+            
+            # [수정] JSON 파싱 에러 방어
+            try:
+                data = res.json()
+            except Exception:
+                self.logger.error(f"❌ 매도 응답 파싱 실패 (Body: {res.text})")
+                return None
+
             if data['rt_cd'] == '0':
                 return data['output']['ODNO']
             else:
-                self.logger.error(f"❌ 매도 실패 [{symbol}]: {data['msg1']}")
+                # 에러 메시지 상세 출력
+                self.logger.error(f"❌ 매도 실패 [{symbol}]: {data['msg1']} (Code: {data['msg_cd']})")
                 return None
         except Exception as e:
             self.logger.error(f"❌ API Error (sell): {e}")
