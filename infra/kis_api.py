@@ -206,7 +206,38 @@ class KisApi:
         except Exception as e:
             self.logger.error(f"❌ 현재가 조회 중 에러 ({symbol}): {e}")
             return None
-
+    
+    def get_unfilled_orders(self):
+        """미체결 내역 조회 (TTTS3018R) - 중복 주문 방지용"""
+        path = "/uapi/overseas-stock/v1/trading/inquire-nccs"
+        self._update_headers("TTTS3018R")
+        
+        params = {
+            "CANO": Config.CANO,
+            "ACNT_PRDT_CD": Config.ACNT_PRDT_CD,
+            "OVRS_EXCG_CD": "NASD",
+            "SORT_SQN": "DS",
+            "CTX_AREA_FK200": "",
+            "CTX_AREA_NK200": ""
+        }
+        
+        try:
+            res = requests.get(f"{self.base_url}{path}", headers=self.headers, params=params)
+            data = res.json()
+            
+            unfilled_set = set()
+            if data['rt_cd'] == '0':
+                output = data.get('output', [])
+                for item in output:
+                    # 미체결 수량(nccs_qty)이 0보다 큰 것만 담기
+                    if int(item.get('nccs_qty', 0)) > 0:
+                        unfilled_set.add(item.get('pdno'))
+            return unfilled_set
+            
+        except Exception as e:
+            self.logger.error(f"❌ 미체결 조회 실패: {e}")
+            return set()
+            
     @log_api_call("주문 전송")
     def place_order_final(self, exchange, symbol, side, qty, price):
         path = "/uapi/overseas-stock/v1/trading/order"
@@ -305,4 +336,5 @@ class KisApi:
         except Exception as e:
             self.logger.error(f"❌ 캔들 데이터 에러: {e}")
             
+
         return pd.DataFrame()
