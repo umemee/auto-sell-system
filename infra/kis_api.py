@@ -208,7 +208,12 @@ class KisApi:
             return None
 
     @log_api_call("주문 전송")
+    @log_api_call("주문 전송")
     def place_order_final(self, exchange, symbol, side, qty, price):
+        """
+        [Smart Order] 거래소 자동 감지 기능 추가
+        - NASD(나스닥)으로 실패 시 -> AMS(아멕스) -> NYS(뉴욕) 순서로 자동 재시도
+        """
         path = "/uapi/overseas-stock/v1/trading/order"
         is_buy = (side == "BUY")
         
@@ -226,113 +231,92 @@ class KisApi:
         except:
             final_price = "0"
 
-        body = {
-            "CANO": Config.CANO, 
-            "ACNT_PRDT_CD": Config.ACNT_PRDT_CD,
-            "OVRS_EXCG_CD": exchange, 
-            "PDNO": symbol, 
-            "ORD_QTY": str(int(qty)),  
-            "OVRS_ORD_UNPR": final_price, 
-            "ORD_SVR_DVSN_CD": "0", 
-            "ORD_DVSN": "00"
-        }
+        # [스마트 로직] 시도할 거래소 목록 (요청받은 exchange를 1순위로)
+        exchange_candidates = [exchange]
+        if exchange == "NASD":
+            exchange_candidates.extend(["AMS", "NYSE"]) # 나스닥이면 아멕스, 뉴욕도 예비로 추가
         
-        try:
-            res = requests.post(f"{self.base_url}{path}", headers=self.headers, json=body, timeout=10)
-            data = res.json()
+        last_error_msg = ""
+
+        for try_exch in exchange_candidates:
+            body = {
+                "CANO": Config.CANO, 
+                "ACNT_PRDT_CD": Config.ACNT_PRDT_CD,
+                "OVRS_EXCG_CD": try_exch, # 거래소를 바꿔가며 시도
+                "PDNO": symbol, 
+                "ORD_QTY": str(int(qty)),  
+                "OVRS_ORD_UNPR": final_price, 
+                "ORD_SVR_DVSN_CD": "0", 
+                "ORD_DVSN": "00"
+            }
             
-            if data['rt_cd'] == '0':
-                odno = data['output'].get('ODNO')
-                self.logger.info(f"✅ 주문 전송 성공 [{side}] {symbol} {qty}주 (주문번호: {odno})")
-                return odno
-            else: 
-                self.logger.error(f"❌ 주문 실패 ({symbol}): {data.get('msg1')} (Code: {data.get('msg_cd')})")
-        except Exception as e: 
-            self.logger.error(f"❌ API 통신 에러: {e}")
+            try:
+                res = requests.post(f"{self.base_url}{path}", headers=self.headers, json=body, timeout=10)
+                data = res.json()
+                
+                if data['rt_cd'] == '0':
+                    odno = data['output'].get('ODNO')
+                    self.logger.info(f"✅ 주문 전송 성공 ({try_exch}) [{side}] {symbol} {qty}주 (주문번호: {odno})")
+                    return odno
+                else:
+                    msg = data.get('msg1')
+                    code = data.get('msg_cd')
+                    # 특정 에러(해당 거래소에 종목 없음)인 경우에만 다음 거래소 시도
+                    # IGW00213: 해당 거래소에 종목이 존재하지 않음 (Code 예시, 실제와 다를 수 있음)
+                    self.logger.warning(f"⚠️ 주문 실패 ({try_exch}): {msg} (Code: {code}) -> 거래소 변경 시도")
+                    last_error_msg = f"{msg} ({code})"
+                    
+            except Exception as e: 
+                self.logger.error(f"❌ API 통신 에러: {e}")
+                return None
             
+            # 너무 빨리 재시도하지 않도록 잠깐 대기
+            import time
+            time.sleep(0.1)
+
+        # 모든 거래소 시도 실패 시
+        self.logger.error(f"❌ 최종 주문 실패 ({symbol}): {last_error_msg}")
         return None
 
     def sell_market(self, symbol, qty, price_hint=None):
         """
-        시장가 매도 (Robust Version)
-        - 핵심 개선: 시세 조회 재시도 로직 추가 & 가격 괴리율 축소
+        시장가(사실상 -5% 지정가) 매도
+        [수정] IGW00009 에러 해결을 위해 place_order_final로 로직 위임
         """
-        path = "/uapi/overseas-stock/v1/trading/order"
-        self._update_headers("TTTT1006U") 
-
-        # -------------------------------------------------------
-        # 1. 현재가 조회 (Retry Logic 적용)
-        # -------------------------------------------------------
+        # 1. 현재가 조회 시도 (Retry Logic)
         current_price = 0.0
-        import time # 시간 지연을 위해 import
+        import time 
 
-        for i in range(3): # 최대 3번 시도
+        for i in range(3): 
             try:
-                price_data = self.get_current_price("NASD", symbol)
+                # get_current_price는 헤더를 시세용으로 변경함
+                price_data = self.get_current_price(symbol, exchange="NAS") # exchange 파라미터 명시
                 if price_data:
-                    current_price = float(price_data['last'])
-                    break # 성공하면 탈출
-            except:
-                self.logger.warning(f"⚠️ [매도] 시세 조회 일시적 실패 ({i+1}/3) - {symbol}")
+                    current_price = float(price_data) # get_current_price는 float를 반환하도록 되어 있음
+                    break 
+            except Exception as e:
+                self.logger.warning(f"⚠️ [매도] 시세 조회 일시적 실패 ({i+1}/3) - {symbol}: {e}")
             
-            time.sleep(0.2) # 0.2초 휴식 후 재시도 (API 과부하 해소)
+            time.sleep(0.2) 
 
-        # -------------------------------------------------------
-        # 2. 가격 결정 로직 (IGW00009 방어)
-        # -------------------------------------------------------
+        # 2. 가격 결정 로직 (Limit Price for Market-like execution)
         final_price = 0.0
         
         if current_price > 0:
-            # 시세 조회 성공: 현재가보다 2% 낮게 (확실한 체결 + 안전 범위)
-            final_price = current_price * 0.98
+            final_price = current_price * 0.95 # 현재가 기준 -5%
         elif price_hint and price_hint > 0:
-            # [수정] 끝내 시세 조회 실패 시 -> 장부가의 98% 가격 사용
-            # 이유: 85%~95%는 증권사 필터(Fat Finger)에 걸릴 확률이 높음.
-            # 98% 정도면 시장가 범위 내로 인식될 확률 높음.
-            self.logger.warning(f"⚠️ [매도] 시세 조회 최종 실패 -> 장부가(${price_hint}) 기준 -2% 주문")
-            final_price = price_hint * 0.98
+            self.logger.warning(f"⚠️ [매도] 시세 조회 최종 실패 -> 장부가(${price_hint}) 기준 -5% 주문")
+            final_price = price_hint * 0.95
         else:
             self.logger.error(f"🚨 [매도] 가격 정보 전무. 주문 불가.")
-            return None # 0.01로 던지는 것보다 안전하게 스킵 후 다음 루프 기약
+            return None 
 
-        # -------------------------------------------------------
-        # 3. 가격 포맷팅 및 주문
-        # -------------------------------------------------------
-        if final_price < 1.0:
-            formatted_price = f"{final_price:.4f}"
-        else:
-            formatted_price = f"{final_price:.2f}"
+        # 3. [핵심 수정] 직접 requests를 날리지 않고, 검증된 주문 함수 사용
+        # place_order_final이 헤더 설정(TTTT1006U)과 JSON 구성을 알아서 처리함
+        # 주의: exchange가 "NASD"로 고정되어 있습니다. NYSE/AMEX 종목 거래 시 수정 필요.
+        return self.place_order_final("NASD", symbol, "SELL", qty, final_price)
 
-        data = {
-            "CANO": Config.CANO,
-            "ACNT_PRDT_CD": Config.ACNT_PRDT_CD,
-            "OVRS_EXCG_CD": "NASD",
-            "PDNO": symbol,
-            "ORD_DVSN": "00", 
-            "ORD_QTY": str(int(qty)),
-            "OVRS_ORD_UNPR": formatted_price, 
-            "ORD_SVR_DVSN_CD": "0"
-        }
-        
-        try:
-            res = requests.post(f"{self.base_url}{path}", headers=self.headers, data=json.dumps(data))
-            
-            try:
-                data = res.json()
-            except:
-                self.logger.error(f"❌ 매도 응답 파싱 에러")
-                return None
-
-            if data['rt_cd'] == '0':
-                return data['output']['ODNO']
-            else:
-                self.logger.error(f"❌ 매도 실패 [{symbol}]: {data['msg1']} (Code: {data['msg_cd']})")
-                return None
-        except Exception as e:
-            self.logger.error(f"❌ API Error (sell): {e}")
-            return None
-
-    def get_minute_candles(self, market, symbol, limit=100):
+    def get_minute_candles(self, market, symbol, limit=400):
         path = "/uapi/overseas-price/v1/quotations/inquire-time-itemchartprice"
         self._update_headers("HHDFS76950200")
         params = {

@@ -86,22 +86,20 @@ class TelegramBot:
 
     # === [Commands] ===
     def _cmd_status(self):
-        """/status: 현재 시스템 상태 조회 (Double Engine 호환)"""
+        """/status: 현재 시스템 상태 조회 (밴 리스트 추가됨)"""
         if not self.status_provider:
             self.send_message("⚠️ 시스템 연결 대기 중...")
             return
 
         data = self.status_provider()
         
-        # [수정] 포지션 정보 (딕셔너리 순회)
+        # 1. 포지션 정보 처리
         positions = data.get('positions', {})
         pos_msg = ""
-        
         if not positions:
             pos_msg = "없음 (Empty Slot)"
         else:
             for ticker, p in positions.items():
-                # RealPortfolio가 주는 키값 사용
                 pnl = p.get('pnl_pct', 0.0)
                 icon = "🔴" if pnl < 0 else "🟢"
                 pos_msg += (
@@ -110,18 +108,24 @@ class TelegramBot:
                     f"\n      평가액: ${p['eval_value']:.2f}\n"
                 )
 
-        # 타겟 리스트
+        # 2. 타겟 리스트
         targets = data.get('targets', [])
         target_str = ", ".join(targets) if targets else "없음"
+        
+        # 3. [추가] 밴 리스트 (금일 매매 금지)
+        ban_list = data.get('ban_list', [])
+        ban_str = ", ".join(ban_list) if ban_list else "없음"
 
         msg = (
-            f"📊 <b>[GapZone Dashboard v4]</b>\n"
+            f"📊 <b>[GapZone Dashboard v5]</b>\n"
             f"━━━━━━━━━━━━━━━━\n"
             f"💰 <b>총 자산:</b> ${data['total_equity']:,.2f}\n"
             f"💵 <b>현금:</b> ${data['cash']:,.2f}\n"
             f"━━━━━━━━━━━━━━━━\n"
             f"🔭 <b>감시 중:</b>\n"
             f"👉 {target_str}\n\n"
+            f"🚫 <b>매매 금지(Ban):</b>\n"
+            f"👉 {ban_str}\n\n"
             f"🎣 <b>보유 포지션 ({len(positions)}):</b>{pos_msg}\n"
             f"⏰ <b>Update:</b> {datetime.now().strftime('%H:%M:%S')}"
         )
