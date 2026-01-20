@@ -17,34 +17,69 @@ class EmaStrategy:
         self.ma_length = getattr(Config, 'EMA_LENGTH', 20) 
         self.tp_pct = getattr(Config, 'TP_PCT', 0.10)      # 익절 10%
         self.sl_pct = getattr(Config, 'STOP_LOSS_PCT', 0.45) # Config 변수명 변경 반영
-    def check_buy_signal(self, df: pd.DataFrame) -> dict:
+        self.dip_tolerance = 0.005   # 0.5% (깻잎 한 장 차이 허용)
+        self.max_daily_change = 0.80 # 80% (전일 종가 대비 80% 상승 시 진입 금지)
+        
+        # 금일 과열로 인해 영구 퇴출된 종목을 기록할 집합 (메모리 캐싱)
+        self.banned_tickers = set()
+
+    def check_buy_signal(self, df: pd.DataFrame, ticker: str = "Unknown") -> dict:
         """
-        데이터프레임(1분봉)을 받아 매수 신호를 판정
-        df columns: ['time', 'open', 'high', 'low', 'close', 'volume']
+        [수정된 로직]
+        1. 80% 과열 종목 필터링 (Overheating Filter)
+        2. 0.5% 오차 범위 내 눌림목 인정 (Flexible Dip)
         """
+        # [안전 장치] 데이터 부족 시 패스
         if len(df) < self.ma_length + 10:
             return None
 
-        # 1. 지표 계산 (EMA)
-        # 실전에서는 속도를 위해 TA-Lib 대신 Pandas ewm 사용 (충분히 빠름)
+        # -----------------------------------------------------------
+        # [NEW Logic 1] 80% 과열 방지 (Overheating Filter)
+        # -----------------------------------------------------------
+        if ticker in self.banned_tickers:
+            return None # 이미 밴 당한 종목은 연산조차 하지 않음
+
+        # 전일 종가 계산 (데이터프레임 날짜 변경선 기준)
+        # 실전 데이터프레임에는 'date' 컬럼이 있거나, 날짜가 바뀌는 지점을 찾아야 함.
+        # 가장 간단하게는: 오늘의 시가(Open)를 전일 종가 대용으로 쓰거나(갭상승 포함), 
+        # 혹은 API에서 별도로 전일 종가를 받아와야 하지만, 
+        # 여기서는 df 상의 '당일 시초가' 근처 가격을 기준으로 약식 계산합니다.
+        
+        # (더 정확한 방법) df의 첫 번째 데이터가 당일 장 시작이라면 df.iloc[0]['open'] 사용
+        # 당일 고점 확인
+        curr_high = df['high'].iloc[-1]
+        day_open = df['open'].iloc[0] # 데이터프레임의 시작이 장 시작이라고 가정
+        
+        if day_open > 0:
+            daily_change = (curr_high - day_open) / day_open
+            
+            # 만약 당일 시초가 대비 고점이 80% 이상 치솟았다면?
+            if daily_change >= self.max_daily_change:
+                self.logger.warning(f"🚫 [Overheat Ban] {ticker} 급등({daily_change*100:.1f}%)으로 인한 진입 금지")
+                self.banned_tickers.add(ticker)
+                return None
+
+        # -----------------------------------------------------------
+        # [Indicator] 지표 계산 (EMA)
+        # -----------------------------------------------------------
         ema = df['close'].ewm(span=self.ma_length, adjust=False).mean()
         
-        # [백테스트 로직 동기화]
-        # iloc[-1]: 현재 실시간 진행 중인 봉 (Current Bar)
-        # iloc[-2]: 직전에 완성된 봉 (Previous Bar)
-        
-        # 1. 현재 가격 정보
+        # 1. 현재 가격 정보 (Current Bar)
         curr_price = df['close'].iloc[-1] 
         curr_ema = ema.iloc[-1]
         
-        # 2. 직전 봉 정보 (완성된 봉 기준)
-        prev_low = df['low'].iloc[-2]  # 전 봉의 저가
-        prev_ema = ema.iloc[-2]        # 전 봉의 EMA
+        # 2. 직전 봉 정보 (Previous Bar)
+        prev_low = df['low'].iloc[-2]  
+        prev_ema = ema.iloc[-2]        
 
-        # [전략 핵심 로직]
-        # 조건 1 (Dip): 전 봉의 저가가 EMA보다 낮았어야 함 (눌림목 발생)
-        # 조건 2 (Rebound): 현재 가격이 EMA보다 높아야 함 (반등 성공)
-        is_dip = prev_low < prev_ema
+        # -----------------------------------------------------------
+        # [NEW Logic 2] 유연한 눌림목 (Flexible Dip)
+        # -----------------------------------------------------------
+        # 기존: is_dip = prev_low < prev_ema
+        # 변경: EMA보다 0.5% 위까지만 내려와도 눌림목으로 인정 (깻잎 한 장)
+        dip_threshold = prev_ema * (1.0 + self.dip_tolerance)
+        
+        is_dip = prev_low <= dip_threshold
         is_rebound = curr_price > curr_ema
         
         if is_dip and is_rebound:
@@ -53,12 +88,13 @@ class EmaStrategy:
                 'type': 'BUY',
                 'strategy': self.name,
                 'price': curr_price,
-                'ticker': "UNKNOWN", 
+                'ticker': ticker, 
                 'time': df['time'].iloc[-1],
-                'reason': f"Dip(Low {prev_low} < EMA) & Rebound(Price {curr_price} > EMA)"
+                'reason': f"Flexible Dip(Low {prev_low:.2f} <= {dip_threshold:.2f}) & Rebound"
             }
             
         return None
+    
     def check_exit_signal(self, current_price, entry_price, highest_price):
         """
         [매도 신호 판정]

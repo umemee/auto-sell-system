@@ -18,9 +18,30 @@ ACTIVE_START_HOUR = getattr(Config, 'ACTIVE_START_HOUR', 4) # 프리마켓 시�
 ACTIVE_END_HOUR = getattr(Config, 'ACTIVE_END_HOUR', 20)    # 애프터마켓 종료
 
 def is_active_market_time():
-    """현재 시간이 활동 시간(Pre~Close)인지 확인"""
+    """현재 시간이 활동 시간(Pre~Close)인지 확인 (휴장일 로직 추가)"""
     now_et = datetime.datetime.now(pytz.timezone('US/Eastern'))
+    
+    # 1. 주말 체크
     if now_et.weekday() >= 5: return False, "주말 (Weekend)"
+
+    # 2. [추가] 2026년 미국 주식 시장 휴장일 (주요 날짜)
+    # 매년 업데이트가 필요합니다.
+    holidays = [
+        "2026-01-01", # New Year's Day
+        "2026-01-19", # Martin Luther King, Jr. Day
+        "2026-02-16", # Washington's Birthday
+        "2026-04-03", # Good Friday
+        "2026-05-25", # Memorial Day
+        "2026-06-19", # Juneteenth
+        "2026-07-03", # Independence Day (Observed)
+        "2026-09-07", # Labor Day
+        "2026-11-26", # Thanksgiving Day
+        "2026-12-25", # Christmas Day
+    ]
+    
+    if now_et.strftime("%Y-%m-%d") in holidays:
+        return False, "미국 증시 휴장일 (Holiday)"
+
     current_hour = now_et.hour
     
     # 04:00 ~ 20:00 (미국 현지 시간 기준 전체 장 운영 시간)
@@ -83,6 +104,7 @@ def main():
                 'total_equity': portfolio.total_equity,
                 'positions': portfolio.positions,
                 'targets': getattr(listener, 'current_watchlist', []), # 리스너에 변수 없으면 빈 리스트
+                'ban_list': list(portfolio.ban_list), # [추가] 밴 리스트를 봇에게 전달
                 'loss': 0.0,
                 'loss_limit': getattr(Config, 'MAX_DAILY_LOSS_PCT', 0.0)
             }
@@ -205,6 +227,9 @@ def main():
                 continue
 
             for sym in scanned_targets:
+                # [수정] API 호출 제한 방지를 위한 0.5초 대기 (가장 쉬운 해결책)
+                time.sleep(0.5)
+                
                 # 1. 이미 보유중이거나, 밴(금일 매매 금지) 리스트면 패스
                 if portfolio.is_holding(sym): continue
                 if portfolio.is_banned(sym): continue 
@@ -216,7 +241,7 @@ def main():
                 if df.empty: continue
 
                 # 3. 전략 판정
-                signal = strategy.check_buy_signal(df)
+                signal = strategy.check_buy_signal(df, ticker=symbol)
                 
                 if signal:
                     signal['ticker'] = sym
@@ -250,10 +275,15 @@ def main():
 
         except KeyboardInterrupt:
             logger.info("🛑 수동 종료")
-            bot.send_message("🛑 시스템이 수동으로 종료되었습니다.")
+            bot.send_message("🛑 시스템이 관리자에 의해 수동으로 종료되었습니다.")
             break
+            
         except Exception as e:
-            logger.error(f"⚠️ Main Loop Error: {e}")
+            # [수정] 에러 발생 시 텔레그램으로 즉시 알림 (가장 중요한 수정)
+            error_msg = f"⚠️ [CRITICAL ERROR] 시스템 에러 발생!\n내용: {e}\n👉 10초 후 재시도합니다."
+            logger.error(error_msg)
+            bot.send_message(error_msg) # 봇에게 메시지 전송 요청
+            
             time.sleep(10) # 에러 발생 시 잠시 대기 후 재시도
 
 if __name__ == "__main__":
