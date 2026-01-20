@@ -1,3 +1,4 @@
+# main.py
 import time
 import datetime
 import pytz 
@@ -85,7 +86,7 @@ def main():
         
         # [긴급 추가] 재시작 시 아까 밴 당한 종목들 복구
         # 시스템 재시작 후 이 줄은 나중에 지워도 됩니다.
-        portfolio.ban_list.update(['IVF', 'TWG', 'BTTC', 'RAPT', 'CCHH', 'CRVS', 'ICON', 'SHPH', 'AFJK', 'SVRE']) 
+        portfolio.ban_list.update(['IVF', 'TWG', 'BTTC', 'RAPT', 'CCHH', 'CRVS', 'ICON', 'SHPH', 'AFJK', 'PTLE', 'SEGG', 'POLA', 'JAGX', 'LCFY', 'JFBR', 'AFJK', 'SVRE']) 
         logger.info(f"🚫 수동 밴 리스트 적용 완료: {portfolio.ban_list}")
         
         start_msg = (
@@ -248,16 +249,20 @@ def main():
                     
                     # [Core Logic] 슬롯 확인
                     if portfolio.has_open_slot():
-                        # A. 자리가 있으면 -> 매수
+                        # A. 자리가 있으면 -> 매수 시도
                         result = order_manager.execute_buy(portfolio, signal)
                         
                         if result and result.get('msg'):
+                            # 매수 성공 시
                             bot.send_message(result['msg'])
-                            
-                            # 성공했다면 슬롯 체크 후 탈출
                             if result['status'] == 'success':
                                 if not portfolio.has_open_slot():
                                     break
+                        else:
+                            # 🚨 [추가] 매수 시도했으나 자금부족 등으로 거절된 경우 (result가 None)
+                            logger.warning(f"🚌 [Missed Bus] {sym} 진입 실패(자금부족/조건미달). 금일 제외.")
+                            portfolio.ban_list.add(sym) # 즉시 밴 리스트에 추가
+
                     else:
                         # B. 자리가 없으면 -> 그림자 밴(Shadow Ban)
                         logger.warning(f"🔒 [Shadow Scan] {sym} 기회 포착했으나 슬롯 Full. 금일 제외.")
@@ -287,6 +292,4 @@ def main():
             time.sleep(10) # 에러 발생 시 잠시 대기 후 재시도
 
 if __name__ == "__main__":
-
     main()
-
