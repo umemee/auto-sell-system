@@ -241,7 +241,7 @@ def main():
                 if df.empty: continue
 
                 # 3. 전략 판정
-                signal = strategy.check_buy_signal(df, ticker=symbol)
+                signal = strategy.check_buy_signal(df, ticker=sym)
                 
                 if signal:
                     signal['ticker'] = sym
@@ -289,3 +289,4 @@ def main():
 if __name__ == "__main__":
 
     main()
+
