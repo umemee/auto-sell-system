@@ -189,25 +189,32 @@ def main():
             # 📉 4. [Exit] 청산 로직 (Trailing Stop & Stop Loss)
             # ---------------------------------------------------------
             for ticker in list(portfolio.positions.keys()):
+                # 1. 실시간 현재가 강제 조회
+                # (kis_api.get_current_price는 실시간 호가 데이터를 가져옴)
+                real_time_price = kis.get_current_price(ticker)
+                
+                # API 에러 등으로 가격을 못 가져오면, 기존 가격 유지하고 다음 루프로
+                if real_time_price is None or real_time_price <= 0:
+                    continue
+                
+                # 2. 포트폴리오 상태 즉시 업데이트
                 pos = portfolio.positions[ticker]
+                pos['current_price'] = real_time_price # 가격 덮어쓰기
                 
-                current_price = pos['current_price']
                 entry_price = pos['entry_price']
-                pnl_rate = pos['pnl_pct'] / 100.0
+                qty = pos['qty']
                 
-                # 고가 갱신 (Portfolio가 이미 update_highest_price를 가지고 있다면 호출, 아니면 직접 처리)
-                # 여기서는 직접 로직을 수행하여 안전성 확보, (Target Profit엔 불필요)
-                #if 'highest_price' not in pos:
-                #    pos['highest_price'] = max(current_price, entry_price)
-                
-                #if current_price > pos['highest_price']:
-                #    pos['highest_price'] = current_price
-                # 조건 검사
+                # 수익률 재계산 (가장 최신 가격 기준)
+                pnl_rate = (real_time_price - entry_price) / entry_price
+                pos['pnl_pct'] = pnl_rate * 100 # 상태창 표시용 업데이트
+
+                # ---------------------------------------------------------
+                # 3. 매도 조건 판단
+                # ---------------------------------------------------------
                 sell_signal = False
                 reason = ""
                 
-                # A. Target Profit (익절)
-                # 10% 이상 수익이면 즉시 매도 (지정가 매도 효과)
+                # A. Target Profit (익절) - 10% 이상이면 즉시 발동
                 if pnl_rate >= target_profit_rate:
                     sell_signal = True
                     reason = f"TAKE_PROFIT ({pnl_rate*100:.2f}% >= {target_profit_rate*100:.1f}%)"
@@ -217,16 +224,17 @@ def main():
                     sell_signal = True
                     reason = f"STOP_LOSS ({pnl_rate*100:.2f}%)"
 
-                # 매도 실행 (기존 코드 유지)
+                # ---------------------------------------------------------
+                # 4. 매도 실행
+                # ---------------------------------------------------------
                 if sell_signal:
                     limit_price = None
                     
-                    # [수정] 익절인 경우에만 지정가(현재가) 설정
+                    # 익절인 경우: 현재가(real_time_price)로 지정가 주문
                     if "TAKE_PROFIT" in reason:
-                        # 현재가로 지정가 주문을 내면 즉시 체결될 확률이 높음 (Limit Order)
-                        limit_price = current_price 
+                        limit_price = real_time_price 
                     
-                    # execute_sell 호출 시 price 전달
+                    # execute_sell 호출
                     result = order_manager.execute_sell(portfolio, ticker, reason, price=limit_price)
                     
                     if result:
