@@ -16,6 +16,7 @@ class RealOrderManager:
     """
     def __init__(self, kis_api):
         self.kis = kis_api
+        self.logger = get_logger("OrderManager")
 
     def execute_buy(self, portfolio, signal):
         """
@@ -146,6 +147,15 @@ class RealOrderManager:
         
         else:
             error_msg = resp.get('msg1', 'Unknown Error') if resp else "No Response"
-            self.logger.error(f"매도 주문 실패: {ticker} - {error_msg}")
+            error_code = resp.get('msg_cd', '') if resp else ""
+
+            self.logger.error(f"매도 주문 실패: {ticker} - {error_msg} (Code: {error_code})")
+            
+            # [추가] 잔고 부족 에러(APBK0988) 발생 시 -> 봇 포트폴리오에서 강제 삭제 (무한 시도 방지)
+            if error_code == "APBK0988":
+                self.logger.warning(f"⚠️ [{ticker}] 실제 잔고 부족 확인. 포트폴리오에서 강제 제외합니다.")
+                if ticker in portfolio.positions:
+                    del portfolio.positions[ticker]
+
             return {'status': 'fail', 'msg': f"❌ 매도 실패 {ticker}: {error_msg}"}
         
