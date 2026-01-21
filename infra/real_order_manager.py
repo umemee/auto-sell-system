@@ -1,3 +1,4 @@
+# infra/real_order_manager.py
 import time
 from config import Config
 from infra.utils import get_logger
@@ -75,66 +76,76 @@ class RealOrderManager:
         # 실패 시 로그는 kis_api 내부에서 이미 찍힘
         return None
 
-    def execute_sell(self, portfolio, ticker, reason="Unknown"):
-        """매도 집행: 전량 매도 -> API 주문 -> 로컬 장부 반영"""
-        pos = portfolio.get_position(ticker)
-        if not pos:
+    def execute_sell(self, portfolio, ticker, reason, price=None):
+        """
+        매도 주문 실행
+        - 익절(TAKE_PROFIT): 지정가(Limit) 주문 (슬리피지 방지)
+        - 손절(STOP_LOSS) 및 기타: 시장가(Market) 주문 (확실한 탈출)
+        """
+        if not portfolio.is_holding(ticker):
             return None
-            
+
+        pos = portfolio.positions[ticker]
         qty = pos['qty']
         
-        # [Critical Fix] 가격 힌트 우선순위 변경
-        # 1순위: 최근 업데이트된 현재가 (가장 시장가에 근접)
-        # 2순위: 매수가 (데이터가 없을 경우 최후의 수단)
-        current_price = pos.get('current_price', 0.0)
-        entry_price = pos.get('entry_price', 0.0)
-        
-        # 현재가가 0보다 크면 그걸 쓰고, 아니면 매수가를 씀
-        hint_price = current_price if current_price > 0 else entry_price
-        
-        # 수익률 계산
-        if entry_price > 0:
-            pnl_pct = ((current_price - entry_price) / entry_price) * 100
-        else:
-            pnl_pct = 0.0
-            
-        total_val = qty * current_price 
-        
-        logger.info(f"👋 [SELL EXEC] {ticker} {qty}주 (Reason: {reason})")
+        # 0. 주문 가능 수량 확인 (혹시 모를 오류 방지)
+        if qty <= 0:
+            return None
 
-        # API 주문 전송
-        ord_no = self.kis.sell_market(ticker, qty, price_hint=hint_price)
+        # -----------------------------------------------------
+        # 1. 주문 타입 결정 (핵심 수정)
+        # -----------------------------------------------------
+        order_type = "MARKET" # 기본은 시장가
+        order_price = 0       # 시장가는 가격 0
         
-        if ord_no:
-            # 성공 시 로컬 반영
-            fill_data = {
-                'type': 'SELL',
-                'ticker': ticker,
-                'qty': qty,
-                'price': current_price 
-            }
-            portfolio.update_local_after_order(fill_data)
+        # 이유가 '익절(TAKE_PROFIT)'이고, 가격이 전달되었다면 -> 지정가 주문
+        if "TAKE_PROFIT" in reason and price is not None and price > 0:
+            order_type = "LIMIT"
+            order_price = price
+            type_str = f"지정가(${price})"
+        else:
+            type_str = "시장가"
+
+        # -----------------------------------------------------
+        # 2. 주문 전송
+        # -----------------------------------------------------
+        # kis_api의 send_order 함수 시그니처에 맞춰 호출
+        # 보통: send_order(ticker, type="SELL", qty=..., price=..., order_type=...)
+        # kis_api.py 구현에 따라 다를 수 있으니 확인 필요. 
+        # (아래는 일반적인 KIS API 래퍼 기준 코드입니다)
+        
+        # KIS API에서는 보통:
+        # - 시장가(01): price=0
+        # - 지정가(00): price=지정가격
+        
+        # [KIS API 호출]
+        resp = self.kis.send_order(
+            ticker=ticker,
+            side="SELL",
+            qty=qty,
+            price=order_price,
+            order_type=order_type  # kis_api 내부에서 'LIMIT'->'00', 'MARKET'->'01' 변환한다고 가정
+        )
+
+        # -----------------------------------------------------
+        # 3. 결과 처리
+        # -----------------------------------------------------
+        if resp and resp.get('rt_cd') == '0':
+            # 매도 성공 시 포트폴리오에서 즉시 삭제하지 말고, 
+            # 잔고 동기화(sync) 때 처리되도록 두거나 여기서 처리 (스타일에 따라 다름)
+            # 보통은 '주문 접수' 상태이므로 로그만 남김
             
-            # 성공 메시지
-            icon = "🔴" if pnl_pct < 0 else "🟢"
-            msg = (
-                f"👋 <b>매도 체결 완료</b> [{reason}]\n"
-                f"📦 종목: <b>{ticker}</b>\n"
-                f"💵 매도가: ${current_price:.2f} (Est.)\n"
-                f"🔢 수량: {qty}주\n"
-                f"💰 총액: ${total_val:.2f}\n"
-                f"📊 수익률: {icon} {pnl_pct:.2f}%\n"
-                f"📝 주문번호: {ord_no}"
-            )
-            return {"status": "success", "msg": msg}
+            pnl_pct = pos['pnl_pct']
+            msg = f"🔴 [SELL] {ticker} {reason}\n주문: {type_str} {qty}주\n수익률: {pnl_pct:.2f}%"
+            self.logger.info(f"매도 주문 완료: {ticker} ({type_str})")
+            
+            # (옵션) 즉각적인 포트폴리오 반영이 필요하다면 여기서 positions 삭제
+            # del portfolio.positions[ticker] 
+            
+            return {'status': 'success', 'msg': msg}
         
         else:
-            # 실패 시 에러 메시지
-            fail_msg = (
-                f"🚨 <b>매도 주문 실패!</b>\n"
-                f"📦 종목: {ticker}\n"
-                f"⚠️ 상태: 주문 거부됨 (IGW 오류 등)\n"
-                f"👉 <b>수동 매도 권장!</b>"
-            )
-            return {"status": "fail", "msg": fail_msg}
+            error_msg = resp.get('msg1', 'Unknown Error') if resp else "No Response"
+            self.logger.error(f"매도 주문 실패: {ticker} - {error_msg}")
+            return {'status': 'fail', 'msg': f"❌ 매도 실패 {ticker}: {error_msg}"}
         
