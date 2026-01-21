@@ -56,12 +56,10 @@ class Config:
     EMA_LENGTH = 10           
     
     # [청산 설정: 백테스팅 Golden Set]
-    STOP_LOSS_PCT = 0.45      # -45% 손절
+    STOP_LOSS_PCT = 0.40      # -40% 손절
     
-    # [Trailing Stop]
-    TS_ENABLE = True
-    TS_ACTIVATION_PCT = 0.06  # 6% 수익 시 발동
-    TS_CALLBACK_PCT = 0.01    # 1% 반납 시 익절
-    
-    # (고정 익절은 사용 안 함)
-    TP_PCT = 1.0
+    # 3. [NEW] 목표 수익률 (챔피언 설정: +12%)
+    # 기존 Trailing Stop 설정은 주석 처리하거나 삭제하세요.
+    # TRAILING_STOP_CONFIG = { ... } (사용 안 함)
+    TP_PCT = 0.10   # +10% 목표 수익률 설정
+    TARGET_PROFIT_PCT = TP_PCT

@@ -75,10 +75,10 @@ def main():
         # 3. 전략 로딩 (변수명 'strategy'로 통일)
         strategy = get_strategy() 
         
-        # 전략 파라미터 로드
-        tp_rate = getattr(Config, 'TP_PCT', 0.06)        # 익절/TS발동 (기본 6%)
-        ts_callback = getattr(Config, 'TS_CALLBACK', 0.01) # 고점대비 하락 (1%)
-        sl_rate = -abs(getattr(Config, 'SL_PCT', 0.45))  # 손절 (기본 -45%)
+        # 기존: tp_rate(TS발동), ts_callback 등 -> 삭제
+        # 변경: 고정 익절(Target Profit) 설정
+        target_profit_rate = getattr(Config, 'TP_PCT', 0.10)     # [변경] 10%
+        sl_rate = -abs(getattr(Config, 'SL_PCT', 0.40))          # [유지] -40%
 
         # 4. 초기 상태 동기화
         logger.info("📡 증권사 서버와 동기화 중...")
@@ -90,10 +90,10 @@ def main():
         logger.info(f"🚫 수동 밴 리스트 적용 완료: {portfolio.ban_list}")
         
         start_msg = (
-            f"⚔️ [시스템 가동 v5.0]\n"
-            f"🧠 전략: {strategy.name}\n"
-            f"💰 자산: ${portfolio.total_equity:,.0f} (Cash: ${portfolio.balance:,.0f})\n"
-            f"🎯 목표: TS +{tp_rate*100:.1f}%(CallBack {ts_callback*100:.1f}%) / SL {sl_rate*100:.1f}%\n"
+            f"⚔️ [시스템 가동 v5.1 - Sniper Mode]\n"
+            f"🧠 전략: {strategy.name} (MA {strategy.ma_length})\n"
+            f"💰 자산: ${portfolio.total_equity:,.0f}\n"
+            f"🎯 목표: 익절 +{target_profit_rate*100:.1f}% / 손절 {sl_rate*100:.1f}%\n"
             f"🎰 슬롯: {len(portfolio.positions)} / {portfolio.MAX_SLOTS}"
         )
         bot.send_message(start_msg)
@@ -138,13 +138,29 @@ def main():
             # 🕒 1. [EOS] 장 마감 강제 청산 (15:50 ET)
             # ---------------------------------------------------------
             if now_et.hour == 15 and now_et.minute >= 50:
+                logger.info("🏁 [EOS] 정규장 마감 임박. 강제 청산 및 금일 매매 종료.")
+                
+                # 1. 보유 종목 전량 매도
                 if portfolio.positions:
-                    bot.send_message("🚨 [장 마감 임박] EOS 강제 청산 실행!")
+                    bot.send_message("🚨 [장 마감] EOS 강제 청산 실행 및 매매 종료!")
                     for ticker in list(portfolio.positions.keys()):
                         msg = order_manager.execute_sell(portfolio, ticker, "End of Session (EOS)")
                         if msg: bot.send_message(msg)
                         time.sleep(1)
-                time.sleep(60) # 청산 후 대기
+                else:
+                    logger.info("🏁 보유 포지션 없음. 안전하게 마감.")
+
+                # 2. [핵심] 남은 시간 동안 매매 금지 (Sleep loop)
+                # 16:00(장 마감)까지, 혹은 그 이후 애프터마켓을 건너뛰기 위해 긴 대기
+                # 여기서는 간단하게 다음날 03:50분까지 자거나, 루프를 멈추는 방식을 제안합니다.
+                
+                bot.send_message("😴 [Sleep] 금일 매매를 종료하고 내일 프리마켓까지 대기합니다.")
+                
+                # 다음 날 프리마켓 시작(04:00) 직전까지 대기하는 로직이 이상적이나,
+                # 단순하게는 '현재 루프 탈출' 후 10분 단위로 체크하거나, 긴 sleep을 줍니다.
+                time.sleep(60 * 60 * 4) # 4시간 대기 (확실하게 애프터마켓 초반 매수 방지)
+                
+                # 밴 리스트 초기화는 다음 루프의 날짜 변경 로직에서 처리됨
                 continue
 
             # ---------------------------------------------------------
@@ -180,39 +196,40 @@ def main():
                 pnl_rate = pos['pnl_pct'] / 100.0
                 
                 # 고가 갱신 (Portfolio가 이미 update_highest_price를 가지고 있다면 호출, 아니면 직접 처리)
-                # 여기서는 직접 로직을 수행하여 안전성 확보
-                if 'highest_price' not in pos:
-                    pos['highest_price'] = max(current_price, entry_price)
+                # 여기서는 직접 로직을 수행하여 안전성 확보, (Target Profit엔 불필요)
+                #if 'highest_price' not in pos:
+                #    pos['highest_price'] = max(current_price, entry_price)
                 
-                if current_price > pos['highest_price']:
-                    pos['highest_price'] = current_price
-
+                #if current_price > pos['highest_price']:
+                #    pos['highest_price'] = current_price
                 # 조건 검사
                 sell_signal = False
                 reason = ""
                 
-                # A. Trailing Stop
-                # 최고 수익률 계산
-                max_pnl_rate = (pos['highest_price'] - entry_price) / entry_price
-                
-                if max_pnl_rate >= tp_rate: # 목표 수익(예: 6%) 도달 했었음
-                    # 고점 대비 하락폭 계산
-                    trail_stop_price = pos['highest_price'] * (1 - ts_callback)
-                    if current_price <= trail_stop_price:
-                        sell_signal = True
-                        reason = f"Trailing Stop (High ${pos['highest_price']:.2f} -> Now ${current_price:.2f})"
-                
-                # B. Stop Loss (Hard)
-                elif pnl_rate <= sl_rate:
+                # A. Target Profit (익절)
+                # 10% 이상 수익이면 즉시 매도 (지정가 매도 효과)
+                if pnl_rate >= target_profit_rate:
                     sell_signal = True
-                    reason = f"Stop Loss ({pnl_rate*100:.2f}%)"
+                    reason = f"TAKE_PROFIT ({pnl_rate*100:.2f}% >= {target_profit_rate*100:.1f}%)"
+                
+                # B. Stop Loss (손절)
+                elif pnl_rate <= -sl_rate:
+                    sell_signal = True
+                    reason = f"STOP_LOSS ({pnl_rate*100:.2f}%)"
 
-                # 매도 실행
+                # 매도 실행 (기존 코드 유지)
                 if sell_signal:
-                    result = order_manager.execute_sell(portfolio, ticker, reason)
+                    limit_price = None
+                    
+                    # [수정] 익절인 경우에만 지정가(현재가) 설정
+                    if "TAKE_PROFIT" in reason:
+                        # 현재가로 지정가 주문을 내면 즉시 체결될 확률이 높음 (Limit Order)
+                        limit_price = current_price 
+                    
+                    # execute_sell 호출 시 price 전달
+                    result = order_manager.execute_sell(portfolio, ticker, reason, price=limit_price)
                     
                     if result:
-                        # 성공이든 실패든 메시지 전송
                         bot.send_message(result['msg'])
 
             # ---------------------------------------------------------
