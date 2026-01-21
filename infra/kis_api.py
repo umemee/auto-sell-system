@@ -97,7 +97,6 @@ class KisApi:
     @log_api_call("잔고 조회")
     def get_balance(self):
         path = "/uapi/overseas-stock/v1/trading/inquire-balance"
-        # _update_headers에서 T->V 변환을 하므로 여기선 실전용 ID만 넣어도 됨
         self._update_headers("TTTS3012R")
         
         params = {
@@ -117,10 +116,17 @@ class KisApi:
                 for item in output1:
                     qty = self._safe_float(item.get('ovrs_cblc_qty'))
                     if qty > 0:
+                        # ========================================================
+                        # 🔴 [수정 완료] 여기가 핵심입니다!
+                        # ========================================================
+                        # 기존: item.get('ovrs_stck_evlu_amt') -> 평가금액(X)
+                        # 변경: item.get('pchs_avg_pric')      -> 매입평단가(O)
+                        avg_price = self._safe_float(item.get('pchs_avg_pric'))
+                        
                         holdings.append({
                             "symbol": item.get('ovrs_pdno'),
                             "qty": qty,
-                            "price": self._safe_float(item.get('ovrs_stck_evlu_amt')),
+                            "price": avg_price,  # 평단가 저장
                             "pnl_pct": self._safe_float(item.get('frcr_evlu_pfls_rt'))
                         })
             else:
