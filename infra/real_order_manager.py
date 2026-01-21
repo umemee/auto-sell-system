@@ -64,14 +64,13 @@ class RealOrderManager:
             
             # 성공 메시지 생성
             msg = (
-                f"⚡ <b>매수 체결 완료</b>\n"
+                f"⚡ <b>매수 주문 전송 완료</b>\n"  # [수정] 체결 완료 -> 주문 전송 완료
                 f"📦 종목: <b>{ticker}</b>\n"
-                f"💵 가격: ${price:.2f}\n"
+                f"💵 가격: ${price:.2f} (주문가)\n" # [수정]
                 f"🔢 수량: {qty}주\n"
-                f"💰 총액: ${invest_amt:.2f}\n"
+                f"💰 예산: ${invest_amt:.2f}\n"
                 f"📝 주문번호: {ord_no}"
             )
-            # main.py가 처리하기 쉽도록 딕셔너리 리턴
             return {"status": "success", "msg": msg}
         
         # 실패 시 로그는 kis_api 내부에서 이미 찍힘
@@ -132,30 +131,27 @@ class RealOrderManager:
         # 3. 결과 처리
         # -----------------------------------------------------
         if resp and resp.get('rt_cd') == '0':
-            # 매도 성공 시 포트폴리오에서 즉시 삭제하지 말고, 
-            # 잔고 동기화(sync) 때 처리되도록 두거나 여기서 처리 (스타일에 따라 다름)
-            # 보통은 '주문 접수' 상태이므로 로그만 남김
-            
             pnl_pct = pos['pnl_pct']
-            msg = f"🔴 [SELL] {ticker} {reason}\n주문: {type_str} {qty}주\n수익률: {pnl_pct:.2f}%"
+            
+            # [수정] 주문 타입에 따라 메시지를 다르게 표시
+            if "TAKE_PROFIT" in reason:
+                 # 지정가 (익절)
+                 title = "🟠 [익절] 지정가 주문 접수 (대기)"
+                 price_desc = "목표가"
+            else:
+                 # 시장가 (손절/EOS) - 사실상 즉시 체결됨
+                 title = "🔴 [매도] 시장가 주문 전송 (체결)"
+                 price_desc = "시장가"
+
+            msg = (
+                f"{title}\n"
+                f"📦 종목: <b>{ticker}</b>\n"
+                f"📜 사유: {reason}\n"
+                f"💵 가격: ${order_price if order_price > 0 else 0:.2f} ({price_desc})\n"
+                f"🔢 수량: {qty}주\n"
+                f"📊 수익률: {pnl_pct:.2f}% (추정)"
+            )
             self.logger.info(f"매도 주문 완료: {ticker} ({type_str})")
             
-            # (옵션) 즉각적인 포트폴리오 반영이 필요하다면 여기서 positions 삭제
-            # del portfolio.positions[ticker] 
-            
             return {'status': 'success', 'msg': msg}
-        
-        else:
-            error_msg = resp.get('msg1', 'Unknown Error') if resp else "No Response"
-            error_code = resp.get('msg_cd', '') if resp else ""
-
-            self.logger.error(f"매도 주문 실패: {ticker} - {error_msg} (Code: {error_code})")
-            
-            # [추가] 잔고 부족 에러(APBK0988) 발생 시 -> 봇 포트폴리오에서 강제 삭제 (무한 시도 방지)
-            if error_code == "APBK0988":
-                self.logger.warning(f"⚠️ [{ticker}] 실제 잔고 부족 확인. 포트폴리오에서 강제 제외합니다.")
-                if ticker in portfolio.positions:
-                    del portfolio.positions[ticker]
-
-            return {'status': 'fail', 'msg': f"❌ 매도 실패 {ticker}: {error_msg}"}
         
