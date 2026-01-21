@@ -213,7 +213,7 @@ def main():
                     reason = f"TAKE_PROFIT ({pnl_rate*100:.2f}% >= {target_profit_rate*100:.1f}%)"
                 
                 # B. Stop Loss (손절)
-                elif pnl_rate <= -sl_rate:
+                elif pnl_rate <= sl_rate:
                     sell_signal = True
                     reason = f"STOP_LOSS ({pnl_rate*100:.2f}%)"
 
