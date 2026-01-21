@@ -350,3 +350,30 @@ class KisApi:
             self.logger.error(f"❌ 캔들 데이터 에러: {e}")
             
         return pd.DataFrame()
+    
+    def send_order(self, ticker, side, qty, price=None, order_type="MARKET"):
+        """
+        [New] RealOrderManager 호환용 래퍼 함수
+        역할: OrderManager의 요청(Dict 기대)을 받아 내부 함수(String 반환)와 연결하고 결과를 변환함
+        """
+        odno = None
+        
+        # 1. 매도 로직
+        if side == "SELL":
+            # 시장가(MARKET)거나 가격이 0이면 -> 기존 sell_market 로직(현재가 -5% 지정가) 재활용
+            if order_type == "MARKET" or not price or price <= 0:
+                odno = self.sell_market(ticker, qty)
+            else:
+                # 지정가(LIMIT) 매도 -> place_order_final 직접 호출
+                odno = self.place_order_final("NASD", ticker, "SELL", qty, price)
+        
+        # 2. 매수 로직 (혹시 모를 확장성 대비)
+        elif side == "BUY":
+            odno = self.buy_limit(ticker, price, qty)
+
+        # 3. [핵심] 리턴 타입 변환 (String -> Dictionary)
+        # RealOrderManager는 resp.get('rt_cd') == '0' 형태의 딕셔너리 응답을 기대함
+        if odno:
+            return {'rt_cd': '0', 'msg1': '주문 전송 성공', 'output': {'ODNO': odno}}
+        else:
+            return {'rt_cd': '1', 'msg1': '주문 전송 실패 (로그 확인)'}
