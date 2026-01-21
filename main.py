@@ -243,30 +243,38 @@ def main():
             # ---------------------------------------------------------
             # 🔭 5. [Entry] 진입 로직 (Shadow Scanning 포함)
             # ---------------------------------------------------------
-            scanned_targets = listener.scan_markets()
+            raw_targets = listener.scan_markets()
             
-            # 리스너에 감시 종목 업데이트 (상태창용)
+            # [최적화] 1. 보유 중이거나 2. 밴 당한 종목은 아예 리스트에서 제외
+            # 이렇게 하면 텔레그램 '감시 중'에도 안 뜨고, 불필요한 API 호출도 안 함
+            scanned_targets = [
+                sym for sym in raw_targets 
+                if not portfolio.is_holding(sym) and not portfolio.is_banned(sym)
+            ]
+            
+            # 리스너에 '정제된' 감시 종목 업데이트 (상태창용)
             listener.current_watchlist = scanned_targets 
 
+            # 감시할 종목이 없으면 대기 후 루프 처음으로
             if not scanned_targets:
                 time.sleep(1)
                 continue
 
             for sym in scanned_targets:
-                # [수정] API 호출 제한 방지를 위한 0.5초 대기 (가장 쉬운 해결책)
+                # [수정] API 호출 제한 방지를 위한 0.5초 대기
                 time.sleep(0.5)
                 
-                # 1. 이미 보유중이거나, 밴(금일 매매 금지) 리스트면 패스
-                if portfolio.is_holding(sym): continue
-                if portfolio.is_banned(sym): continue 
+                # -------------------------------------------------------
+                # [삭제됨] 중복 체크 로직 제거
+                # 위에서 이미 걸러냈으므로 여기서 다시 if portfolio... 할 필요 없음
+                # -------------------------------------------------------
                 
-                # 2. 캔들 조회
-                # [수정 완료] 파라미터 개수 오류 해결 ("NASD" 추가)
+                # 1. 캔들 조회
                 df = kis.get_minute_candles("NASD", sym)
                 
                 if df.empty: continue
 
-                # 3. 전략 판정
+                # 2. 전략 판정
                 signal = strategy.check_buy_signal(df, ticker=sym)
                 
                 if signal:
@@ -284,15 +292,15 @@ def main():
                                 if not portfolio.has_open_slot():
                                     break
                         else:
-                            # 🚨 [추가] 매수 시도했으나 자금부족 등으로 거절된 경우 (result가 None)
+                            # 매수 시도했으나 거절된 경우 (자금부족 등)
                             logger.warning(f"🚌 [Missed Bus] {sym} 진입 실패(자금부족/조건미달). 금일 제외.")
-                            portfolio.ban_list.add(sym) # 즉시 밴 리스트에 추가
+                            portfolio.ban_list.add(sym) 
 
                     else:
                         # B. 자리가 없으면 -> 그림자 밴(Shadow Ban)
                         logger.warning(f"🔒 [Shadow Scan] {sym} 기회 포착했으나 슬롯 Full. 금일 제외.")
                         portfolio.ban_list.add(sym)
-
+                        
             # 6. 생존 신고
             if time.time() - last_heartbeat_time > HEARTBEAT_INTERVAL:
                 eq = portfolio.total_equity
@@ -319,3 +327,4 @@ def main():
 if __name__ == "__main__":
 
     main()
+
