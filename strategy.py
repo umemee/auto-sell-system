@@ -18,9 +18,11 @@ class EmaStrategy:
         self.ma_length = getattr(Config, 'EMA_LENGTH', 10) 
         self.tp_pct = getattr(Config, 'TARGET_PROFIT_PCT', 0.10)      # 익절 10%
         self.sl_pct = getattr(Config, 'STOP_LOSS_PCT', 0.40) # Config 변수명 변경 반영
-        self.dip_tolerance = 0.005   # 0.5% (깻잎 한 장 차이 허용)
         self.max_daily_change = 0.80 # 80% (전일 종가 대비 80% 상승 시 진입 금지)
-        
+        # [추가] Hover Tolerance (반등 인정 범위)
+        # 0.002 (0.2%) -> EMA보다 0.2% 낮아도 매수 인정
+        self.dip_tolerance = getattr(Config, 'DIP_TOLERANCE', 0.005)     # Config 연결
+        self.hover_tolerance = getattr(Config, 'HOVER_TOLERANCE', 0.002) # Config 연결
         # 금일 과열로 인해 영구 퇴출된 종목을 기록할 집합 (메모리 캐싱)
         self.banned_tickers = set()
 
@@ -78,12 +80,18 @@ class EmaStrategy:
         # -----------------------------------------------------------
         # 기존: is_dip = prev_low < prev_ema
         # 변경: EMA보다 0.5% 위까지만 내려와도 눌림목으로 인정 (깻잎 한 장)
+        # 1. Dip (눌림목): 이전 저가가 EMA 근처까지 내려왔는가? (기존 동일)
         dip_threshold = prev_ema * (1.0 + self.dip_tolerance)
-        
         is_dip = prev_low <= dip_threshold
-        is_rebound = curr_price > curr_ema
         
-        if is_dip and is_rebound:
+        # 2. Hover (안착): 현재가가 EMA 근처에서 버티고 있는가? [수정됨]
+        # 기존: is_rebound = curr_price > curr_ema
+        # 변경: EMA를 뚫지 못했어도(미세하게 아래여도) 허용
+        # 예: EMA $28.16, 현재가 $28.11 -> 오차 0.17% (허용 범위 내) -> 매수
+        hover_threshold = curr_ema * (1.0 - self.hover_tolerance)
+        is_hovering = curr_price >= hover_threshold
+        
+        if is_dip and is_hovering:
             # 매수 신호 발생
             return {
                 'type': 'BUY',
@@ -91,7 +99,8 @@ class EmaStrategy:
                 'price': curr_price,
                 'ticker': ticker, 
                 'time': df['time'].iloc[-1],
-                'reason': f"Flexible Dip(Low {prev_low:.2f} <= {dip_threshold:.2f}) & Rebound"
+                # 로그에 Hover 조건 명시
+                'reason': f"Dip & Hover(Close {curr_price:.2f} >= {hover_threshold:.2f})"
             }
             
         return None

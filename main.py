@@ -86,7 +86,7 @@ def main():
         
         # [긴급 추가] 재시작 시 아까 밴 당한 종목들 복구
         # 시스템 재시작 후 이 줄은 나중에 지워도 됩니다.
-        portfolio.ban_list.update(['BNAI', 'BOXL', 'SLGB', 'MDIA']) 
+        portfolio.ban_list.update(['IVF', 'TWG', 'BTTC', 'RAPT', 'CCHH', 'CRVS', 'ICON', 'SHPH', 'AFJK', 'PTLE', 'SEGG', 'POLA', 'JAGX', 'LCFY', 'JFBR', 'AFJK', 'SVRE']) 
         logger.info(f"🚫 수동 밴 리스트 적용 완료: {portfolio.ban_list}")
         
         start_msg = (
@@ -116,6 +116,9 @@ def main():
     except Exception as e:
         logger.critical(f"❌ 초기화 실패: {e}")
         return
+    
+    # 감시 명단을 기억할 집합(Set) 선언 (Loop 진입 전)
+    active_candidates = set()
 
     # ---------------------------------------------------------
     # Main Loop
@@ -131,9 +134,9 @@ def main():
             if new_date_str != current_date_str:
                 logger.info(f"📅 [New Day] 날짜 변경: {current_date_str} -> {new_date_str}")
                 portfolio.ban_list.clear()
-                logger.info("✨ 금일 매매 금지 리스트(Ban List) 초기화 완료")
+                active_candidates.clear() # <--- [추가] 어제의 급등주는 잊어야 함
+                logger.info("✨ 금일 매매 금지 리스트 및 감시 명단 초기화 완료")
                 current_date_str = new_date_str
-
             # ---------------------------------------------------------
             # 🕒 1. [EOS] 장 마감 강제 청산 (15:50 ET)
             # ---------------------------------------------------------
@@ -243,15 +246,26 @@ def main():
             # ---------------------------------------------------------
             # 🔭 5. [Entry] 진입 로직 (Shadow Scanning 포함)
             # ---------------------------------------------------------
-            raw_targets = listener.scan_markets()
+            # [기존 코드 삭제]
+            # raw_targets = listener.scan_markets()
+            # scanned_targets = [ ... ]
+
+            # [변경 코드 시작] ==========================================
+            # 1. 현재 순간의 급등주 스캔
+            fresh_targets = listener.scan_markets()
             
-            # [최적화] 1. 보유 중이거나 2. 밴 당한 종목은 아예 리스트에서 제외
-            # 이렇게 하면 텔레그램 '감시 중'에도 안 뜨고, 불필요한 API 호출도 안 함
+            # 2. "한 번 해병은 영원한 해병" -> 감시 명단에 누적(Update)
+            if fresh_targets:
+                active_candidates.update(fresh_targets)
+            
+            # 3. 최종 감시 대상 선정 (누적된 active_candidates 사용)
+            # 보유 중이거나, 밴 당한 종목은 제외
             scanned_targets = [
-                sym for sym in raw_targets 
+                sym for sym in list(active_candidates)
                 if not portfolio.is_holding(sym) and not portfolio.is_banned(sym)
             ]
-            
+            # [변경 코드 끝] ============================================
+
             # 리스너에 '정제된' 감시 종목 업데이트 (상태창용)
             listener.current_watchlist = scanned_targets 
 
@@ -300,7 +314,7 @@ def main():
                         # B. 자리가 없으면 -> 그림자 밴(Shadow Ban)
                         logger.warning(f"🔒 [Shadow Scan] {sym} 기회 포착했으나 슬롯 Full. 금일 제외.")
                         portfolio.ban_list.add(sym)
-                        
+
             # 6. 생존 신고
             if time.time() - last_heartbeat_time > HEARTBEAT_INTERVAL:
                 eq = portfolio.total_equity
@@ -325,6 +339,4 @@ def main():
             time.sleep(10) # 에러 발생 시 잠시 대기 후 재시도
 
 if __name__ == "__main__":
-
     main()
-

@@ -55,6 +55,10 @@ class Config:
     # [진입 설정: EMA 10]
     EMA_LENGTH = 10           
     
+    # [전략 세부 보정]
+    DIP_TOLERANCE = 0.005    # 눌림목 인정 오차 (0.5%)
+    HOVER_TOLERANCE = 0.002  # 반등 인정 오차 (0.2%) - 깻잎 한 장 차이 허용
+
     # [청산 설정: 백테스팅 Golden Set]
     STOP_LOSS_PCT = 0.40      # -40% 손절
     
