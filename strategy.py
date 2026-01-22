@@ -63,44 +63,72 @@ class EmaStrategy:
                 return None
 
         # -----------------------------------------------------------
+        # [NEW Logic 0] 폭락 방지 (Crash Protection) - JEM 사례 방지
+        # -----------------------------------------------------------
+        # 최근 5개 봉(현재 봉 제외) 중 하나라도 -15% 이상 폭락한 음봉이 있다면 진입 금지
+        # 이유: JEM처럼 -23% 하락 후 기술적 반등이 나와도 십중팔구 더 떨어짐
+        
+        # 최근 5분간의 데이터 확인 (인덱스 에러 방지 위해 길이 체크)
+        lookback = 5
+        if len(df) > lookback:
+            recent_candles = df.iloc[-lookback-1:-1] # 현재 봉(-1) 제외한 직전 5개
+            
+            for idx, row in recent_candles.iterrows():
+                open_p = row['open']
+                close_p = row['close']
+                
+                if open_p > 0:
+                    change_pct = (close_p - open_p) / open_p
+                    
+                    # -15% 이상 하락한 '장대 음봉' 발견 시
+                    if change_pct <= -0.15: 
+                        self.logger.warning(f"📉 [Crash Protect] {ticker} 최근 폭락 감지({change_pct*100:.1f}%) -> 진입 보류")
+                        return None
+
+        # -----------------------------------------------------------
         # [Indicator] 지표 계산 (EMA)
         # -----------------------------------------------------------
         ema = df['close'].ewm(span=self.ma_length, adjust=False).mean()
         
-        # 1. 현재 가격 정보 (Current Bar)
-        curr_price = df['close'].iloc[-1] 
+        curr_row = df.iloc[-1]
+        prev_row = df.iloc[-2] # 눌림목 후보 (Dip Candle)
+        
+        curr_price = curr_row['close']
         curr_ema = ema.iloc[-1]
         
-        # 2. 직전 봉 정보 (Previous Bar)
-        prev_low = df['low'].iloc[-2]  
+        prev_open = prev_row['open']   # [NEW] 시가
+        prev_close = prev_row['close'] # [NEW] 종가
+        prev_low = prev_row['low']
         prev_ema = ema.iloc[-2]        
 
         # -----------------------------------------------------------
-        # [NEW Logic 2] 유연한 눌림목 (Flexible Dip)
+        # [NEW Logic 2] 유연한 눌림목 & 안착 (Flexible Dip & Hover)
         # -----------------------------------------------------------
-        # 기존: is_dip = prev_low < prev_ema
-        # 변경: EMA보다 0.5% 위까지만 내려와도 눌림목으로 인정 (깻잎 한 장)
-        # 1. Dip (눌림목): 이전 저가가 EMA 근처까지 내려왔는가? (기존 동일)
-        dip_threshold = prev_ema * (1.0 + self.dip_tolerance)
-        is_dip = prev_low <= dip_threshold
         
-        # 2. Hover (안착): 현재가가 EMA 근처에서 버티고 있는가? [수정됨]
-        # 기존: is_rebound = curr_price > curr_ema
-        # 변경: EMA를 뚫지 못했어도(미세하게 아래여도) 허용
-        # 예: EMA $28.16, 현재가 $28.11 -> 오차 0.17% (허용 범위 내) -> 매수
+        # 1. Dip (눌림목): 
+        #    A) 이전 저가가 EMA 근처까지 내려왔는가? (기존)
+        dip_threshold = prev_ema * (1.0 + self.dip_tolerance)
+        is_deep_enough = prev_low <= dip_threshold
+        
+        #    B) [수정] 눌림목 캔들은 반드시 '음봉(Bearish)'이어야 함 - GLSI 사례 방지
+        #       양봉이라면 '눌림'이 아니라 '상승 중 잠시 저가만 찍은 것'일 수 있음
+        is_bearish_dip = prev_close < prev_open 
+        
+        # 2. Hover (안착): 현재가가 EMA 근처에서 버티고 있는가?
         hover_threshold = curr_ema * (1.0 - self.hover_tolerance)
         is_hovering = curr_price >= hover_threshold
         
-        if is_dip and is_hovering:
-            # 매수 신호 발생
+        # [최종 판단]
+        # 깊이(Dip) + 음봉(Bearish) + 지지(Hover) 3박자가 맞아야 함
+        if is_deep_enough and is_bearish_dip and is_hovering:
+            
             return {
                 'type': 'BUY',
                 'strategy': self.name,
                 'price': curr_price,
                 'ticker': ticker, 
-                'time': df['time'].iloc[-1],
-                # 로그에 Hover 조건 명시
-                'reason': f"Dip & Hover(Close {curr_price:.2f} >= {hover_threshold:.2f})"
+                'time': curr_row['time'],
+                'reason': f"Bearish Dip(Low {prev_low:.2f} <= {dip_threshold:.2f}) & Hover"
             }
             
         return None
