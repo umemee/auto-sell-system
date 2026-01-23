@@ -1,5 +1,3 @@
-# config.py (중복 제거 및 최적화 완료 버전)
-
 import os
 import sys
 from dotenv import load_dotenv
@@ -8,7 +6,22 @@ load_dotenv(dotenv_path=".env.production")
 load_dotenv()
 
 class Config:
-    # === [계좌 및 인증] ===
+    # ==========================================
+    # 🕒 [시간 설정] (중요!)
+    # ==========================================
+    # 서버가 한국 시간이든 미국 시간이든 상관없이, 
+    # 아래 설정은 무조건 '미국 현지 시간(EST/EDT)' 기준입니다.
+    
+    # [활동 시간 설정]
+    # 4  = 프리마켓 시작 (한국 시간 18:00 겨울 / 17:00 여름)
+    # 9  = 정규장 시작 1시간 전
+    # 20 = 애프터마켓 종료 (한국 시간 10:00 겨울 / 09:00 여름)
+    ACTIVE_START_HOUR = 4  
+    ACTIVE_END_HOUR = 20   
+
+    # ==========================================
+    # 🏦 [계좌 및 인증]
+    # ==========================================
     APP_KEY = os.getenv("KIS_APP_KEY")
     APP_SECRET = os.getenv("KIS_APP_SECRET")
     _ACC_NO = os.getenv("KIS_ACCOUNT_NO")
@@ -26,13 +39,17 @@ class Config:
     # === [KIS API] ===
     BASE_URL = "https://openapi.koreainvestment.com:9443"
 
-    # === [스캐닝 설정] ===
+    # ==========================================
+    # 🔍 [스캐닝 설정]
+    # ==========================================
     MIN_CHANGE_PCT = 42.0           # 급등주 필터 (42% 이상)
     
-    # ✨ [추가] 실전 필터링 기준 (백테스팅 환경과 동기화)
+    # [실전 필터링 기준]
     FILTER_MIN_PRICE = 0.5          # 최소 주가 $0.5 (동전주 제외)
     FILTER_MAX_PRICE = 50.0         # 최대 주가 $50.0 (너무 비싼 주식 제외)
-    FILTER_MIN_TX_VALUE = 1000000   # 최소 거래대금 $1,000,000 (유동성 부족 제외)
+    # 💡 새벽 4시(프리마켓 초기)에는 거래량이 적으므로, 이 기준에 못 미쳐 종목이 안 잡힐 수 있습니다.
+    FILTER_MIN_TX_VALUE = 1000000   # 최소 거래대금 $1,000,000 (약 14억원)
+
     # === [리스크 관리] ===
     MAX_DAILY_LOSS_PCT = 6.0          # 일일 허용 손실 (-6%)
     MARKET_SELL_BUFFER_PCT = 0.95     # 시장가 매도 버퍼
@@ -47,27 +64,22 @@ class Config:
     ENABLE_DETAILED_LOGGING = True    
     LOG_PRICE_CHECKS = True           
     LOG_BALANCE_CHECKS = True         
+    HEARTBEAT_INTERVAL_SEC = 1800     # 30분마다 생존 신고
 
     # ==========================================
-    # ⚙️ STRATEGY PARAMETERS (Double Engine)
+    # ⚙️ [전략 파라미터] (Double Engine)
     # ==========================================
     ACTIVE_STRATEGY = "EMA_ZONE1"
     
     # [자금 관리]
-    MAX_SLOTS = 2             # ✅ 2종목 동시 보유 (MAX_POSITIONS 삭제됨)
+    MAX_SLOTS = 2             # 2종목 동시 보유
 
-    # [진입 설정: EMA 10]
+    # [진입 설정]
     EMA_LENGTH = 10           
-    
-    # [전략 세부 보정]
     DIP_TOLERANCE = 0.005    # 눌림목 인정 오차 (0.5%)
-    HOVER_TOLERANCE = 0.002  # 반등 인정 오차 (0.2%) - 깻잎 한 장 차이 허용
+    HOVER_TOLERANCE = 0.002  # 반등 인정 오차 (0.2%)
 
-    # [청산 설정: 백테스팅 Golden Set]
+    # [청산 설정]
     STOP_LOSS_PCT = 0.40      # -40% 손절
-    
-    # 3. [NEW] 목표 수익률 (챔피언 설정: +12%)
-    # 기존 Trailing Stop 설정은 주석 처리하거나 삭제하세요.
-    # TRAILING_STOP_CONFIG = { ... } (사용 안 함)
-    TP_PCT = 0.10   # +10% 목표 수익률 설정
-    TARGET_PROFIT_PCT = TP_PCT
+    TARGET_PROFIT_PCT = 0.10  # +10% 목표 수익률 (TP)
+    TP_PCT = TARGET_PROFIT_PCT # (호환성 유지)
