@@ -25,10 +25,14 @@ class Config:
 
     # === [KIS API] ===
     BASE_URL = "https://openapi.koreainvestment.com:9443"
-    
+
     # === [스캐닝 설정] ===
-    MIN_CHANGE_PCT = 42.0           # 급등주 필터 (42% 이상) - 유지!
+    MIN_CHANGE_PCT = 42.0           # 급등주 필터 (42% 이상)
     
+    # ✨ [추가] 실전 필터링 기준 (백테스팅 환경과 동기화)
+    FILTER_MIN_PRICE = 0.5          # 최소 주가 $0.5 (동전주 제외)
+    FILTER_MAX_PRICE = 50.0         # 최대 주가 $50.0 (너무 비싼 주식 제외)
+    FILTER_MIN_TX_VALUE = 1000000   # 최소 거래대금 $1,000,000 (유동성 부족 제외)
     # === [리스크 관리] ===
     MAX_DAILY_LOSS_PCT = 6.0          # 일일 허용 손실 (-6%)
     MARKET_SELL_BUFFER_PCT = 0.95     # 시장가 매도 버퍼
