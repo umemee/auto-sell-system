@@ -393,9 +393,7 @@ class KisApi:
         
         if side == "SELL":
             if order_type == "MARKET" or not price or price <= 0:
-                odno = self.sell_market(ticker, q
-
-ty)
+                odno = self.sell_market(ticker, qty)
             else:
                 odno = self.place_order_final("NASD", ticker, "SELL", qty, price)
         
@@ -407,3 +405,4 @@ ty)
             return {'rt_cd': '0', 'msg1': '주문 전송 성공', 'output': {'ODNO': odno}}
         else:
             return {'rt_cd': '1', 'msg1': '주문 전송 실패 (로그 확인)'}
+
