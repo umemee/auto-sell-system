@@ -106,17 +106,11 @@ class KisApi:
     def get_balance(self):
         """
         실시간 잔고 조회 (TTTS3012R)
+        - 보유 종목, 수량, 평단가 확인
         """
-        # 👇 [추가] 이 로그가 안 찍히면, 파일이 적용 안 된 것입니다.
-        self.logger.info("⚡ [DEBUG] Timeout 10초 적용된 get_balance 진입!") 
-
         path = "/uapi/overseas-stock/v1/trading/inquire-balance"
-        
-        # 👇 [추가] 만약 위 로그는 찍혔는데 여기서 멈추면, 범인은 Auth입니다.
-        self.logger.info("⚡ [DEBUG] 헤더 갱신 시도 중...")
         self._update_headers("TTTS3012R")
-        self.logger.info("⚡ [DEBUG] 헤더 갱신 완료!")
-    
+        
         params = {
             "CANO": Config.CANO, 
             "ACNT_PRDT_CD": Config.ACNT_PRDT_CD,
@@ -399,7 +393,9 @@ class KisApi:
         
         if side == "SELL":
             if order_type == "MARKET" or not price or price <= 0:
-                odno = self.sell_market(ticker, qty)
+                odno = self.sell_market(ticker, q
+
+ty)
             else:
                 odno = self.place_order_final("NASD", ticker, "SELL", qty, price)
         
@@ -411,5 +407,3 @@ class KisApi:
             return {'rt_cd': '0', 'msg1': '주문 전송 성공', 'output': {'ODNO': odno}}
         else:
             return {'rt_cd': '1', 'msg1': '주문 전송 실패 (로그 확인)'}
-
-
