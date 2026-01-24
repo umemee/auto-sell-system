@@ -75,8 +75,8 @@ def is_active_market_time():
     now_kst = datetime.datetime.now(tz_kst)
 
     # 3. 주말 체크 (0:월 ~ 4:금, 5:토, 6:일)
-    #if now_et.weekday() >= 5: 
-        #return False, f"주말 (Weekend) - KST: {now_kst.strftime('%H:%M')}"
+    if now_et.weekday() >= 5: 
+        return False, f"주말 (Weekend) - KST: {now_kst.strftime('%H:%M')}"
 
     # 4. 휴장일 체크 (미국 공휴일)
     holidays = [
@@ -359,5 +359,6 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
