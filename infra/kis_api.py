@@ -4,7 +4,9 @@ import os
 import requests
 import json
 import pandas as pd
-import time # [Safety] 재시도 로직에서 대기 시간을 위해 명시적 import
+import time
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 
 # -----------------------------------------------------------
 # [필수] 상위 폴더(config.py가 있는 곳)를 인식하도록 경로 강제 추가
@@ -16,20 +18,18 @@ sys.path.append(root_dir)
 from config import Config
 from infra.utils import get_logger, log_api_call
 
-# 전역 로거 (데코레이터 등에서 사용)
-logger = get_logger()
-
 class KisApi:
     """
-    [한국투자증권 API 래퍼 클래스]
+    [한국투자증권 API 래퍼 클래스 v5.3]
+    - 핵심 변경사항: 'Smart Retry' 로직 도입
     - 역할: 시세 조회, 잔고 확인, 주문 전송 등 서버와의 모든 통신 담당
-    - 안전장치: 모든 네트워크 요청에 Timeout을 적용하여 '무한 대기(Hang)' 방지
+    - 안전장치: 네트워크 불안정(Timeout) 시 즉시 포기하지 않고 3회 재시도 수행
     """
     def __init__(self, token_manager):
         self.tm = token_manager
         self.base_url = Config().BASE_URL
         
-        # [수정] self.logger 명시적 선언 (AttributeError 해결)
+        # 로거 설정
         self.logger = get_logger("KisApi")
         
         self.headers = {
@@ -40,6 +40,17 @@ class KisApi:
             "tr_id": "",
             "custtype": "P"
         }
+        
+        # [Smart Retry] 세션 설정 (HTTP 연결 풀링 및 재시도)
+        # requests.get을 매번 새로 만드는 것보다 Session을 쓰면 훨씬 빠르고 안정적입니다.
+        self.session = requests.Session()
+        retries = Retry(
+            total=3,                # 최대 3번 재시도
+            backoff_factor=0.3,     # 0.3초, 0.6초, 1.2초... 간격으로 대기
+            status_forcelist=[500, 502, 503, 504], # 서버 에러 시 재시도
+            allowed_methods=["GET"] # GET 요청만 재시도 (주문(POST)은 중복 위험으로 제외)
+        )
+        self.session.mount('https://', HTTPAdapter(max_retries=retries))
 
     def _update_headers(self, tr_id):
         """API 호출 전 토큰과 TR_ID(거래코드)를 헤더에 갱신"""
@@ -47,12 +58,11 @@ class KisApi:
         self.headers["tr_id"] = tr_id
         
         # [모의투자 자동 변환 로직]
-        # 실전 TR(T로 시작)을 모의 TR(V로 시작)로 자동 변환하여 호환성 유지
         if "vts" in self.base_url and tr_id.startswith("T"):
             self.headers["tr_id"] = "V" + tr_id[1:]
 
     def _safe_float(self, val):
-        """문자열 숫자를 안전하게 float로 변환 (쉼표 제거 등)"""
+        """문자열 숫자를 안전하게 float로 변환"""
         try:
             if not val: return 0.0
             return float(str(val).replace(",", ""))
@@ -60,9 +70,55 @@ class KisApi:
             return 0.0
             
     def _get_lookup_excd(self, exchange):
-        """거래소 코드를 API 규격에 맞게 변환 (NASD -> NAS 등)"""
+        """거래소 코드 변환 (NASD -> NAS)"""
         excd_map = {"NASD": "NAS", "NYSE": "NYS", "AMEX": "AMS"}
         return excd_map.get(exchange, exchange)
+
+    # =================================================================
+    # 🛠️ [핵심] 스마트 요청 처리기 (Smart Request Handler)
+    # =================================================================
+    def _fetch_with_retry(self, path, params, tr_id, method="GET", timeout=5):
+        """
+        [공통 함수] 모든 조회 요청은 이 함수를 거쳐갑니다.
+        - 자동으로 헤더를 갱신하고
+        - 타임아웃 발생 시 재시도하며
+        - 에러를 우아하게(Graceful) 처리합니다.
+        """
+        self._update_headers(tr_id)
+        url = f"{self.base_url}{path}"
+        
+        try:
+            # Session을 사용하여 재시도 로직 적용
+            if method == "GET":
+                res = self.session.get(url, headers=self.headers, params=params, timeout=timeout)
+            else:
+                # POST는 재시도 로직을 함부로 쓰면 안 됨 (주문 중복 위험)
+                res = requests.post(url, headers=self.headers, json=params, timeout=timeout)
+            
+            # 응답 코드가 200이 아니면 에러 발생
+            res.raise_for_status()
+            
+            # JSON 파싱
+            data = res.json()
+            
+            # KIS API 자체 에러 코드 확인 (rt_cd가 0이 아니면 실패)
+            if data.get('rt_cd') != '0':
+                # 단, 장 종료 등 흔한 메시지는 로그 레벨을 낮출 수 있음
+                msg = data.get('msg1')
+                # self.logger.warning(f"⚠️ API 호출 실패 [{tr_id}]: {msg}")
+                return None
+                
+            return data
+            
+        except requests.exceptions.Timeout:
+            self.logger.error(f"⏳ [Timeout] 요청 시간 초과: {tr_id}")
+            return None
+        except requests.exceptions.RequestException as e:
+            self.logger.error(f"💥 [Network Error] 통신 실패: {e}")
+            return None
+        except json.JSONDecodeError:
+            self.logger.error(f"📝 [JSON Error] 응답 데이터 파싱 실패")
+            return None
 
     # =================================================================
     # 💰 [자산 관련] 예수금 및 잔고 조회
@@ -70,47 +126,27 @@ class KisApi:
 
     @log_api_call("예수금 조회(주문가능)")
     def get_buyable_cash(self, symbol="AAPL"):
-        """
-        예수금 조회 (TTTS3007R) - 실제 주문 가능 금액 확인용
-        """
+        """예수금 조회 (재시도 로직 적용됨)"""
         path = "/uapi/overseas-stock/v1/trading/inquire-psamount"
-        self._update_headers("TTTS3007R")
-        
         params = {
             "CANO": Config.CANO,
             "ACNT_PRDT_CD": Config.ACNT_PRDT_CD,
             "OVRS_EXCG_CD": "NASD", 
-            "OVRS_ORD_UNPR": "0",   # [수정] 빈 문자열("") -> "0"
-            "ITEM_CD": symbol       # [수정] 빈 문자열("") -> 대표종목(AAPL)
+            "OVRS_ORD_UNPR": "0",
+            "ITEM_CD": symbol
         }
         
-        try:
-            # 🛑 [Safety Fix] timeout=5 추가
-            # 예수금 조회하다가 멈추면 매매 자체가 불가능하므로 5초 제한
-            res = requests.get(f"{self.base_url}{path}", headers=self.headers, params=params, timeout=5)
-            data = res.json()
-            
-            if data['rt_cd'] == '0':
-                output = data['output']
-                # frcr_ord_psbl_amt1: 외화주문가능금액 (통합)
-                cash = float(output.get('frcr_ord_psbl_amt1', 0))
-                return cash
-            else:
-                self.logger.error(f"❌ 주문가능금액 조회 실패: {data['msg1']} (Code: {data.get('msg_cd')})")
-                return 0.0
-        except Exception as e:
-            self.logger.error(f"❌ API Error (get_buyable_cash): {e}")
-            return 0.0
+        # [Smart Retry] 적용
+        data = self._fetch_with_retry(path, params, "TTTS3007R", timeout=5)
+        
+        if data:
+            return float(data['output'].get('frcr_ord_psbl_amt1', 0))
+        return 0.0
 
     @log_api_call("잔고 조회")
     def get_balance(self):
-        """
-        실시간 잔고 조회 (TTTS3012R)
-        - 보유 종목, 수량, 평단가 확인
-        """
+        """실시간 잔고 조회 (재시도 로직 적용됨)"""
         path = "/uapi/overseas-stock/v1/trading/inquire-balance"
-        self._update_headers("TTTS3012R")
-        
         params = {
             "CANO": Config.CANO, 
             "ACNT_PRDT_CD": Config.ACNT_PRDT_CD,
@@ -119,31 +155,23 @@ class KisApi:
             "CTX_AREA_FK200": "", 
             "CTX_AREA_NK200": ""
         }
+        
+        # [Smart Retry] 적용 (데이터가 크므로 timeout 10초)
+        data = self._fetch_with_retry(path, params, "TTTS3012R", timeout=10)
+        
         holdings = []
-        try:
-            # 🛑 [Safety Fix] timeout=10 추가
-            # 잔고 데이터는 중요하고 양이 많을 수 있으므로 10초까지 허용
-            res = requests.get(f"{self.base_url}{path}", headers=self.headers, params=params, timeout=10)
-            data = res.json()
-            
-            if data['rt_cd'] == '0':
-                output1 = data.get('output1', [])
-                for item in output1:
-                    qty = self._safe_float(item.get('ovrs_cblc_qty'))
-                    if qty > 0:
-                        # [데이터 정합성] item.get('pchs_avg_pric') -> 매입평단가
-                        avg_price = self._safe_float(item.get('pchs_avg_pric'))
-                        
-                        holdings.append({
-                            "symbol": item.get('ovrs_pdno'),
-                            "qty": qty,
-                            "price": avg_price,  # 평단가 저장
-                            "pnl_pct": self._safe_float(item.get('frcr_evlu_pfls_rt'))
-                        })
-            else:
-                self.logger.error(f"❌ 잔고 조회 실패: {data.get('msg1')}")
-        except Exception as e:
-            self.logger.error(f"❌ 잔고 조회 중 에러: {e}")
+        if data:
+            output1 = data.get('output1', [])
+            for item in output1:
+                qty = self._safe_float(item.get('ovrs_cblc_qty'))
+                if qty > 0:
+                    avg_price = self._safe_float(item.get('pchs_avg_pric'))
+                    holdings.append({
+                        "symbol": item.get('ovrs_pdno'),
+                        "qty": qty,
+                        "price": avg_price,
+                        "pnl_pct": self._safe_float(item.get('frcr_evlu_pfls_rt'))
+                    })
         return holdings
 
     # =================================================================
@@ -156,126 +184,74 @@ class KisApi:
         급등주 랭킹 조회 (등락률 상위)
         - 실패 시 거래량 상위 랭킹(Fallback)으로 자동 전환
         """
-        try:
-            path = "/uapi/overseas-stock/v1/ranking/updown-rate" 
-            self._update_headers("HHDFS76290000")
-            params = {
-                "AUTH": "", "EXCD": "NAS", "GUBN": "1", "NDAY": "0", 
-                "VOL_RANG": "0", "KEYB": ""
-            }
-            # [Safety] 이미 timeout=10이 적용되어 있어 안전함
-            res = requests.get(f"{self.base_url}{path}", headers=self.headers, params=params, timeout=10)
-            
-            if res.status_code != 200 or not res.text.strip().startswith("{"):
-                raise ValueError("Invalid Response Format")
+        path = "/uapi/overseas-stock/v1/ranking/updown-rate" 
+        params = {
+            "AUTH": "", "EXCD": "NAS", "GUBN": "1", "NDAY": "0", 
+            "VOL_RANG": "0", "KEYB": ""
+        }
+        
+        # [Smart Retry] 적용
+        data = self._fetch_with_retry(path, params, "HHDFS76290000", timeout=10)
+        
+        if data and data.get('output2'):
+            return data.get('output2')
 
-            data = res.json()
-            if data['rt_cd'] == '0':
-                result = data.get('output2', [])
-                if not result:
-                    raise ValueError("Ranking data is empty")
-                return result
-                
-        except Exception as e:
-            self.logger.warning(f"⚠️ 등락률 조회 실패 또는 데이터 없음: {e}. 거래량 순위로 우회합니다.")
-            pass 
-
-        # 1차 조회 실패 시 백업 로직 실행
-        try:
-            return self._get_volume_ranking()
-        except Exception as e:
-            self.logger.error(f"❌ 랭킹 조회 최종 실패: {e}")
-            return []
+        # 1차 조회 실패 시 백업 로직 실행 (로그 남김)
+        self.logger.warning("⚠️ 등락률 순위 조회 실패 -> 거래량 순위로 우회 시도")
+        return self._get_volume_ranking()
 
     def _get_volume_ranking(self):
-        """
-        [Fallback] 거래량 상위 종목 조회
-        🚨 중요: 지난번 시스템 멈춤의 원인이었던 곳입니다.
-        """
+        """[Fallback] 거래량 상위 종목 조회"""
         path = "/uapi/overseas-stock/v1/ranking/trade-vol"
-        self._update_headers("HHDFS76310010") 
         params = {
             "AUTH": "", "EXCD": "NAS", "GUBN": "0", "VOL_RANG": "0", "KEYB": ""
         }
         
-        # 🛑 [CRITICAL FIX] timeout=5 추가
-        # 여기서 응답이 없으면 5초 뒤에 끊고, 시스템이 다음 루프로 넘어가도록 함.
-        # 절대 이 줄을 지우거나 timeout을 제거하지 마세요.
-        res = requests.get(f"{self.base_url}{path}", headers=self.headers, params=params, timeout=5)
+        # [Smart Retry] 여기도 적용해야 완벽합니다.
+        data = self._fetch_with_retry(path, params, "HHDFS76310010", timeout=5)
         
-        data = res.json()
-        if data['rt_cd'] == '0':
-            return data.get('output', [])
+        if data and data.get('output'):
+            return data.get('output')
+        
+        self.logger.error("❌ 랭킹 조회 최종 실패 (등락률 & 거래량 모두 응답 없음)")
         return []
 
     @log_api_call("현재가 상세 조회")
     def get_current_price(self, symbol, exchange="NAS"):
-        """
-        [실시간 현재가 조회]
-        - 반환값: 현재가(float) 단일 값
-        """
+        """실시간 현재가 조회"""
         path = "/uapi/overseas-price/v1/quotations/price-detail"
-        self._update_headers("HHDFS76200200")
-        
-        # exchange가 없으면 NAS(나스닥)으로 간주
         lookup_excd = self._get_lookup_excd(exchange) 
-        
         params = {
-            "AUTH": "", 
-            "EXCD": lookup_excd, 
-            "SYMB": symbol
+            "AUTH": "", "EXCD": lookup_excd, "SYMB": symbol
         }
         
-        try:
-            # [Safety] timeout=5 적용됨
-            res = requests.get(f"{self.base_url}{path}", headers=self.headers, params=params, timeout=5)
-            data = res.json()
-            
-            if data['rt_cd'] == '0':
-                output = data['output']
-                # [중요] 딕셔너리가 아닌 '현재가(last)' 값만 추출하여 반환
-                return self._safe_float(output.get('last', 0))
-            else:
-                self.logger.warning(f"⚠️ 현재가 조회 실패 ({symbol}): {data.get('msg1')}")
-                return None
-                
-        except Exception as e:
-            self.logger.error(f"❌ 현재가 조회 중 에러 ({symbol}): {e}")
-            return None
+        data = self._fetch_with_retry(path, params, "HHDFS76200200", timeout=5)
+        
+        if data:
+            return self._safe_float(data['output'].get('last', 0))
+        return None
 
     def get_minute_candles(self, market, symbol, limit=400):
-        """분봉 데이터 조회 (전략 계산용)"""
+        """분봉 데이터 조회"""
         path = "/uapi/overseas-price/v1/quotations/inquire-time-itemchartprice"
-        self._update_headers("HHDFS76950200")
         params = {
             "AUTH": "", "EXCD": "NAS", "SYMB": symbol,
             "NMIN": "1", "PINC": "1", "NEXT": "", "NREC": str(limit), "KEYB": ""
         }
-        try:
-            # [Safety] timeout=10 적용됨
-            res = requests.get(f"{self.base_url}{path}", headers=self.headers, params=params, timeout=10)
-            data = res.json()
-            if data['rt_cd'] == '0' and data.get('output2'):
-                df = pd.DataFrame(data['output2'])
-                
-                df = df.rename(columns={
-                    'kymd': 'date', 'khms': 'time',
-                    'open': 'open', 'high': 'high', 'low': 'low', 
-                    'last': 'close', 
-                    'vols': 'volume', 
-                    'evol': 'volume'
-                })
-                
-                for col in ['open', 'high', 'low', 'close', 'volume']:
-                    if col in df.columns:
-                        df[col] = df[col].apply(self._safe_float)
-                    
-                return df.sort_values('time')
-            else:
-                self.logger.warning(f"⚠️ 캔들 조회 실패 ({symbol}): {data.get('msg1')}")
-
-        except Exception as e:
-            self.logger.error(f"❌ 캔들 데이터 에러: {e}")
+        
+        data = self._fetch_with_retry(path, params, "HHDFS76950200", timeout=10)
+        
+        if data and data.get('output2'):
+            df = pd.DataFrame(data['output2'])
+            df = df.rename(columns={
+                'kymd': 'date', 'khms': 'time',
+                'open': 'open', 'high': 'high', 'low': 'low', 
+                'last': 'close', 'vols': 'volume', 'evol': 'volume'
+            })
+            for col in ['open', 'high', 'low', 'close', 'volume']:
+                if col in df.columns:
+                    df[col] = df[col].apply(self._safe_float)
+            return df.sort_values('time')
             
         return pd.DataFrame()
 
@@ -284,33 +260,28 @@ class KisApi:
     # =================================================================
 
     def buy_limit(self, symbol, price, qty):
-        """지정가 매수 래퍼 함수"""
+        """지정가 매수"""
         return self.place_order_final("NASD", symbol, "BUY", qty, price)
 
     @log_api_call("주문 전송")
     def place_order_final(self, exchange, symbol, side, qty, price):
         """
         [Smart Order] 거래소 자동 감지 및 주문 전송
-        - NASD 실패 시 AMS, NYSE 순으로 자동 재시도
+        - 주문은 재시도(Retry)를 함부로 하면 중복 체결 위험이 있으므로
+        - 기존 방식대로 거래소를 변경(Fail-over)하는 방식만 유지합니다.
         """
         path = "/uapi/overseas-stock/v1/trading/order"
         is_buy = (side == "BUY")
-        
-        # 실전투자 ID 기준 (모의투자는 _update_headers에서 자동 변환됨)
         tr_id = "TTTT1002U" if is_buy else "TTTT1006U"
 
-        self._update_headers(tr_id)
-
+        # 가격 포맷팅
         try:
             f_price = float(price)
-            if f_price < 1.0:
-                final_price = f"{f_price:.4f}"
-            else:
-                final_price = f"{f_price:.2f}"
+            final_price = f"{f_price:.4f}" if f_price < 1.0 else f"{f_price:.2f}"
         except:
             final_price = "0"
 
-        # [스마트 로직] 시도할 거래소 목록
+        # 시도할 거래소 목록 (NASD -> AMS -> NYSE)
         exchange_candidates = [exchange]
         if exchange == "NASD":
             exchange_candidates.extend(["AMS", "NYSE"]) 
@@ -318,6 +289,9 @@ class KisApi:
         last_error_msg = ""
 
         for try_exch in exchange_candidates:
+            # 주문은 POST 요청이므로 _fetch_with_retry를 쓰지 않고 직접 호출
+            # (주문 중복 방지를 위해 requests.post를 1회만 시도)
+            self._update_headers(tr_id)
             body = {
                 "CANO": Config.CANO, 
                 "ACNT_PRDT_CD": Config.ACNT_PRDT_CD,
@@ -330,79 +304,59 @@ class KisApi:
             }
             
             try:
-                # [Safety] 주문은 중요하므로 timeout 10초
+                # [Safety] 주문 타임아웃 10초
                 res = requests.post(f"{self.base_url}{path}", headers=self.headers, json=body, timeout=10)
                 data = res.json()
                 
                 if data['rt_cd'] == '0':
                     odno = data['output'].get('ODNO')
-                    self.logger.info(f"✅ 주문 전송 성공 ({try_exch}) [{side}] {symbol} {qty}주 (주문번호: {odno})")
+                    self.logger.info(f"✅ 주문 성공 ({try_exch}) [{side}] {symbol} {qty}주 #{odno}")
                     return odno
                 else:
                     msg = data.get('msg1')
                     code = data.get('msg_cd')
-                    self.logger.warning(f"⚠️ 주문 실패 ({try_exch}): {msg} (Code: {code}) -> 거래소 변경 시도")
+                    self.logger.warning(f"⚠️ 주문 실패 ({try_exch}): {msg} (Code: {code}) -> 거래소 변경")
                     last_error_msg = f"{msg} ({code})"
                     
             except Exception as e: 
-                self.logger.error(f"❌ API 통신 에러: {e}")
-                return None
+                self.logger.error(f"❌ 주문 통신 에러 ({try_exch}): {e}")
+                last_error_msg = str(e)
             
-            # 너무 빠른 재시도 방지
-            time.sleep(0.1)
+            # 너무 빠른 거래소 변경 방지
+            time.sleep(0.2)
 
         self.logger.error(f"❌ 최종 주문 실패 ({symbol}): {last_error_msg}")
         return None
 
     def sell_market(self, symbol, qty, price_hint=None):
-        """
-        시장가(실제로는 -5% 지정가) 매도
-        """
-        # 1. 현재가 조회 시도 (최대 3회 재시도)
-        current_price = 0.0
-        for i in range(3): 
-            try:
-                price_data = self.get_current_price(symbol, exchange="NAS")
-                if price_data:
-                    current_price = float(price_data)
-                    break 
-            except Exception as e:
-                self.logger.warning(f"⚠️ [매도] 시세 조회 일시적 실패 ({i+1}/3) - {symbol}: {e}")
-            time.sleep(0.2) 
-
-        # 2. 가격 결정 (현재가 대비 -5%로 설정하여 시장가처럼 체결 유도)
+        """시장가(현재가 -5% 지정가) 매도"""
+        # 현재가 조회 (여기서는 _fetch_with_retry 덕분에 내부적으로 3회 시도됨)
+        current_price = self.get_current_price(symbol, exchange="NAS")
+        
         final_price = 0.0
-        if current_price > 0:
+        if current_price and current_price > 0:
             final_price = current_price * 0.95 
         elif price_hint and price_hint > 0:
-            self.logger.warning(f"⚠️ [매도] 시세 조회 최종 실패 -> 장부가(${price_hint}) 기준 -5% 주문")
+            self.logger.warning(f"⚠️ 시세 조회 실패 -> 장부가(${price_hint}) 기준 -5% 주문")
             final_price = price_hint * 0.95
         else:
-            self.logger.error(f"🚨 [매도] 가격 정보 전무. 주문 불가.")
+            self.logger.error(f"🚨 [매도 불가] 가격 정보 없음")
             return None 
 
-        # 3. 주문 실행
         return self.place_order_final("NASD", symbol, "SELL", qty, final_price)
 
     def send_order(self, ticker, side, qty, price=None, order_type="MARKET"):
-        """
-        [호환성 래퍼] RealOrderManager용 함수
-        - 리턴값을 딕셔너리 형태로 변환하여 OrderManager가 이해할 수 있게 함
-        """
+        """[호환성 래퍼] RealOrderManager용"""
         odno = None
-        
         if side == "SELL":
             if order_type == "MARKET" or not price or price <= 0:
                 odno = self.sell_market(ticker, qty)
             else:
                 odno = self.place_order_final("NASD", ticker, "SELL", qty, price)
-        
         elif side == "BUY":
             odno = self.buy_limit(ticker, price, qty)
 
-        # 결과 변환
         if odno:
             return {'rt_cd': '0', 'msg1': '주문 전송 성공', 'output': {'ODNO': odno}}
         else:
             return {'rt_cd': '1', 'msg1': '주문 전송 실패 (로그 확인)'}
-

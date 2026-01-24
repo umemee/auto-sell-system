@@ -87,7 +87,9 @@ class RealOrderManager:
 
         pos = portfolio.positions[ticker]
         qty = pos['qty']
-        
+        # [추가] 진입 가격과 진입 시각을 확보합니다.
+        entry_price = pos['entry_price']
+        entry_time = pos.get('entry_time') # 포트폴리오 장부에 기록된 진입 시각
         # 0. 주문 가능 수량 확인 (혹시 모를 오류 방지)
         if qty <= 0:
             return None

@@ -1,3 +1,4 @@
+# config.py
 import os
 import sys
 from dotenv import load_dotenv
@@ -48,7 +49,7 @@ class Config:
     FILTER_MIN_PRICE = 0.5          # 최소 주가 $0.5 (동전주 제외)
     FILTER_MAX_PRICE = 50.0         # 최대 주가 $50.0 (너무 비싼 주식 제외)
     # 💡 새벽 4시(프리마켓 초기)에는 거래량이 적으므로, 이 기준에 못 미쳐 종목이 안 잡힐 수 있습니다.
-    FILTER_MIN_TX_VALUE = 1000000   # 최소 거래대금 $1,000,000 (약 14억원)
+    FILTER_MIN_TX_VALUE = 50000   # 최소 거래대금 $50,000 (약 7천만원)
 
     # === [리스크 관리] ===
     MAX_DAILY_LOSS_PCT = 6.0          # 일일 허용 손실 (-6%)
@@ -83,5 +84,4 @@ class Config:
     STOP_LOSS_PCT = 0.40      # -40% 손절
     TARGET_PROFIT_PCT = 0.10  # +10% 목표 수익률 (TP)
     TP_PCT = TARGET_PROFIT_PCT # (호환성 유지)
-
 
