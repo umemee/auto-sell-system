@@ -1,17 +1,18 @@
 # infra/kis_api.py
 import sys
 import os
-
-# -----------------------------------------------------------
-# [필수] 상위 폴더(config.py가 있는 곳)를 인식하도록 경로 강제 추가
-current_dir = os.path.dirname(os.path.abspath(__file__)) 
-root_dir = os.path.dirname(current_dir)                  
-sys.path.append(root_dir)                                
-# -----------------------------------------------------------
-
 import requests
 import json
 import pandas as pd
+import time # [Safety] 재시도 로직에서 대기 시간을 위해 명시적 import
+
+# -----------------------------------------------------------
+# [필수] 상위 폴더(config.py가 있는 곳)를 인식하도록 경로 강제 추가
+# -----------------------------------------------------------
+current_dir = os.path.dirname(os.path.abspath(__file__)) 
+root_dir = os.path.dirname(current_dir)                  
+sys.path.append(root_dir)                                
+
 from config import Config
 from infra.utils import get_logger, log_api_call
 
@@ -19,11 +20,16 @@ from infra.utils import get_logger, log_api_call
 logger = get_logger()
 
 class KisApi:
+    """
+    [한국투자증권 API 래퍼 클래스]
+    - 역할: 시세 조회, 잔고 확인, 주문 전송 등 서버와의 모든 통신 담당
+    - 안전장치: 모든 네트워크 요청에 Timeout을 적용하여 '무한 대기(Hang)' 방지
+    """
     def __init__(self, token_manager):
         self.tm = token_manager
         self.base_url = Config().BASE_URL
         
-        # [수정 1] self.logger 명시적 선언 (AttributeError 해결)
+        # [수정] self.logger 명시적 선언 (AttributeError 해결)
         self.logger = get_logger("KisApi")
         
         self.headers = {
@@ -36,15 +42,17 @@ class KisApi:
         }
 
     def _update_headers(self, tr_id):
+        """API 호출 전 토큰과 TR_ID(거래코드)를 헤더에 갱신"""
         self.headers["authorization"] = f"Bearer {self.tm.get_token()}"
         self.headers["tr_id"] = tr_id
         
-        # [모의투자 자동 변환 로직 추가]
-        # 실전 TR(T로 시작)을 모의 TR(V로 시작)로 자동 변환
+        # [모의투자 자동 변환 로직]
+        # 실전 TR(T로 시작)을 모의 TR(V로 시작)로 자동 변환하여 호환성 유지
         if "vts" in self.base_url and tr_id.startswith("T"):
             self.headers["tr_id"] = "V" + tr_id[1:]
 
     def _safe_float(self, val):
+        """문자열 숫자를 안전하게 float로 변환 (쉼표 제거 등)"""
         try:
             if not val: return 0.0
             return float(str(val).replace(",", ""))
@@ -52,14 +60,18 @@ class KisApi:
             return 0.0
             
     def _get_lookup_excd(self, exchange):
+        """거래소 코드를 API 규격에 맞게 변환 (NASD -> NAS 등)"""
         excd_map = {"NASD": "NAS", "NYSE": "NYS", "AMEX": "AMS"}
         return excd_map.get(exchange, exchange)
+
+    # =================================================================
+    # 💰 [자산 관련] 예수금 및 잔고 조회
+    # =================================================================
 
     @log_api_call("예수금 조회(주문가능)")
     def get_buyable_cash(self, symbol="AAPL"):
         """
         예수금 조회 (TTTS3007R) - 실제 주문 가능 금액 확인용
-        [수정 2] Code 7 에러 해결을 위해 ITEM_CD와 가격 파라미터 수정
         """
         path = "/uapi/overseas-stock/v1/trading/inquire-psamount"
         self._update_headers("TTTS3007R")
@@ -73,7 +85,9 @@ class KisApi:
         }
         
         try:
-            res = requests.get(f"{self.base_url}{path}", headers=self.headers, params=params)
+            # 🛑 [Safety Fix] timeout=5 추가
+            # 예수금 조회하다가 멈추면 매매 자체가 불가능하므로 5초 제한
+            res = requests.get(f"{self.base_url}{path}", headers=self.headers, params=params, timeout=5)
             data = res.json()
             
             if data['rt_cd'] == '0':
@@ -88,14 +102,12 @@ class KisApi:
             self.logger.error(f"❌ API Error (get_buyable_cash): {e}")
             return 0.0
 
-    def buy_limit(self, symbol, price, qty):
-        """
-        지정가 매수 (기존 코드에서 끊겨있던 부분 복구 및 place_order_final 활용)
-        """
-        return self.place_order_final("NASD", symbol, "BUY", qty, price)
-
     @log_api_call("잔고 조회")
     def get_balance(self):
+        """
+        실시간 잔고 조회 (TTTS3012R)
+        - 보유 종목, 수량, 평단가 확인
+        """
         path = "/uapi/overseas-stock/v1/trading/inquire-balance"
         self._update_headers("TTTS3012R")
         
@@ -109,18 +121,17 @@ class KisApi:
         }
         holdings = []
         try:
-            res = requests.get(f"{self.base_url}{path}", headers=self.headers, params=params)
+            # 🛑 [Safety Fix] timeout=10 추가
+            # 잔고 데이터는 중요하고 양이 많을 수 있으므로 10초까지 허용
+            res = requests.get(f"{self.base_url}{path}", headers=self.headers, params=params, timeout=10)
             data = res.json()
+            
             if data['rt_cd'] == '0':
                 output1 = data.get('output1', [])
                 for item in output1:
                     qty = self._safe_float(item.get('ovrs_cblc_qty'))
                     if qty > 0:
-                        # ========================================================
-                        # 🔴 [수정 완료] 여기가 핵심입니다!
-                        # ========================================================
-                        # 기존: item.get('ovrs_stck_evlu_amt') -> 평가금액(X)
-                        # 변경: item.get('pchs_avg_pric')      -> 매입평단가(O)
+                        # [데이터 정합성] item.get('pchs_avg_pric') -> 매입평단가
                         avg_price = self._safe_float(item.get('pchs_avg_pric'))
                         
                         holdings.append({
@@ -135,8 +146,16 @@ class KisApi:
             self.logger.error(f"❌ 잔고 조회 중 에러: {e}")
         return holdings
 
+    # =================================================================
+    # 🔍 [시장 데이터] 랭킹 및 시세 조회
+    # =================================================================
+
     @log_api_call("랭킹 조회(통합)")
     def get_ranking(self):
+        """
+        급등주 랭킹 조회 (등락률 상위)
+        - 실패 시 거래량 상위 랭킹(Fallback)으로 자동 전환
+        """
         try:
             path = "/uapi/overseas-stock/v1/ranking/updown-rate" 
             self._update_headers("HHDFS76290000")
@@ -144,6 +163,7 @@ class KisApi:
                 "AUTH": "", "EXCD": "NAS", "GUBN": "1", "NDAY": "0", 
                 "VOL_RANG": "0", "KEYB": ""
             }
+            # [Safety] 이미 timeout=10이 적용되어 있어 안전함
             res = requests.get(f"{self.base_url}{path}", headers=self.headers, params=params, timeout=10)
             
             if res.status_code != 200 or not res.text.strip().startswith("{"):
@@ -160,6 +180,7 @@ class KisApi:
             self.logger.warning(f"⚠️ 등락률 조회 실패 또는 데이터 없음: {e}. 거래량 순위로 우회합니다.")
             pass 
 
+        # 1차 조회 실패 시 백업 로직 실행
         try:
             return self._get_volume_ranking()
         except Exception as e:
@@ -167,13 +188,21 @@ class KisApi:
             return []
 
     def _get_volume_ranking(self):
-        """[Fallback] 거래량 상위 종목 조회"""
+        """
+        [Fallback] 거래량 상위 종목 조회
+        🚨 중요: 지난번 시스템 멈춤의 원인이었던 곳입니다.
+        """
         path = "/uapi/overseas-stock/v1/ranking/trade-vol"
         self._update_headers("HHDFS76310010") 
         params = {
             "AUTH": "", "EXCD": "NAS", "GUBN": "0", "VOL_RANG": "0", "KEYB": ""
         }
-        res = requests.get(f"{self.base_url}{path}", headers=self.headers, params=params)
+        
+        # 🛑 [CRITICAL FIX] timeout=5 추가
+        # 여기서 응답이 없으면 5초 뒤에 끊고, 시스템이 다음 루프로 넘어가도록 함.
+        # 절대 이 줄을 지우거나 timeout을 제거하지 마세요.
+        res = requests.get(f"{self.base_url}{path}", headers=self.headers, params=params, timeout=5)
+        
         data = res.json()
         if data['rt_cd'] == '0':
             return data.get('output', [])
@@ -184,12 +213,11 @@ class KisApi:
         """
         [실시간 현재가 조회]
         - 반환값: 현재가(float) 단일 값
-        - main.py와의 호환성을 위해 exchange="NAS" 기본값 설정 및 반환 타입 수정
         """
         path = "/uapi/overseas-price/v1/quotations/price-detail"
         self._update_headers("HHDFS76200200")
         
-        # exchange가 없으면 NAS(나스닥)으로 간주 (필요 시 로직 추가)
+        # exchange가 없으면 NAS(나스닥)으로 간주
         lookup_excd = self._get_lookup_excd(exchange) 
         
         params = {
@@ -199,12 +227,13 @@ class KisApi:
         }
         
         try:
+            # [Safety] timeout=5 적용됨
             res = requests.get(f"{self.base_url}{path}", headers=self.headers, params=params, timeout=5)
             data = res.json()
             
             if data['rt_cd'] == '0':
                 output = data['output']
-                # [중요] 딕셔너리 전체가 아니라 '현재가(last)' 숫자만 반환해야 함!
+                # [중요] 딕셔너리가 아닌 '현재가(last)' 값만 추출하여 반환
                 return self._safe_float(output.get('last', 0))
             else:
                 self.logger.warning(f"⚠️ 현재가 조회 실패 ({symbol}): {data.get('msg1')}")
@@ -214,116 +243,8 @@ class KisApi:
             self.logger.error(f"❌ 현재가 조회 중 에러 ({symbol}): {e}")
             return None
 
-    @log_api_call("주문 전송")
-    @log_api_call("주문 전송")
-    def place_order_final(self, exchange, symbol, side, qty, price):
-        """
-        [Smart Order] 거래소 자동 감지 기능 추가
-        - NASD(나스닥)으로 실패 시 -> AMS(아멕스) -> NYS(뉴욕) 순서로 자동 재시도
-        """
-        path = "/uapi/overseas-stock/v1/trading/order"
-        is_buy = (side == "BUY")
-        
-        # 실전투자 ID 기준 (모의투자는 _update_headers에서 자동 변환)
-        tr_id = "TTTT1002U" if is_buy else "TTTT1006U"
-
-        self._update_headers(tr_id)
-
-        try:
-            f_price = float(price)
-            if f_price < 1.0:
-                final_price = f"{f_price:.4f}"
-            else:
-                final_price = f"{f_price:.2f}"
-        except:
-            final_price = "0"
-
-        # [스마트 로직] 시도할 거래소 목록 (요청받은 exchange를 1순위로)
-        exchange_candidates = [exchange]
-        if exchange == "NASD":
-            exchange_candidates.extend(["AMS", "NYSE"]) # 나스닥이면 아멕스, 뉴욕도 예비로 추가
-        
-        last_error_msg = ""
-
-        for try_exch in exchange_candidates:
-            body = {
-                "CANO": Config.CANO, 
-                "ACNT_PRDT_CD": Config.ACNT_PRDT_CD,
-                "OVRS_EXCG_CD": try_exch, # 거래소를 바꿔가며 시도
-                "PDNO": symbol, 
-                "ORD_QTY": str(int(qty)),  
-                "OVRS_ORD_UNPR": final_price, 
-                "ORD_SVR_DVSN_CD": "0", 
-                "ORD_DVSN": "00"
-            }
-            
-            try:
-                res = requests.post(f"{self.base_url}{path}", headers=self.headers, json=body, timeout=10)
-                data = res.json()
-                
-                if data['rt_cd'] == '0':
-                    odno = data['output'].get('ODNO')
-                    self.logger.info(f"✅ 주문 전송 성공 ({try_exch}) [{side}] {symbol} {qty}주 (주문번호: {odno})")
-                    return odno
-                else:
-                    msg = data.get('msg1')
-                    code = data.get('msg_cd')
-                    # 특정 에러(해당 거래소에 종목 없음)인 경우에만 다음 거래소 시도
-                    # IGW00213: 해당 거래소에 종목이 존재하지 않음 (Code 예시, 실제와 다를 수 있음)
-                    self.logger.warning(f"⚠️ 주문 실패 ({try_exch}): {msg} (Code: {code}) -> 거래소 변경 시도")
-                    last_error_msg = f"{msg} ({code})"
-                    
-            except Exception as e: 
-                self.logger.error(f"❌ API 통신 에러: {e}")
-                return None
-            
-            # 너무 빨리 재시도하지 않도록 잠깐 대기
-            import time
-            time.sleep(0.1)
-
-        # 모든 거래소 시도 실패 시
-        self.logger.error(f"❌ 최종 주문 실패 ({symbol}): {last_error_msg}")
-        return None
-
-    def sell_market(self, symbol, qty, price_hint=None):
-        """
-        시장가(사실상 -5% 지정가) 매도
-        [수정] IGW00009 에러 해결을 위해 place_order_final로 로직 위임
-        """
-        # 1. 현재가 조회 시도 (Retry Logic)
-        current_price = 0.0
-        import time 
-
-        for i in range(3): 
-            try:
-                # get_current_price는 헤더를 시세용으로 변경함
-                price_data = self.get_current_price(symbol, exchange="NAS") # exchange 파라미터 명시
-                if price_data:
-                    current_price = float(price_data) # get_current_price는 float를 반환하도록 되어 있음
-                    break 
-            except Exception as e:
-                self.logger.warning(f"⚠️ [매도] 시세 조회 일시적 실패 ({i+1}/3) - {symbol}: {e}")
-            
-            time.sleep(0.2) 
-
-        # 2. 가격 결정 로직 (Limit Price for Market-like execution)
-        final_price = 0.0
-        
-        if current_price > 0:
-            final_price = current_price * 0.95 # 현재가 기준 -5%
-        elif price_hint and price_hint > 0:
-            self.logger.warning(f"⚠️ [매도] 시세 조회 최종 실패 -> 장부가(${price_hint}) 기준 -5% 주문")
-            final_price = price_hint * 0.95
-        else:
-            self.logger.error(f"🚨 [매도] 가격 정보 전무. 주문 불가.")
-            return None 
-
-        # 3. [핵심 수정] 직접 requests를 날리지 않고, 검증된 주문 함수 사용
-        # place_order_final이 헤더 설정(TTTT1006U)과 JSON 구성을 알아서 처리함
-        # 주의: exchange가 "NASD"로 고정되어 있습니다. NYSE/AMEX 종목 거래 시 수정 필요.
-        return self.place_order_final("NASD", symbol, "SELL", qty, final_price)
-
     def get_minute_candles(self, market, symbol, limit=400):
+        """분봉 데이터 조회 (전략 계산용)"""
         path = "/uapi/overseas-price/v1/quotations/inquire-time-itemchartprice"
         self._update_headers("HHDFS76950200")
         params = {
@@ -331,6 +252,7 @@ class KisApi:
             "NMIN": "1", "PINC": "1", "NEXT": "", "NREC": str(limit), "KEYB": ""
         }
         try:
+            # [Safety] timeout=10 적용됨
             res = requests.get(f"{self.base_url}{path}", headers=self.headers, params=params, timeout=10)
             data = res.json()
             if data['rt_cd'] == '0' and data.get('output2'):
@@ -356,29 +278,129 @@ class KisApi:
             self.logger.error(f"❌ 캔들 데이터 에러: {e}")
             
         return pd.DataFrame()
-    
+
+    # =================================================================
+    # 🔫 [주문 관련] 매수/매도 실행
+    # =================================================================
+
+    def buy_limit(self, symbol, price, qty):
+        """지정가 매수 래퍼 함수"""
+        return self.place_order_final("NASD", symbol, "BUY", qty, price)
+
+    @log_api_call("주문 전송")
+    def place_order_final(self, exchange, symbol, side, qty, price):
+        """
+        [Smart Order] 거래소 자동 감지 및 주문 전송
+        - NASD 실패 시 AMS, NYSE 순으로 자동 재시도
+        """
+        path = "/uapi/overseas-stock/v1/trading/order"
+        is_buy = (side == "BUY")
+        
+        # 실전투자 ID 기준 (모의투자는 _update_headers에서 자동 변환됨)
+        tr_id = "TTTT1002U" if is_buy else "TTTT1006U"
+
+        self._update_headers(tr_id)
+
+        try:
+            f_price = float(price)
+            if f_price < 1.0:
+                final_price = f"{f_price:.4f}"
+            else:
+                final_price = f"{f_price:.2f}"
+        except:
+            final_price = "0"
+
+        # [스마트 로직] 시도할 거래소 목록
+        exchange_candidates = [exchange]
+        if exchange == "NASD":
+            exchange_candidates.extend(["AMS", "NYSE"]) 
+        
+        last_error_msg = ""
+
+        for try_exch in exchange_candidates:
+            body = {
+                "CANO": Config.CANO, 
+                "ACNT_PRDT_CD": Config.ACNT_PRDT_CD,
+                "OVRS_EXCG_CD": try_exch, 
+                "PDNO": symbol, 
+                "ORD_QTY": str(int(qty)),  
+                "OVRS_ORD_UNPR": final_price, 
+                "ORD_SVR_DVSN_CD": "0", 
+                "ORD_DVSN": "00"
+            }
+            
+            try:
+                # [Safety] 주문은 중요하므로 timeout 10초
+                res = requests.post(f"{self.base_url}{path}", headers=self.headers, json=body, timeout=10)
+                data = res.json()
+                
+                if data['rt_cd'] == '0':
+                    odno = data['output'].get('ODNO')
+                    self.logger.info(f"✅ 주문 전송 성공 ({try_exch}) [{side}] {symbol} {qty}주 (주문번호: {odno})")
+                    return odno
+                else:
+                    msg = data.get('msg1')
+                    code = data.get('msg_cd')
+                    self.logger.warning(f"⚠️ 주문 실패 ({try_exch}): {msg} (Code: {code}) -> 거래소 변경 시도")
+                    last_error_msg = f"{msg} ({code})"
+                    
+            except Exception as e: 
+                self.logger.error(f"❌ API 통신 에러: {e}")
+                return None
+            
+            # 너무 빠른 재시도 방지
+            time.sleep(0.1)
+
+        self.logger.error(f"❌ 최종 주문 실패 ({symbol}): {last_error_msg}")
+        return None
+
+    def sell_market(self, symbol, qty, price_hint=None):
+        """
+        시장가(실제로는 -5% 지정가) 매도
+        """
+        # 1. 현재가 조회 시도 (최대 3회 재시도)
+        current_price = 0.0
+        for i in range(3): 
+            try:
+                price_data = self.get_current_price(symbol, exchange="NAS")
+                if price_data:
+                    current_price = float(price_data)
+                    break 
+            except Exception as e:
+                self.logger.warning(f"⚠️ [매도] 시세 조회 일시적 실패 ({i+1}/3) - {symbol}: {e}")
+            time.sleep(0.2) 
+
+        # 2. 가격 결정 (현재가 대비 -5%로 설정하여 시장가처럼 체결 유도)
+        final_price = 0.0
+        if current_price > 0:
+            final_price = current_price * 0.95 
+        elif price_hint and price_hint > 0:
+            self.logger.warning(f"⚠️ [매도] 시세 조회 최종 실패 -> 장부가(${price_hint}) 기준 -5% 주문")
+            final_price = price_hint * 0.95
+        else:
+            self.logger.error(f"🚨 [매도] 가격 정보 전무. 주문 불가.")
+            return None 
+
+        # 3. 주문 실행
+        return self.place_order_final("NASD", symbol, "SELL", qty, final_price)
+
     def send_order(self, ticker, side, qty, price=None, order_type="MARKET"):
         """
-        [New] RealOrderManager 호환용 래퍼 함수
-        역할: OrderManager의 요청(Dict 기대)을 받아 내부 함수(String 반환)와 연결하고 결과를 변환함
+        [호환성 래퍼] RealOrderManager용 함수
+        - 리턴값을 딕셔너리 형태로 변환하여 OrderManager가 이해할 수 있게 함
         """
         odno = None
         
-        # 1. 매도 로직
         if side == "SELL":
-            # 시장가(MARKET)거나 가격이 0이면 -> 기존 sell_market 로직(현재가 -5% 지정가) 재활용
             if order_type == "MARKET" or not price or price <= 0:
                 odno = self.sell_market(ticker, qty)
             else:
-                # 지정가(LIMIT) 매도 -> place_order_final 직접 호출
                 odno = self.place_order_final("NASD", ticker, "SELL", qty, price)
         
-        # 2. 매수 로직 (혹시 모를 확장성 대비)
         elif side == "BUY":
             odno = self.buy_limit(ticker, price, qty)
 
-        # 3. [핵심] 리턴 타입 변환 (String -> Dictionary)
-        # RealOrderManager는 resp.get('rt_cd') == '0' 형태의 딕셔너리 응답을 기대함
+        # 결과 변환
         if odno:
             return {'rt_cd': '0', 'msg1': '주문 전송 성공', 'output': {'ODNO': odno}}
         else:
