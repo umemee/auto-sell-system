@@ -3,6 +3,7 @@ import datetime
 import pytz 
 import json 
 import os   
+import threading
 from config import Config
 from infra.utils import get_logger
 from infra.kis_api import KisApi
@@ -166,7 +167,17 @@ def main():
                 'loss_limit': getattr(Config, 'MAX_DAILY_LOSS_PCT', 0.0)
             }
         bot.set_status_provider(get_status_data)
-        bot.start()
+        
+        # [수정] 텔레그램 봇을 별도 스레드로 분리하여 메인 루프가 막히지 않게 함
+        def run_bot_thread():
+            bot.start()
+            
+        # 데몬 스레드로 실행 (메인 프로그램 종료 시 봇도 같이 종료됨)
+        t = threading.Thread(target=run_bot_thread)
+        t.daemon = True 
+        t.start()
+        
+        logger.info("🤖 텔레그램 봇이 백그라운드 스레드에서 시작되었습니다.") # 확인용 로그
 
     except Exception as e:
         logger.critical(f"❌ 초기화 실패: {e}")
@@ -347,3 +358,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
