@@ -115,7 +115,7 @@ class KisApi:
         # 👇 [추가] 만약 위 로그는 찍혔는데 여기서 멈추면, 범인은 Auth입니다.
         self.logger.info("⚡ [DEBUG] 헤더 갱신 시도 중...")
         self._update_headers("TTTS3012R")
-        self.logger.info("⚡ [DEBUG] 헤더 갱신 완료!
+        self.logger.info("⚡ [DEBUG] 헤더 갱신 완료!")
     
         params = {
             "CANO": Config.CANO, 
@@ -411,4 +411,5 @@ class KisApi:
             return {'rt_cd': '0', 'msg1': '주문 전송 성공', 'output': {'ODNO': odno}}
         else:
             return {'rt_cd': '1', 'msg1': '주문 전송 실패 (로그 확인)'}
+
 
