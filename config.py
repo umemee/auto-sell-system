@@ -16,8 +16,8 @@ class Config:
     # 4  = 프리마켓 시작 (한국 시간 18:00 겨울 / 17:00 여름)
     # 9  = 정규장 시작 1시간 전
     # 20 = 애프터마켓 종료 (한국 시간 10:00 겨울 / 09:00 여름)
-    ACTIVE_START_HOUR = 0  
-    ACTIVE_END_HOUR = 24   
+    ACTIVE_START_HOUR = 4  
+    ACTIVE_END_HOUR = 20   
 
     # ==========================================
     # 🏦 [계좌 및 인증]
@@ -83,4 +83,5 @@ class Config:
     STOP_LOSS_PCT = 0.40      # -40% 손절
     TARGET_PROFIT_PCT = 0.10  # +10% 목표 수익률 (TP)
     TP_PCT = TARGET_PROFIT_PCT # (호환성 유지)
+
 
