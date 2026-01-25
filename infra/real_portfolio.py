@@ -1,5 +1,7 @@
 import logging
 from config import Config
+import datetime
+import pytz # 시간 기록을 위해 필수
 
 class RealPortfolio:
     """
@@ -84,22 +86,28 @@ class RealPortfolio:
 
                     # [핵심] 기존 정보 병합 (Merge)
                     if ticker in self.positions:
-                        # 이미 로컬에 있는 종목 -> highest_price 유지, 나머지 업데이트
+                        # 🕒 [Time Cut] 기존에 기록된 진입 시간 가져오기
+                        cached_entry_time = self.positions[ticker].get('entry_time')
+
+                        # 이미 로컬에 있는 종목 -> highest_price 및 entry_time 유지
                         self.positions[ticker].update({
                             'qty': qty,
                             'current_price': current_price,
                             'eval_value': eval_amt,
-                            'pnl_pct': pnl_pct
-                            # entry_price는 API 값을 신뢰하여 덮어쓰거나, 로컬 값을 유지할 수 있음
-                            # 여기서는 '현재 API 상태'를 우선하여 업데이트함
+                            'pnl_pct': pnl_pct,
+                            'entry_time': cached_entry_time # ✨ [추가] API 동기화 시 시간 정보 보존
                         })
                         
-                        # 만약 현재가가 기존 최고가보다 높으면 갱신 (Sync 시점에도 고점 갱신 체크)
+                        # 고점 갱신 로직 (기존 유지)
                         if current_price > self.positions[ticker].get('highest_price', 0):
                             self.positions[ticker]['highest_price'] = current_price
 
                     else:
-                        # 로컬에 없던 신규 종목 (수동 매수했거나, 앱에서 샀거나)
+                        # 로컬에 없던 신규 종목 (API에는 있는데 로컬엔 없는 경우)
+                        # 이 경우 정확한 매수 시점을 알 수 없으므로, '현재 시간'을 기준으로 잡거나 비워둡니다.
+                        # 여기서는 보수적으로 '현재 시간'을 넣어 타임 컷이 바로 발동되지 않게 합니다.
+                        now_et = datetime.datetime.now(pytz.timezone('US/Eastern'))
+                        
                         self.positions[ticker] = {
                             'ticker': ticker,
                             'qty': qty,
@@ -107,7 +115,8 @@ class RealPortfolio:
                             'current_price': current_price,
                             'eval_value': eval_amt,
                             'pnl_pct': pnl_pct,
-                            'highest_price': current_price # 초기화: 현재가를 고점으로 시작
+                            'highest_price': current_price,
+                            'entry_time': now_et # ✨ [추가] 초기화
                         }
                     
                     current_stock_value += eval_amt
@@ -193,6 +202,8 @@ class RealPortfolio:
                 # 평단가 단순 가중 평균 계산
                 new_avg = ((old_pos['entry_price'] * old_pos['qty']) + cost) / new_qty
                 
+                # [수정] 추가 매수 시에는 기존 진입 시간(entry_time)을 유지하거나,
+                # 필요하다면 물타기 시점으로 갱신할 수도 있습니다. (여기선 유지)
                 self.positions[ticker].update({
                     'qty': new_qty,
                     'entry_price': new_avg,
@@ -200,7 +211,10 @@ class RealPortfolio:
                     'eval_value': old_pos['eval_value'] + cost
                 })
             else:
-                # 신규 매수
+                # [신규 매수] -> 여기가 핵심입니다!
+                # 🕒 [Time Cut] 현재 미국 시간 기록
+                now_et = datetime.datetime.now(pytz.timezone('US/Eastern'))
+                
                 self.positions[ticker] = {
                     'ticker': ticker,
                     'qty': qty,
@@ -208,10 +222,11 @@ class RealPortfolio:
                     'current_price': price,
                     'eval_value': cost,
                     'pnl_pct': 0.0,
-                    'highest_price': price # [중요] 매수 시점 가격을 고점으로 설정
+                    'highest_price': price, 
+                    'entry_time': now_et  # ✨ [추가] 진입 시간 저장
                 }
             
-            self.logger.info(f"✅ [Local Update] BUY {ticker} ({qty} @ {price})")
+            self.logger.info(f"✅ [Local Update] BUY {ticker} ({qty} @ {price}) Time: {now_et.strftime('%H:%M')}")
             
         elif fill['type'] == 'SELL':
             revenue = qty * price
