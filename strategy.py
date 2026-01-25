@@ -163,3 +163,6 @@ class EmaStrategy:
             }
 
         return None
+# Factory 함수
+def get_strategy():
+    return EmaStrategy()
