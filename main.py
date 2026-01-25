@@ -233,24 +233,31 @@ def main():
             # B. [매도] 보유 종목 관리
             for ticker in list(portfolio.positions.keys()):
                 real_time_price = kis.get_current_price(ticker)
-                if real_time_price is None or real_time_price <= 0: continue
                 
+                # 가격 조회 실패 시 건너뜀
+                if real_time_price is None or real_time_price <= 0: 
+                    continue
+                
+                # 포지션 정보 및 진입 시간 가져오기
                 pos = portfolio.positions[ticker]
                 entry_price = pos['entry_price']
-                pnl_rate = (real_time_price - entry_price) / entry_price
                 
-                sell_signal = False
-                reason_sell = ""
-                
-                if pnl_rate >= target_profit_rate:
-                    sell_signal = True
-                    reason_sell = f"TAKE_PROFIT (익절 {pnl_rate*100:.1f}%)"
-                elif pnl_rate <= sl_rate:
-                    sell_signal = True
-                    reason_sell = f"STOP_LOSS (손절 {pnl_rate*100:.1f}%)"
+                # 🕒 [Time Cut 핵심] real_portfolio에서 저장한 진입 시간 호출
+                entry_time = pos.get('entry_time') 
 
-                if sell_signal:
-                    result = order_manager.execute_sell(portfolio, ticker, reason_sell)
+                # 🧠 [전략 호출] 매도 판단을 Strategy에게 위임
+                # (수익률 계산, 타임 컷 여부 등을 전략 내부에서 판단함)
+                exit_signal = strategy.check_exit_signal(
+                    current_price=real_time_price, 
+                    entry_price=entry_price,
+                    entry_time=entry_time
+                )
+                
+                # 매도 신호가 왔다면 실행
+                if exit_signal:
+                    reason = exit_signal['reason']
+                    result = order_manager.execute_sell(portfolio, ticker, reason)
+                    
                     if result:
                         bot.send_message(result['msg'])
                         save_state(portfolio.ban_list, active_candidates)
