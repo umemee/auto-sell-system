@@ -52,7 +52,7 @@ class MarketListener:
                     
                     # [FIX 2] Volume Key: vol, volume 외에 'avol', 'acml_vol' (누적거래량) 필수 체크
                     # 이 부분이 없어서 기존 코드에서 거래량이 0으로 잡혔습니다.
-                    vol = float(item.get('vol') or item.get('volume') or item.get('avol') or item.get('acml_vol') or 0)
+                    vol = float(item.get('tvol') or item.get('volume') or item.get('avol') or item.get('acml_vol') or 0)
                     
                 except (ValueError, TypeError):
                     continue 
@@ -106,4 +106,5 @@ class MarketListener:
             self.logger.debug(f"Scanner Loop Warning: {e}")
 
         # 메인 루프에서 비교할 수 있도록 리스트 반환
+
         return list(set(detected_stocks))
