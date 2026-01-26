@@ -26,7 +26,7 @@ class EmaStrategy:
         # [전략 세부 파라미터]
         self.dip_tolerance = getattr(Config, 'DIP_TOLERANCE', 0.005)     # 0.5% 오차
         self.hover_tolerance = getattr(Config, 'HOVER_TOLERANCE', 0.002) # 0.2% 반등
-        self.max_daily_change = 0.80 # 80% 폭등 종목 제외
+        self.max_daily_change = 1.00 # 100% 폭등 종목 제외
         
         # [v6.0 신규 파라미터]
         self.entry_deadline = getattr(Config, 'ENTRY_DEADLINE_HOUR_ET', 10) # 10시
@@ -165,4 +165,5 @@ class EmaStrategy:
         return None
 # Factory 함수
 def get_strategy():
+
     return EmaStrategy()
