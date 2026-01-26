@@ -175,7 +175,16 @@ def main():
     while True:
         try:
             now_et = datetime.datetime.now(pytz.timezone('US/Eastern'))
-            
+            # E. [생존 신고]
+            if time.time() - last_heartbeat_time > HEARTBEAT_INTERVAL:
+                eq = portfolio.total_equity
+                pos_cnt = len(portfolio.positions)
+                cur_k = datetime.datetime.now(tz_kst).strftime("%H:%M")
+                cur_n = datetime.datetime.now(tz_et).strftime("%H:%M")
+                
+                bot.send_message(f"💓 [생존] KR {cur_k} / NY {cur_n}\n자산 ${eq:,.0f} | 보유 {pos_cnt}개")
+                last_heartbeat_time = time.time()
+                
             # ============================================
             # 0. [Daily Reset] 날짜 변경 체크
             # ============================================
@@ -323,16 +332,6 @@ def main():
                         logger.warning(f"🔒 [Full] {sym} 슬롯 꽉 참. 금일 제외.")
                         portfolio.ban_list.add(sym)
                         save_state(portfolio.ban_list, active_candidates)
-
-            # E. [생존 신고]
-            if time.time() - last_heartbeat_time > HEARTBEAT_INTERVAL:
-                eq = portfolio.total_equity
-                pos_cnt = len(portfolio.positions)
-                cur_k = datetime.datetime.now(tz_kst).strftime("%H:%M")
-                cur_n = datetime.datetime.now(tz_et).strftime("%H:%M")
-                
-                bot.send_message(f"💓 [생존] KR {cur_k} / NY {cur_n}\n자산 ${eq:,.0f} | 보유 {pos_cnt}개")
-                last_heartbeat_time = time.time()
 
             time.sleep(1)
 
