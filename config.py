@@ -61,6 +61,21 @@ class Config:
     FILTER_MAX_PRICE = 50.0         # 최대 주가 $50.0 (너무 비싼 주식 제외)
     # 💡 새벽 4시(프리마켓 초기)에는 거래량이 적으므로, 이 기준에 못 미쳐 종목이 안 잡힐 수 있습니다.
     FILTER_MIN_TX_VALUE = 50000   # 최소 거래대금 $50,000 (약 7천만원)
+    
+    # [SPAC 및 악성 종목 필터링 키워드 DB]
+    # ASPC 등 "ACQUISITION"이 들어간 종목을 원천 차단합니다.
+    BLACKLIST_KEYWORDS = [
+        # 1. SPAC (기업인수목적회사) 관련 강력 키워드
+        'SPAC', 'ACQUISITION', 'ACQ', 'MERGER', 'BLANK CHECK', 
+        'CAPITAL CORP', 'INVESTMENT CORP', 'HOLDINGS', 'HLDGS',
+        
+        # 2. 파생상품 및 채권
+        'WARRANT', 'WAR', 'WS',        # 워런트
+        'UNIT', 'UN', 'U',             # 유닛 (보통주+워런트)
+        'RIGHTS', 'RT',                # 신주인수권
+        'NOTE', 'DEBENTURE', 'PFD',    # 채권/우선주
+        'FUND', 'TRUST', 'ETF', 'ETN'  # 펀드류
+    ]
 
     # === [리스크 관리] ===
     MAX_DAILY_LOSS_PCT = 6.0          # 일일 허용 손실 (-6%)

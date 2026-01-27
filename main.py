@@ -302,7 +302,10 @@ def main():
                         save_state(portfolio.ban_list, active_candidates)
 
             # C. [매수] 신규 종목 스캔 (핵심 수정 구간)
-            fresh_targets = listener.scan_markets()
+            fresh_targets = listener.scan_markets(
+                ban_list=portfolio.ban_list,
+                active_candidates=active_candidates
+            )
             
             if fresh_targets:
                 # 새로운 종목 발견 로그
