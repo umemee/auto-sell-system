@@ -39,7 +39,7 @@ class RealPortfolio:
         # ----------------------------------------------------
         self.MAX_SLOTS = getattr(Config, 'MAX_SLOTS', 2)
         self.SLOT_RATIO = 0.5       
-        self.MIN_ORDER_AMT = 50.0   
+        self.MIN_ORDER_AMT = 20.0   
 
     def sync_with_kis(self):
         """
@@ -176,7 +176,7 @@ class RealPortfolio:
         final_amount = min(target_amount, safe_cash)
         
         # 최소 주문 금액 ($50 미만은 주문 안 함 - 수수료 효율 고려)
-        if final_amount < 50:
+        if final_amount < 20:
             return 0.0
             
         return final_amount
