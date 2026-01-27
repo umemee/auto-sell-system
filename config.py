@@ -67,14 +67,26 @@ class Config:
     BLACKLIST_KEYWORDS = [
         # 1. SPAC (기업인수목적회사) 관련 강력 키워드
         'SPAC', 'ACQUISITION', 'ACQ', 'MERGER', 'BLANK CHECK', 
-        'CAPITAL CORP', 'INVESTMENT CORP', 'HOLDINGS', 'HLDGS',
+        'CAPITAL CORP', 'INVESTMENT CORP',
         
         # 2. 파생상품 및 채권
         'WARRANT', 'WAR', 'WS',        # 워런트
         'UNIT', 'UN', 'U',             # 유닛 (보통주+워런트)
         'RIGHTS', 'RT',                # 신주인수권
         'NOTE', 'DEBENTURE', 'PFD',    # 채권/우선주
-        'FUND', 'TRUST', 'ETF', 'ETN'  # 펀드류
+        'FUND', 'TRUST', 'ETF', 'ETN',  # 펀드류
+
+        # 3. [긴급 추가] 한글 키워드 (API 응답 대응)
+        '스팩',          # 가장 중요 (ASPC 방어)
+        '기업인수목적',   # SPAC의 정식 명칭
+        '애퀴지션',       # Acquisition의 한글 발음
+        '머저',          # Merger의 한글 발음
+        '캐피탈',        # Capital
+        '워런트',        # Warrant (파생상품)
+        '유닛',          # Unit (스팩+워런트)
+        '권리',          # Rights (신주인수권 등)
+        '펀드',          # Fund
+        '트러스트'       # Trust
     ]
 
     # === [리스크 관리] ===
