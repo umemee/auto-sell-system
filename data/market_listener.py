@@ -92,7 +92,7 @@ class MarketListener:
                     # 즉, "신규 발견"일 때만 로그를 남김
                     if sym not in active_candidates:
                         self.logger.info(
-                            f"🚨 [급등 포착] {sym} (+{rate}%) "
+                            f"🚨 [급등 포착] {sym} ({name}) (+{rate}%) "  # <--- ({name}) 추가!
                             f"| Price ${price} (Prev ${prev_close:.2f}) "
                             f"| Val ${trade_value/1000:,.0f}k"
                         )
