@@ -295,7 +295,8 @@ def main():
                 # 매도 신호가 왔다면 실행
                 if exit_signal:
                     reason = exit_signal['reason']
-                    result = order_manager.execute_sell(portfolio, ticker, reason)
+                    # [Fix] 매도 시 현재가(real_time_price)를 전달하여 $0.00 표기 오류 수정
+                    result = order_manager.execute_sell(portfolio, ticker, reason, price=real_time_price)
                     
                     if result:
                         bot.send_message(result['msg'])
