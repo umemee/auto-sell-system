@@ -77,7 +77,7 @@ class KisApi:
     # =================================================================
     # 🛠️ [핵심] 스마트 요청 처리기 (Smart Request Handler)
     # =================================================================
-    def _fetch_with_retry(self, path, params, tr_id, method="GET", timeout=5):
+    def _fetch_with_retry(self, path, params, tr_id, method="GET", timeout=3):
         """
         [공통 함수] 모든 조회 요청은 이 함수를 거쳐갑니다.
         - 자동으로 헤더를 갱신하고
@@ -137,7 +137,7 @@ class KisApi:
         }
         
         # [Smart Retry] 적용
-        data = self._fetch_with_retry(path, params, "TTTS3007R", timeout=5)
+        data = self._fetch_with_retry(path, params, "TTTS3007R", timeout=3)
         
         if data:
             return float(data['output'].get('frcr_ord_psbl_amt1', 0))
@@ -232,14 +232,16 @@ class KisApi:
         return None
 
     def get_minute_candles(self, market, symbol, limit=400):
-        """분봉 데이터 조회"""
+        """분봉 데이터 조회 (Fast Track)"""
         path = "/uapi/overseas-price/v1/quotations/inquire-time-itemchartprice"
         params = {
             "AUTH": "", "EXCD": "NAS", "SYMB": symbol,
             "NMIN": "1", "PINC": "1", "NEXT": "", "NREC": str(limit), "KEYB": ""
         }
         
-        data = self._fetch_with_retry(path, params, "HHDFS76950200", timeout=10)
+        # [최적화 핵심] timeout을 3초로 강제 설정하여 
+        # 서버가 버벅대면 즉시 손절하고 다음 종목으로 넘어감.
+        data = self._fetch_with_retry(path, params, "HHDFS76950200", timeout=3)
         
         if data and data.get('output2'):
             df = pd.DataFrame(data['output2'])
