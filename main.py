@@ -170,42 +170,71 @@ def main():
         return
 
     # ---------------------------------------------------------
-    # [메인 루프] 무한 반복
+    # [메인 루프] 무한 반복 (Final Optimized Version)
     # ---------------------------------------------------------
     while True:
         try:
-            # 1. 현재 시간 측정 (가장 먼저 해야 함)
-            now_et = datetime.datetime.now(pytz.timezone('US/Eastern'))
+            # =========================================================
+            # 🕒 [Time Sync] 59초 매매 (봉 완성 판단)
+            # =========================================================
+            # 미국 현지 시간 기준
+            now = datetime.datetime.now(pytz.timezone('America/New_York'))
             
-            # ==================================================================
-            # 🚩 [순서 변경] 2. [Active Time] 활동 시간 체크 (최우선 순위)
-            # ==================================================================
-            # 이유: 장이 닫힌 시간(Sleep)에는 생존 신고도, 매매도 할 필요가 없으므로
-            # 가장 먼저 체크하여 루프 하단부 실행을 원천 차단해야 합니다.
+            # [핵심 1] 59초가 아니면 0.5초 쉬고 건너뜀 (API 과부하 방지 + 봉 완성 대기)
+            # 0~58초 사이에는 루프를 빠르게 돌며 시간만 체크합니다.
+            if now.second < 59:
+                time.sleep(0.5)
+                continue
+            
+            # ---------------------------------------------------------
+            # 🛑 [EOD] 장 마감 강제 청산 (안전장치)
+            # ---------------------------------------------------------
+            # settings.py의 TIME_HARD_CUTOFF 확인 (기본값 15:55)
+            # 프리마켓 전용이라면 "05:55" 등으로 설정되어 있어야 함
+            cutoff_time = getattr(Config, 'TIME_HARD_CUTOFF', "15:55") 
+            
+            if now.strftime("%H:%M") == cutoff_time:
+                logger.warning(f"⏰ [장 마감] 강제 청산 실행 ({cutoff_time})")
+                bot.send_message(f"🚨 [장 마감] {cutoff_time} 강제 청산 실행")
+                
+                # 보유 중인 모든 종목 시장가 매도
+                if portfolio.is_holding():
+                    for ticker in list(portfolio.positions.keys()):
+                        order_manager.execute_sell(portfolio, ticker, "FORCE_EOD_EXIT")
+                        time.sleep(0.2) # 주문 간격
+                
+                # 상태 저장 후 루프 종료 (다음 날 재실행 필요)
+                save_state(portfolio.ban_list, active_candidates)
+                logger.info("👋 [System] 장 마감으로 시스템을 종료합니다.")
+                break 
+
+            # =========================================================
+            # 💤 [Sleep Mode] 활동 시간 체크
+            # =========================================================
+            # is_active_market_time 함수 사용 (기존 로직 유지)
             is_active, reason = is_active_market_time()
             
             if not is_active:
-                # [슬립 모드 진입]
                 if not was_sleeping:
                     logger.warning(f"💤 Sleep Mode: {reason}")
                     bot.send_message(f"💤 [대기] {reason}")
                     was_sleeping = True
+                    save_state(portfolio.ban_list, active_candidates) # 자기 전 상태 저장
                 
-                # [핵심 수정] 슬립 모드일 때는 1분 대기 후 continue로 루프 처음으로 돌아갑니다.
-                # 이렇게 하면 아래에 있는 'E. 생존 신고' 로직에 도달하지 않으므로 문자가 오지 않습니다.
-                time.sleep(60) 
-                continue 
+                # 활동 시간이 아니면 1분 통째로 대기 (59초 체크 루프 탈출)
+                time.sleep(60)
+                continue
             
-            # [기상 알림] 잠에서 깨어난 경우
+            # [기상] 잠에서 깨어난 경우
             if was_sleeping:
                 bot.send_message(f"🌅 [기상] 시장 감시 시작 ({reason})")
                 was_sleeping = False
                 portfolio.sync_with_kis() # 자고 일어나면 잔고 동기화
 
-            # ==================================================================
-            # E. [생존 신고] (Active 상태일 때만 실행됨)
-            # ==================================================================
-            # 위에서 continue로 걸러지지 않고 내려왔다는 것은 '깨어있다(Active)'는 뜻입니다.
+            # =========================================================
+            # 💓 [Heartbeat] 생존 신고 (기존 기능 유지)
+            # =========================================================
+            # 59초마다 한 번씩 체크하므로, 설정된 간격(30분 등)이 지나면 메시지 전송
             if time.time() - last_heartbeat_time > HEARTBEAT_INTERVAL:
                 eq = portfolio.total_equity
                 pos_cnt = len(portfolio.positions)
@@ -215,159 +244,133 @@ def main():
                 bot.send_message(f"💓 [생존] KR {cur_k} / NY {cur_n}\n자산 ${eq:,.0f} | 보유 {pos_cnt}개")
                 last_heartbeat_time = time.time()
 
-            # ============================================
-            # 0. [Daily Reset] 날짜 변경 체크
-            # ============================================
-            new_date_str = now_et.strftime("%Y-%m-%d")
+            # =========================================================
+            # 📅 [Daily Reset] 날짜 변경 체크 (기존 기능 유지)
+            # =========================================================
+            new_date_str = now.strftime("%Y-%m-%d")
             if new_date_str != current_date_str:
                 logger.info(f"📅 [New Day] {current_date_str} -> {new_date_str}")
                 portfolio.ban_list.clear()
                 active_candidates.clear()
-                save_state(portfolio.ban_list, active_candidates) 
+                save_state(portfolio.ban_list, active_candidates)
                 logger.info("✨ 데이터 초기화 완료")
                 current_date_str = new_date_str
 
-            # ============================================
-            # 1. [EOS] 장 마감 강제 청산 (15:50)
-            # ============================================
-            if now_et.hour == 15 and now_et.minute >= 50:
-                logger.info("🏁 [EOS] 정규장 마감 임박. 강제 청산.")
-                if portfolio.positions:
-                    bot.send_message("🚨 [장 마감] 안전을 위해 전량 매도합니다.")
-                    for ticker in list(portfolio.positions.keys()):
-                        msg = order_manager.execute_sell(portfolio, ticker, "EOS (장마감)")
-                        if msg: bot.send_message(msg)
-                        time.sleep(1)
-                
-                # 마감 후 긴 대기 (4시간)
-                save_state(portfolio.ban_list, active_candidates)
-                bot.send_message("😴 [Sleep] 내일 뵙겠습니다.")
-                time.sleep(60 * 60 * 4)
-                continue
-
-            # ============================================
-            # 2. [Active Time] 활동 시간 체크
-            # ============================================
-            is_active, reason = is_active_market_time()
-            if not is_active:
-                if not was_sleeping:
-                    logger.warning(f"💤 Sleep Mode: {reason}")
-                    bot.send_message(f"💤 [대기] {reason}")
-                    was_sleeping = True
-                time.sleep(60)
-                continue
+            # =========================================================
+            # 🧠 [Logic] 매매 로직 시작
+            # =========================================================
             
-            if was_sleeping:
-                bot.send_message(f"🌅 [기상] 시장 감시 시작 ({reason})")
-                was_sleeping = False
-                portfolio.sync_with_kis()
-
-            # ============================================
-            # 3. [Logic] 매매 로직
-            # ============================================
-            
-            # A. 동기화
+            # A. 포트폴리오 동기화 (오차 방지)
             portfolio.sync_with_kis()
 
-            # B. [매도] 보유 종목 관리
+            # ---------------------------------------------------------
+            # B. [매도] 보유 종목 관리 (Check Exit)
+            # ---------------------------------------------------------
+            # 보유 중인 종목을 순회하며 매도 조건 확인
             for ticker in list(portfolio.positions.keys()):
+                # 매도 판단을 위해 현재가 조회
+                # (속도를 위해 get_current_price 사용. 전략이 복잡하면 get_minute_candles로 변경 가능)
                 real_time_price = kis.get_current_price(ticker)
                 
-                # 가격 조회 실패 시 건너뜀
                 if real_time_price is None or real_time_price <= 0: 
                     continue
                 
-                # 포지션 정보 및 진입 시간 가져오기
                 pos = portfolio.positions[ticker]
                 entry_price = pos['entry_price']
-                
-                # 🕒 [Time Cut 핵심] real_portfolio에서 저장한 진입 시간 호출
-                entry_time = pos.get('entry_time') 
+                entry_time = pos.get('entry_time')
 
-                # 🧠 [전략 호출] 매도 판단을 Strategy에게 위임
-                # (수익률 계산, 타임 컷 여부 등을 전략 내부에서 판단함)
+                # 전략에 매도 문의 (타임컷, 익절, 손절 포함)
                 exit_signal = strategy.check_exit_signal(
                     current_price=real_time_price, 
                     entry_price=entry_price,
                     entry_time=entry_time
                 )
                 
-                # 매도 신호가 왔다면 실행
                 if exit_signal:
                     reason = exit_signal['reason']
-                    # [Fix] 매도 시 현재가(real_time_price)를 전달하여 $0.00 표기 오류 수정
+                    # 매도 실행 (RealOrderManager)
                     result = order_manager.execute_sell(portfolio, ticker, reason, price=real_time_price)
-                    
                     if result:
                         bot.send_message(result['msg'])
                         save_state(portfolio.ban_list, active_candidates)
 
-            # C. [매수] 신규 종목 스캔 (핵심 수정 구간)
+            # ---------------------------------------------------------
+            # C. [스캔] 신규 급등주 포착
+            # ---------------------------------------------------------
+            # listener (MarketListener) 객체 사용
             fresh_targets = listener.scan_markets(
                 ban_list=portfolio.ban_list,
                 active_candidates=active_candidates
             )
             
             if fresh_targets:
-                # 새로운 종목 발견 로그
-                new_ones = [t for t in fresh_targets if t not in active_candidates]
-                if new_ones:
-                    logger.info(f"🔎 [Scan] 신규 발견: {new_ones}")
-                
-                # 감시 목록에 업데이트 (누적)
+                # 로그는 listener 내부에서 찍히므로 여기선 업데이트만
                 active_candidates.update(fresh_targets)
                 save_state(portfolio.ban_list, active_candidates)
             
-            # [FIX 1] 검사할 후보군 선정 (보유 중/밴 당한 것 제외)
-            valid_candidates = [
+            # ---------------------------------------------------------
+            # D. [매수] 진입 타점 확인 (핵심 수정: 히스토리 로딩)
+            # ---------------------------------------------------------
+            # 1. 매수 후보군 추리기 (이미 보유중이거나, 밴 당한 종목 제외)
+            buy_candidates = [
                 sym for sym in list(active_candidates)
                 if not portfolio.is_holding(sym) and not portfolio.is_banned(sym)
             ]
 
-            # [FIX 2] 셔플 (Shuffle) - 중요!
-            # 매번 순서를 섞어서, 리스트 뒤쪽에 있는 종목도 검사 기회를 갖게 함
-            random.shuffle(valid_candidates)
+            # 2. 순서 섞기 (앞번호 종목만 계속 체크하는 편중 방지)
+            random.shuffle(buy_candidates)
             
-            # [FIX 3] 상위 10개만 추출 (Rate Limit 고려)
-            scanned_targets = valid_candidates[:10]
+            # 3. API 호출 제한을 고려하여 상위 15개만 정밀 검사
+            # (59초 대기 로직 덕분에 1분에 한 번 실행되므로 15개 호출은 안전함)
+            targets_to_check = buy_candidates[:15]
             
-            # 상태 표시용 리스트 업데이트
-            listener.current_watchlist = scanned_targets 
+            # 텔레그램 상태 표시용 리스트 업데이트 (UI 연동)
+            listener.current_watchlist = targets_to_check 
 
-            if not scanned_targets:
-                time.sleep(1)
-                continue
-
-            # D. [전략 확인]
-            for sym in scanned_targets:
-                time.sleep(0.5) # API 호출 간격
+            for sym in targets_to_check:
+                # [핵심 2] 히스토리 데이터 로딩 (limit=60)
+                # 과거 60분치 데이터를 가져와야 초기 EMA가 정확하게 계산됨
+                df = kis.get_minute_candles("NAS", sym, limit=60)
                 
-                df = kis.get_minute_candles("NASD", sym)
-                if df.empty: continue
+                # 데이터가 너무 적으면(최소 20개) 지표 계산 불가 -> 스킵
+                if df.empty or len(df) < 20:
+                    continue
 
+                # 전략에 차트 데이터 전달 -> 매수 신호 확인
                 signal = strategy.check_buy_signal(df, ticker=sym)
+                
                 if signal:
-                    signal['ticker'] = sym
+                    signal['ticker'] = sym # 티커 정보 보강
                     
                     if portfolio.has_open_slot():
+                        # 매수 주문 실행
                         result = order_manager.execute_buy(portfolio, signal)
-                        if result and result.get('msg'):
-                            bot.send_message(result['msg'])
+                        
+                        if result:
+                            if result.get('msg'):
+                                bot.send_message(result['msg'])
+                            
                             if result['status'] == 'success':
-                                # 매수 성공 시 감시 리스트에서 제거할 수도 있지만,
-                                # 여기선 보유 중 체크 로직이 있으므로 놔둬도 됨
-                                if not portfolio.has_open_slot(): break
+                                # 매수 성공! 상태 저장
+                                save_state(portfolio.ban_list, active_candidates)
+                                # 슬롯이 꽉 찼으면 더 이상 매수 루프 돌지 않음
+                                if not portfolio.has_open_slot():
+                                    break
                         else:
-                            # 진입 실패 (자금 부족 등) -> 밴 처리
+                            # 로직상 매수 신호는 맞는데, 자금부족 등으로 실패한 경우 -> 밴 처리
                             logger.warning(f"🚌 [실패] {sym} 매수 실패. 금일 제외.")
                             portfolio.ban_list.add(sym)
-                            save_state(portfolio.ban_list, active_candidates) 
+                            save_state(portfolio.ban_list, active_candidates)
                     else:
-                        logger.warning(f"🔒 [Full] {sym} 슬롯 꽉 참. 금일 제외.")
-                        portfolio.ban_list.add(sym)
-                        save_state(portfolio.ban_list, active_candidates)
+                        # 슬롯 풀 로그 (너무 자주 찍히면 주석 처리 가능)
+                        # logger.warning(f"🔒 [Full] {sym} 슬롯 꽉 참.")
+                        pass
 
-            time.sleep(1)
+            # ---------------------------------------------------------
+            # 루프 종료 후 대기
+            # ---------------------------------------------------------
+            # 이미 상단에서 59초 대기를 하므로, 여기서는 아주 짧게만 쉼 (CPU 점유율 관리)
+            time.sleep(0.1)
 
         except KeyboardInterrupt:
             logger.info("🛑 관리자에 의한 수동 종료")
@@ -378,6 +381,7 @@ def main():
         except Exception as e:
             error_msg = f"⚠️ [ERROR] 시스템 오류: {e}\n👉 10초 후 재시도..."
             logger.error(error_msg)
+            # 에러 발생 시 문자 폭탄 방지를 위해 10초 대기
             time.sleep(10)
 
 if __name__ == "__main__":
