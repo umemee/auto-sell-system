@@ -206,7 +206,8 @@ def main():
                 # 상태 저장 후 루프 종료 (다음 날 재실행 필요)
                 save_state(portfolio.ban_list, active_candidates)
                 logger.info("👋 [System] 장 마감으로 시스템을 종료합니다.")
-                break 
+                time.sleep(300) 
+                continue
 
             # =========================================================
             # 💤 [Sleep Mode] 활동 시간 체크
