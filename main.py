@@ -268,18 +268,26 @@ def main():
             # ---------------------------------------------------------
             # 보유 중인 종목을 순회하며 매도 조건 확인
             for ticker in list(portfolio.positions.keys()):
-                # 매도 판단을 위해 현재가 조회
-                # (속도를 위해 get_current_price 사용. 전략이 복잡하면 get_minute_candles로 변경 가능)
-                real_time_price = kis.get_current_price(ticker)
-                
-                if real_time_price is None or real_time_price <= 0: 
+                # [수정] 단순 현재가(get_current_price) ❌ -> 분봉 데이터(get_minute_candles) ✅
+                # 이유: 프리마켓 급등 시세를 놓치지 않기 위해 체결 기반 데이터 사용
+                df = kis.get_minute_candles("NAS", ticker, limit=60)
+
+                # 데이터가 없으면 건너뜀
+                if df.empty or len(df) < 1: 
                     continue
+                
+                # [핵심] 분봉의 마지막 종가를 현재가로 사용 (가장 정확함)
+                real_time_price = df.iloc[-1]['close']
                 
                 pos = portfolio.positions[ticker]
                 entry_price = pos['entry_price']
                 entry_time = pos.get('entry_time')
 
-                # 전략에 매도 문의 (타임컷, 익절, 손절 포함)
+                # [디버깅 로그] 현재 봇이 보고 있는 수익률 출력
+                current_pnl = (real_time_price - entry_price) / entry_price * 100
+                # logger.info(f"🧐 [Check] {ticker} Now: ${real_time_price} (PnL: {current_pnl:.2f}%)")
+
+                # 전략에 매도 문의
                 exit_signal = strategy.check_exit_signal(
                     current_price=real_time_price, 
                     entry_price=entry_price,
@@ -288,7 +296,7 @@ def main():
                 
                 if exit_signal:
                     reason = exit_signal['reason']
-                    # 매도 실행 (RealOrderManager)
+                    # 매도 실행
                     result = order_manager.execute_sell(portfolio, ticker, reason, price=real_time_price)
                     if result:
                         bot.send_message(result['msg'])
