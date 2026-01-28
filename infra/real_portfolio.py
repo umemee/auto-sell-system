@@ -236,6 +236,9 @@ class RealPortfolio:
                 del self.positions[ticker]
                 self.ban_list.add(ticker) # 매도 시 즉시 밴 리스트 추가
                 self.logger.info(f"👋 [Local Update] SELL {ticker} -> Added to Ban List")
+                # [✅ 필수 추가] 주문 직후 총 자산(Equity) 재계산 (비중 축소 방지)
+                current_val = sum(p['qty'] * p['current_price'] for p in self.positions.values())
+                self.total_equity = self.balance + current_val
     def update_highest_price(self, ticker, current_price):
         """
         [Backtest Logic 이식] 트레일링 스탑을 위한 고가 갱신
