@@ -239,8 +239,7 @@ class KisApi:
             "NMIN": "1", "PINC": "1", "NEXT": "", "NREC": str(limit), "KEYB": ""
         }
         
-        # [최적화 핵심] timeout을 3초로 강제 설정하여 
-        # 서버가 버벅대면 즉시 손절하고 다음 종목으로 넘어감.
+        # [최적화 핵심] timeout을 3초로 강제 설정
         data = self._fetch_with_retry(path, params, "HHDFS76950200", timeout=3)
         
         if data and data.get('output2'):
@@ -253,7 +252,12 @@ class KisApi:
             for col in ['open', 'high', 'low', 'close', 'volume']:
                 if col in df.columns:
                     df[col] = df[col].apply(self._safe_float)
-            return df.sort_values('time')
+            
+            # 🚨 [필수 추가] 시간순 정렬 (과거 -> 현재 순서로 뒤집기)
+            # API는 데이터를 최신순(내림차순)으로 주기 때문에 반드시 뒤집어야 합니다.
+            df = df.iloc[::-1].reset_index(drop=True)
+            
+            return df
             
         return pd.DataFrame()
 
