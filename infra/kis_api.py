@@ -232,14 +232,18 @@ class KisApi:
         return None
 
     def get_minute_candles(self, market, symbol, limit=400):
-        """분봉 데이터 조회 (Fast Track)"""
+        """
+        분봉 데이터 조회 (Fast Track)
+        - Strategy.py가 요구하는 컬럼명(date, time, open, high, low, close, volume)과 정확히 일치합니다.
+        - 데이터 정렬(과거->현재)도 이미 적용되어 있어 수정할 필요가 없습니다.
+        """
         path = "/uapi/overseas-price/v1/quotations/inquire-time-itemchartprice"
         params = {
             "AUTH": "", "EXCD": "NAS", "SYMB": symbol,
             "NMIN": "1", "PINC": "1", "NEXT": "", "NREC": str(limit), "KEYB": ""
         }
         
-        # [최적화 핵심] timeout을 3초로 강제 설정
+        # [최적화] timeout 3초 유지
         data = self._fetch_with_retry(path, params, "HHDFS76950200", timeout=3)
         
         if data and data.get('output2'):
@@ -253,8 +257,7 @@ class KisApi:
                 if col in df.columns:
                     df[col] = df[col].apply(self._safe_float)
             
-            # 🚨 [필수 추가] 시간순 정렬 (과거 -> 현재 순서로 뒤집기)
-            # API는 데이터를 최신순(내림차순)으로 주기 때문에 반드시 뒤집어야 합니다.
+            # [유지] 시간순 정렬 (과거 -> 현재)
             df = df.iloc[::-1].reset_index(drop=True)
             
             return df
@@ -262,19 +265,28 @@ class KisApi:
         return pd.DataFrame()
 
     # =================================================================
-    # 🔫 [주문 관련] 매수/매도 실행
+    # 🔫 [주문 관련] 매수/매도 실행 (수정됨)
     # =================================================================
 
     def buy_limit(self, symbol, price, qty):
         """지정가 매수"""
-        return self.place_order_final("NASD", symbol, "BUY", qty, price)
+        # "00"은 지정가(Limit) 코드입니다.
+        return self.place_order_final("NASD", symbol, "BUY", qty, price, ord_dvsn="00")
+
+    def buy_market(self, symbol, current_price, qty):
+        """
+        [신규] 시장가 매수 (사실상 시장가)
+        - 급등주 00초 진입 시 주문 거부를 막기 위해 '현재가 + 5%' 지정가로 주문합니다.
+        - 이는 가장 확실하게 즉시 체결시키는 방법입니다.
+        """
+        # 현재가보다 5% 비싸게 주문 -> 매도 호가 전량을 긁으며 즉시 체결됨
+        agressive_price = current_price * 1.05 
+        return self.place_order_final("NASD", symbol, "BUY", qty, agressive_price, ord_dvsn="00")
 
     @log_api_call("주문 전송")
-    def place_order_final(self, exchange, symbol, side, qty, price):
+    def place_order_final(self, exchange, symbol, side, qty, price, ord_dvsn="00"):
         """
-        [Smart Order] 거래소 자동 감지 및 주문 전송
-        - 주문은 재시도(Retry)를 함부로 하면 중복 체결 위험이 있으므로
-        - 기존 방식대로 거래소를 변경(Fail-over)하는 방식만 유지합니다.
+        [수정] ord_dvsn 파라미터 추가 (기본값 "00": 지정가)
         """
         path = "/uapi/overseas-stock/v1/trading/order"
         is_buy = (side == "BUY")
@@ -283,11 +295,12 @@ class KisApi:
         # 가격 포맷팅
         try:
             f_price = float(price)
+            # 0원이면 시장가(혹은 가격무관)로 간주
             final_price = f"{f_price:.4f}" if f_price < 1.0 else f"{f_price:.2f}"
+            if f_price == 0: final_price = "0"
         except:
             final_price = "0"
 
-        # 시도할 거래소 목록 (NASD -> AMS -> NYSE)
         exchange_candidates = [exchange]
         if exchange == "NASD":
             exchange_candidates.extend(["AMS", "NYSE"]) 
@@ -295,8 +308,6 @@ class KisApi:
         last_error_msg = ""
 
         for try_exch in exchange_candidates:
-            # 주문은 POST 요청이므로 _fetch_with_retry를 쓰지 않고 직접 호출
-            # (주문 중복 방지를 위해 requests.post를 1회만 시도)
             self._update_headers(tr_id)
             body = {
                 "CANO": Config.CANO, 
@@ -306,11 +317,11 @@ class KisApi:
                 "ORD_QTY": str(int(qty)),  
                 "OVRS_ORD_UNPR": final_price, 
                 "ORD_SVR_DVSN_CD": "0", 
-                "ORD_DVSN": "00"
+                # [수정] 하드코딩된 "00" 대신 파라미터 사용
+                "ORD_DVSN": ord_dvsn 
             }
             
             try:
-                # [Safety] 주문 타임아웃 10초
                 res = requests.post(f"{self.base_url}{path}", headers=self.headers, json=body, timeout=10)
                 data = res.json()
                 
@@ -328,7 +339,6 @@ class KisApi:
                 self.logger.error(f"❌ 주문 통신 에러 ({try_exch}): {e}")
                 last_error_msg = str(e)
             
-            # 너무 빠른 거래소 변경 방지
             time.sleep(0.2)
 
         self.logger.error(f"❌ 최종 주문 실패 ({symbol}): {last_error_msg}")
@@ -358,11 +368,79 @@ class KisApi:
             if order_type == "MARKET" or not price or price <= 0:
                 odno = self.sell_market(ticker, qty)
             else:
-                odno = self.place_order_final("NASD", ticker, "SELL", qty, price)
+                odno = self.place_order_final("NASD", ticker, "SELL", qty, price, ord_dvsn="00")
+        
         elif side == "BUY":
-            odno = self.buy_limit(ticker, price, qty)
+            # [수정] 매수 시 MARKET 옵션 처리 추가
+            if order_type == "MARKET" and price:
+                 odno = self.buy_market(ticker, price, qty)
+            else:
+                 odno = self.buy_limit(ticker, price, qty)
 
         if odno:
             return {'rt_cd': '0', 'msg1': '주문 전송 성공', 'output': {'ODNO': odno}}
         else:
             return {'rt_cd': '1', 'msg1': '주문 전송 실패 (로그 확인)'}
+        
+        # -------------------------------------------------------------
+    # [신규 추가] 데이터 정합성 및 유동성 검증 (공식 문서 기반)
+    # -------------------------------------------------------------
+
+    def get_daily_liquidity_status(self, symbol):
+        """
+        [Ghost Stock Check]
+        문서: [해외주식] 기본시세.xlsx - 해외주식 기간별시세
+        TR_ID: HHDFS76240000
+        """
+        path = "/uapi/overseas-price/v1/quotations/dailyprice"
+        params = {
+            "AUTH": "", 
+            "EXCD": "NAS", 
+            "SYMB": symbol,
+            "GUBN": "0",  # 0: 일봉
+            "BYMD": "",   # 공백 시 최근일 기준
+            "MODP": "0"   # 0: 수정주가 미적용
+        }
+        
+        # 일봉 데이터 조회
+        data = self._fetch_with_retry(path, params, "HHDFS76240000", timeout=3)
+        
+        if data and data.get('output2'):
+            # output2 리스트: [0]=오늘(장중), [1]=어제, [2]=그제 ...
+            daily_data = data['output2']
+            
+            # 최소한 데이터가 2일치 이상은 있어야 '어제' 데이터를 확인 가능
+            if len(daily_data) < 2:
+                return None 
+            
+            # 어제 데이터 추출
+            yesterday = daily_data[1]
+            return {
+                'date': yesterday['xymd'], # 문서상 날짜 필드명: xymd
+                'close': self._safe_float(yesterday['clos']),
+                'volume': self._safe_float(yesterday['tvol'])
+            }
+        return None
+
+    def get_market_spread(self, symbol):
+        """
+        [Spread Check]
+        문서: [해외주식] 기본시세.xlsx - 해외주식 현재가 호가
+        TR_ID: HHDFS76200100 (주의: 모의투자 미지원)
+        """
+        path = "/uapi/overseas-price/v1/quotations/inquire-asking-price"
+        params = {
+            "AUTH": "", 
+            "EXCD": "NAS", 
+            "SYMB": symbol
+        }
+        
+        data = self._fetch_with_retry(path, params, "HHDFS76200100", timeout=3)
+        
+        if data and data.get('output1'):
+            # pbid1: 매수 1호가, pask1: 매도 1호가
+            ask = self._safe_float(data['output1'].get('pask1')) 
+            bid = self._safe_float(data['output1'].get('pbid1')) 
+            return ask, bid
+            
+        return 0.0, 0.0
