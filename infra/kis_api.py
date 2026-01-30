@@ -424,9 +424,8 @@ class KisApi:
 
     def get_market_spread(self, symbol):
         """
-        [Spread Check]
-        문서: [해외주식] 기본시세.xlsx - 해외주식 현재가 호가
-        TR_ID: HHDFS76200100 (주의: 모의투자 미지원)
+        [Spread Check] 현재 매수/매도 호가 및 '잔량' 조회
+        TR_ID: HHDFS76200100 
         """
         path = "/uapi/overseas-price/v1/quotations/inquire-asking-price"
         params = {
@@ -441,6 +440,46 @@ class KisApi:
             # pbid1: 매수 1호가, pask1: 매도 1호가
             ask = self._safe_float(data['output1'].get('pask1')) 
             bid = self._safe_float(data['output1'].get('pbid1')) 
-            return ask, bid
+            # [수정] 잔량(Volume)까지 반환해야 main.py의 필터가 작동함
+            ask_vol = self._safe_float(data['output1'].get('vask1'))
+            bid_vol = self._safe_float(data['output1'].get('vbid1'))
             
-        return 0.0, 0.0
+            return ask, bid, ask_vol, bid_vol
+            
+        return 0.0, 0.0, 0.0, 0.0
+
+    def get_pending_orders(self, symbol=None):
+        """
+        [신규 추가] 미체결 내역 조회 (중복 주문 방지용)
+        문서: [해외주식] 미체결내역.csv (TR_ID: TTTS3018R)
+        """
+        path = "/uapi/overseas-stock/v1/trading/inquire-nccs"
+        params = {
+            "CANO": Config.CANO,
+            "ACNT_PRDT_CD": Config.ACNT_PRDT_CD,
+            "OVRS_EXCG_CD": "NASD",
+            "SORT_SQN": "DS", # 내림차순
+            "CTX_AREA_FK200": "",
+            "CTX_AREA_NK200": ""
+        }
+        
+        # 미체결 내역 조회
+        data = self._fetch_with_retry(path, params, "TTTS3018R", timeout=3)
+        
+        pending_list = []
+        if data and data.get('output'):
+            for item in data['output']:
+                item_sym = item.get('pdno')
+                
+                # '매도' 주문이면서 '미체결 수량'이 남아있는 경우만 필터링
+                if item.get('sll_buy_dvsn_cd_name') == '매도' and int(item.get('nccs_qty', 0)) > 0:
+                    if symbol and symbol != item_sym:
+                        continue
+                    pending_list.append({
+                        "odno": item.get('odno'),
+                        "symbol": item_sym,
+                        "qty": int(item.get('nccs_qty')),
+                        "price": float(item.get('ft_ord_unpr3', 0))
+                    })
+                    
+        return pending_list

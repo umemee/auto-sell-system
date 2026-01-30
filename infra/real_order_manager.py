@@ -155,8 +155,7 @@ class RealOrderManager:
                 f"🔢 수량: {qty}주\n"
                 f"📊 수익률: {pnl_pct:.2f}% (추정)"
             )
-            self.logger.info(f"매도 주문 완료: {ticker} ({type_str})")
-            
+            self.logger.info(f"👋 [매도 완료] {ticker} | 유형: {type_str} | 가격: ${order_price if order_price > 0 else 0} | 사유: {reason}")
             return {'status': 'success', 'msg': msg}
             
         return None
