@@ -5,7 +5,7 @@ import pytz
 import json 
 import os   
 import threading
-import random # [필수 추가] 좀비 리스트 방지를 위한 셔플용
+import random 
 from config import Config
 from infra.utils import get_logger
 from infra.kis_api import KisApi
@@ -108,6 +108,9 @@ def main():
     HEARTBEAT_INTERVAL = getattr(Config, 'HEARTBEAT_INTERVAL_SEC', 1800)
     was_sleeping = False
     
+    # [수정] 중복 실행 방지를 위한 변수 추가
+    last_processed_minute = None
+    
     current_date_str = now_et_start.strftime("%Y-%m-%d")
 
     try:
@@ -175,22 +178,33 @@ def main():
     while True:
         try:
             # =========================================================
-            # 🕒 [Time Sync] 59초 매매 (봉 완성 판단)
+            # 🕒 [Time Sync] 캔들 완성형 (00초~05초 진입)
             # =========================================================
             # 미국 현지 시간 기준
             now = datetime.datetime.now(pytz.timezone('America/New_York'))
+            current_minute_str = now.strftime("%H:%M")
             
-            # [핵심 1] 59초가 아니면 0.5초 쉬고 건너뜀 (API 과부하 방지 + 봉 완성 대기)
-            # 0~58초 사이에는 루프를 빠르게 돌며 시간만 체크합니다.
-            if now.second < 59:
+            # [핵심 수정] 0초~5초 사이(매분 시작)에만 로직 실행 (캔들 마감 확인용)
+            # 59초 방식은 데이터가 덜 닫힌 상태일 수 있어 위험합니다.
+            # 5초가 넘어가면 다음 분까지 대기합니다.
+            if now.second > 5:
+                # CPU 낭비 방지를 위해 적당히 쉽니다 (0.5초)
                 time.sleep(0.5)
                 continue
+            
+            # [핵심 수정] 이번 분에 이미 실행했다면 건너뜀 (중복 실행 방지)
+            if last_processed_minute == current_minute_str:
+                time.sleep(0.5)
+                continue
+                
+            # --- 여기서부터는 매 분의 00초~05초 사이에 "딱 한 번"만 실행됩니다 ---
+            last_processed_minute = current_minute_str
+            # logger.info(f"⏱️ [New Candle] {current_minute_str} Analysis Start...") 
             
             # ---------------------------------------------------------
             # 🛑 [EOD] 장 마감 강제 청산 (안전장치)
             # ---------------------------------------------------------
             # settings.py의 TIME_HARD_CUTOFF 확인 (기본값 15:55)
-            # 프리마켓 전용이라면 "05:55" 등으로 설정되어 있어야 함
             cutoff_time = getattr(Config, 'TIME_HARD_CUTOFF', "15:55") 
             
             if now.strftime("%H:%M") == cutoff_time:
@@ -212,7 +226,6 @@ def main():
             # =========================================================
             # 💤 [Sleep Mode] 활동 시간 체크
             # =========================================================
-            # is_active_market_time 함수 사용 (기존 로직 유지)
             is_active, reason = is_active_market_time()
             
             if not is_active:
@@ -222,8 +235,8 @@ def main():
                     was_sleeping = True
                     save_state(portfolio.ban_list, active_candidates) # 자기 전 상태 저장
                 
-                # 활동 시간이 아니면 1분 통째로 대기 (59초 체크 루프 탈출)
-                time.sleep(60)
+                # 활동 시간이 아니면 1분 통째로 대기 (다음 분 0초까지 대기)
+                time.sleep(30)
                 continue
             
             # [기상] 잠에서 깨어난 경우
@@ -233,9 +246,8 @@ def main():
                 portfolio.sync_with_kis() # 자고 일어나면 잔고 동기화
 
             # =========================================================
-            # 💓 [Heartbeat] 생존 신고 (기존 기능 유지)
+            # 💓 [Heartbeat] 생존 신고
             # =========================================================
-            # 59초마다 한 번씩 체크하므로, 설정된 간격(30분 등)이 지나면 메시지 전송
             if time.time() - last_heartbeat_time > HEARTBEAT_INTERVAL:
                 eq = portfolio.total_equity
                 pos_cnt = len(portfolio.positions)
@@ -246,7 +258,7 @@ def main():
                 last_heartbeat_time = time.time()
 
             # =========================================================
-            # 📅 [Daily Reset] 날짜 변경 체크 (기존 기능 유지)
+            # 📅 [Daily Reset] 날짜 변경 체크
             # =========================================================
             new_date_str = now.strftime("%Y-%m-%d")
             if new_date_str != current_date_str:
@@ -258,7 +270,7 @@ def main():
                 current_date_str = new_date_str
 
             # =========================================================
-            # 🧠 [Logic] 매매 로직 시작
+            # 🧠 [Logic] 매매 로직 시작 (매 분 1회 실행)
             # =========================================================
             
             # A. 포트폴리오 동기화 (오차 방지)
@@ -267,26 +279,20 @@ def main():
             # ---------------------------------------------------------
             # B. [매도] 보유 종목 관리 (Check Exit)
             # ---------------------------------------------------------
-            # 보유 중인 종목을 순회하며 매도 조건 확인
             for ticker in list(portfolio.positions.keys()):
                 # [수정] 단순 현재가(get_current_price) ❌ -> 분봉 데이터(get_minute_candles) ✅
-                # 이유: 프리마켓 급등 시세를 놓치지 않기 위해 체결 기반 데이터 사용
+                # 00초에 실행되므로 df.iloc[-2]가 방금 마감된 1분봉입니다.
                 df = kis.get_minute_candles("NAS", ticker, limit=60)
 
-                # 데이터가 없으면 건너뜀
                 if df.empty or len(df) < 1: 
                     continue
                 
-                # [핵심] 분봉의 마지막 종가를 현재가로 사용 (가장 정확함)
-                real_time_price = df.iloc[-1]['close']
+                # [전략] 현재가(Tick)보다는 '방금 확정된 종가' 혹은 '현재 시가'를 기준으로 판단
+                real_time_price = df.iloc[-1]['close'] # 현재 진행중인 봉의 현재가
                 
                 pos = portfolio.positions[ticker]
                 entry_price = pos['entry_price']
                 entry_time = pos.get('entry_time')
-
-                # [디버깅 로그] 현재 봇이 보고 있는 수익률 출력
-                current_pnl = (real_time_price - entry_price) / entry_price * 100
-                # logger.info(f"🧐 [Check] {ticker} Now: ${real_time_price} (PnL: {current_pnl:.2f}%)")
 
                 # 전략에 매도 문의
                 exit_signal = strategy.check_exit_signal(
@@ -297,7 +303,6 @@ def main():
                 
                 if exit_signal:
                     reason = exit_signal['reason']
-                    # 매도 실행
                     result = order_manager.execute_sell(portfolio, ticker, reason, price=real_time_price)
                     if result:
                         bot.send_message(result['msg'])
@@ -306,53 +311,85 @@ def main():
             # ---------------------------------------------------------
             # C. [스캔] 신규 급등주 포착
             # ---------------------------------------------------------
-            # listener (MarketListener) 객체 사용
             fresh_targets = listener.scan_markets(
                 ban_list=portfolio.ban_list,
                 active_candidates=active_candidates
             )
             
             if fresh_targets:
-                # 로그는 listener 내부에서 찍히므로 여기선 업데이트만
                 active_candidates.update(fresh_targets)
                 save_state(portfolio.ban_list, active_candidates)
             
             # ---------------------------------------------------------
             # D. [매수] 진입 타점 확인 (핵심 수정: 히스토리 로딩)
             # ---------------------------------------------------------
-            # 1. 매수 후보군 추리기 (이미 보유중이거나, 밴 당한 종목 제외)
             buy_candidates = [
                 sym for sym in list(active_candidates)
                 if not portfolio.is_holding(sym) and not portfolio.is_banned(sym)
             ]
 
-            # 2. 순서 섞기 (앞번호 종목만 계속 체크하는 편중 방지)
+            # [Random Shuffle] 좀비 리스트 방지
             random.shuffle(buy_candidates)
             
-            # 3. API 호출 제한을 고려하여 상위 15개만 정밀 검사
-            # (59초 대기 로직 덕분에 1분에 한 번 실행되므로 15개 호출은 안전함)
+            # API 제한 고려 상위 15개만 체크
             targets_to_check = buy_candidates[:15]
-            
-            # 텔레그램 상태 표시용 리스트 업데이트 (UI 연동)
             listener.current_watchlist = targets_to_check 
 
             for sym in targets_to_check:
-                # [핵심 2] 히스토리 데이터 로딩 (limit=60)
-                # 과거 60분치 데이터를 가져와야 초기 EMA가 정확하게 계산됨
+                
+                # =========================================================
+                # 🛡️ [Ghost Stock & Liquidity Blocker] (공식 API 검증)
+                # =========================================================
+                try:
+                    # [Step 1] 데이터 존재 여부 확인 (어제 데이터가 없으면 유령 주식)
+                    daily_stat = kis.get_daily_liquidity_status(sym)
+                    
+                    if not daily_stat:
+                        logger.warning(f"👻 [Ghost] {sym}: API 일봉 데이터 없음. 거래 영구 제외.")
+                        portfolio.ban_list.add(sym) 
+                        continue
+                        
+                    # 조건: 어제 거래량이 5만 주 미만이면 위험 (잡주 필터링)
+                    if daily_stat['volume'] < 50000:
+                        logger.warning(f"💧 [Volume] {sym}: 전일 거래량 부족({daily_stat['volume']:,}주). 거래 제외.")
+                        portfolio.ban_list.add(sym)
+                        continue
+                        
+                    # [Step 2] 실시간 호가 스프레드 체크 (급락주/호가공백 방어)
+                    ask, bid = kis.get_market_spread(sym)
+                    
+                    # 실전(Real)에서만 작동 (모의투자는 0 반환 가능)
+                    if ask > 0 and bid > 0:
+                        spread_pct = (ask - bid) / ask * 100
+                        
+                        # 경고: 호가 차이가 2% 이상이면 진입 금지 (시장가 매수 시 즉시 손실 위험)
+                        if spread_pct > 2.0:
+                            logger.warning(f"⚠️ [Spread] {sym}: 호가 괴리율 과다 ({spread_pct:.2f}%). 진입 보류.")
+                            continue # 밴은 하지 않고 이번 턴만 패스
+                    elif ask == 0 and bid == 0:
+                        # 모의투자거나 호가 데이터가 일시적으로 없을 때 -> 패스(허용)
+                        pass 
+
+                except Exception as e:
+                    logger.error(f"❌ 검증 로직 에러({sym}): {e}")
+                    continue # 에러 발생 시 안전하게 건너뜀
+
+                # =========================================================
+                # [기존 로직] 여기서부터 원래 코드입니다
+                # =========================================================
+                # [필수] 과거 60분치 데이터 (EMA 계산용)
                 df = kis.get_minute_candles("NAS", sym, limit=60)
                 
-                # 데이터가 너무 적으면(최소 20개) 지표 계산 불가 -> 스킵
                 if df.empty or len(df) < 20:
                     continue
 
-                # 전략에 차트 데이터 전달 -> 매수 신호 확인
+                # 전략 호출 (수정된 strategy.py는 iloc[-2]를 봅니다)
                 signal = strategy.check_buy_signal(df, ticker=sym)
                 
                 if signal:
-                    signal['ticker'] = sym # 티커 정보 보강
+                    signal['ticker'] = sym
                     
                     if portfolio.has_open_slot():
-                        # 매수 주문 실행
                         result = order_manager.execute_buy(portfolio, signal)
                         
                         if result:
@@ -360,25 +397,19 @@ def main():
                                 bot.send_message(result['msg'])
                             
                             if result['status'] == 'success':
-                                # 매수 성공! 상태 저장
                                 save_state(portfolio.ban_list, active_candidates)
-                                # 슬롯이 꽉 찼으면 더 이상 매수 루프 돌지 않음
                                 if not portfolio.has_open_slot():
                                     break
                         else:
-                            # 로직상 매수 신호는 맞는데, 자금부족 등으로 실패한 경우 -> 밴 처리
+                            # 로직상 매수인데 실패(잔고부족 등) -> 밴
                             logger.warning(f"🚌 [실패] {sym} 매수 실패. 금일 제외.")
                             portfolio.ban_list.add(sym)
                             save_state(portfolio.ban_list, active_candidates)
-                    else:
-                        # 슬롯 풀 로그 (너무 자주 찍히면 주석 처리 가능)
-                        # logger.warning(f"🔒 [Full] {sym} 슬롯 꽉 참.")
-                        pass
 
             # ---------------------------------------------------------
             # 루프 종료 후 대기
             # ---------------------------------------------------------
-            # 이미 상단에서 59초 대기를 하므로, 여기서는 아주 짧게만 쉼 (CPU 점유율 관리)
+            # 이미 상단에서 타이밍 제어를 하므로 여기선 짧게 쉽니다.
             time.sleep(0.1)
 
         except KeyboardInterrupt:
@@ -390,7 +421,6 @@ def main():
         except Exception as e:
             error_msg = f"⚠️ [ERROR] 시스템 오류: {e}\n👉 10초 후 재시도..."
             logger.error(error_msg)
-            # 에러 발생 시 문자 폭탄 방지를 위해 10초 대기
             time.sleep(10)
 
 if __name__ == "__main__":

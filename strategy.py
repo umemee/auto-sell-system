@@ -38,10 +38,10 @@ class EmaStrategy:
 
     def check_buy_signal(self, df: pd.DataFrame, ticker=None):
         """
-        매수 신호 확인
-        [추가된 로직] 오전 10시(ET) 이후 진입 금지
+        매수 신호 확인 (백테스팅 로직 100% 이식 버전)
+        - 변경점: 실시간 호가(Current Tick)가 아닌, '직전 완성된 봉(Closed Candle)'을 기준으로 판단
         """
-        if df.empty or len(df) < self.ma_length + 2:
+        if df.empty or len(df) < self.ma_length + 3:
             return None
 
         # -----------------------------------------------------------
@@ -49,63 +49,83 @@ class EmaStrategy:
         # -----------------------------------------------------------
         now_et = self._get_current_et_time()
         
-        # ✅ [추가] 장 시작(04:00) 후 10분간 대기 (Warm-up Guard)
-        # 이유: 장 시작 직후에는 캔들 데이터가 부족하여 EMA 지표가 불안정하므로 매매를 막습니다.
+        # [Warm-up Guard] 장 시작(04:00) 후 10분간 대기 (지표 안정화)
         if now_et.hour == 4 and now_et.minute < 10:
              return None
-        # 정규장 시작(09:30) 이후 10시가 넘었는지 체크
-        # (프리마켓 04:00 ~ 09:30은 진입 허용)
+             
+        # [Entry Deadline] 10:00 ET 이후 진입 금지
         if now_et.hour >= self.entry_deadline:
-            # self.logger.debug(f"⏳ [Time Limit] {ticker} 진입 불가 (Current {now_et.strftime('%H:%M')} >= Limit {self.entry_deadline}:00)")
             return None
 
         # -----------------------------------------------------------
-        # [기존 로직] EMA 및 캔들 패턴 분석
+        # 📊 [Core Logic] EMA 및 캔들 패턴 분석
         # -----------------------------------------------------------
-        # 데이터 전처리
+        # 데이터 전처리 (SettingWithCopyWarning 방지)
         df = df.copy()
+        
+        # EMA 계산 (전체 데이터 기준)
         df['EMA'] = df['close'].ewm(span=self.ma_length, adjust=False).mean()
         
-        last_row = df.iloc[-1]
-        prev_row = df.iloc[-2]
+        # [핵심 수정 1] '진행 중인 봉'이 아니라 '방금 완성된 봉'을 가져옵니다.
+        # df.iloc[-1]은 현재 변동 중인 봉이므로 신뢰할 수 없습니다.
+        # df.iloc[-2]가 '직전에 마감된 확정 봉'입니다.
+        #target_row = df.iloc[-2]
         
-        current_price = last_row['close']
-        ema_value = last_row['EMA']
-        
-        # 1. 과열 종목 필터링 (전일 종가 대비 100% 이상 폭등 시 제외)
-        try:
-            # 전일 종가를 구하기 위해 일봉 데이터가 필요하지만, 
-            # 여기서는 분봉 데이터 내에서 대략적인 시가(Open) 대비 상승률로 대체하거나
-            # market_listener에서 이미 필터링된 종목임을 가정합니다.
-            pass 
-        except:
-            pass
+        # [참고] 매수 가격은 '현재가(iloc[-1])'로 잡되, 판단은 '과거(iloc[-2])'로 합니다.
+        #current_market_price = df.iloc[-1]['close']
+        # [기존 코드 삭제]
 
-        # 2. 눌림목(Dip) 확인: 가격이 EMA 근처까지 내려왔는가?
-        # EMA보다 살짝 낮거나(Dip), 아주 살짝 높은(Hover) 구간
-        dip_threshold = ema_value * (1 + self.dip_tolerance)  # EMA + 0.5%
+        # [새로 작성] 백테스팅과 동일한 '2 Candle' 정의
+        # iloc[-1]: 현재 진행 중인 봉 (무시)
+        confirm_candle = df.iloc[-2]  # 방금 마감된 봉 (T) -> 지지 확인용
+        dip_candle     = df.iloc[-3]  # 그 전 봉 (T-1) -> 눌림 발생용
+
+        current_market_price = df.iloc[-1]['close'] # 주문용 현재가
+        # 지표 추출 (완성된 봉 기준)
+        prev_close = confirm_candle['close'] # 종가 (Rebound 확인용)
+        prev_low = confirm_candle['low']     # 저가 (Dip 확인용)
+        ema_value = confirm_candle['EMA']    # 당시의 EMA
         
-        # 이전 캔들의 저가가 EMA 근처였는지 확인
-        prev_low = prev_row['low']
+        # -----------------------------------------------------------
+        # 🧬 [DNA 이식] 백테스팅 조건과 완벽 일치시키기
+        # -----------------------------------------------------------
+        
+        # 1. 눌림목(Dip) 확인: 해당 봉의 저가가 EMA를 터치했었는가?
+        # 조건: Low <= EMA * (1 + 0.5%)
+        dip_threshold = ema_value * (1 + self.dip_tolerance)
         is_dip = prev_low <= dip_threshold
         
-        # 3. 반등(Rebound) 확인: 현재가가 다시 EMA 위로 올라가거나 지지받는가?
-        # 현재가는 EMA - 0.2% 보다는 높아야 함 (너무 깊게 빠진 건 제외)
+        # 2. 반등(Rebound) 확인: 하지만 종가는 EMA 위(혹은 근처)에서 마감했는가?
+        # 조건: Close >= EMA * (1 - 0.2%)
+        # 이 조건이 '하락 돌파'와 '지지 반등'을 구분하는 핵심 필터입니다.
         rebound_threshold = ema_value * (1 - self.hover_tolerance)
-        is_rebound = current_price >= rebound_threshold
+        is_rebound = prev_close >= rebound_threshold
         
-        # 4. 거래량 확인 (직전 5개봉 평균보다 튀었는지 확인 - 선택사항)
-        # vol_ma = df['volume'].iloc[-6:-1].mean()
-        # is_vol_up = last_row['volume'] > vol_ma
-        
-        if is_dip and is_rebound:
+        # [디버깅용 로그] (필요 시 주석 해제)
+        # self.logger.debug(f"🔍 {ticker} | Low:{prev_low} vs Dip:{dip_threshold:.2f} | Close:{prev_close} vs Reb:{rebound_threshold:.2f}")
+
+        # [새로 작성] 
+        # 1. Dip(눌림) 조건: T-1 봉이 '음봉'이면서 저가가 EMA를 찍었어야 함
+        # (백테스팅: Low <= EMA * 1.005)
+        ema_prev = dip_candle['EMA']
+        is_dip = (dip_candle['close'] < dip_candle['open']) and \
+                 (dip_candle['low'] <= ema_prev * (1 + self.dip_tolerance))
+
+        # 2. Rebound(지지) 조건: T 봉(방금 마감)은 EMA 위에서 종가 마감했어야 함
+        # (백테스팅: Close >= EMA * 0.998)        
+        ema_curr = confirm_candle['EMA']
+        is_hold = confirm_candle['close'] >= ema_curr * (1 - self.hover_tolerance)
+
+        # [최종 판단]
+        if is_dip and is_hold:
             return {
-                'price': current_price,
-                'stop_loss': current_price * (1 - self.sl_pct),
-                'target_price': current_price * (1 + self.tp_pct),
-                'reason': f"EMA Dip & Rebound (P:${current_price:.2f} > EMA:${ema_value:.2f})"
+                'price': current_market_price,
+                'stop_loss': current_market_price * (1 - self.sl_pct),
+                'target_price': current_market_price * (1 + self.tp_pct),
+                # 로그에 이유를 명확히 남김 (Red Dip -> Green Hold)
+                'reason': f"EMA_PATTERN (Dip:Low${dip_candle['low']:.2f} -> Hold:Close${confirm_candle['close']:.2f})"
             }
-            
+
         return None
     
     def check_exit_signal(self, current_price, entry_price, entry_time=None):
