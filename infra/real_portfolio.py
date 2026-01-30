@@ -70,14 +70,22 @@ class RealPortfolio:
                     api_tickers.add(ticker)
 
                     # API 데이터 추출
-                    eval_amt = float(item.get('price', 0.0))  # 평가 금액
-                    pnl_pct = float(item.get('pnl_pct', 0.0)) # 수익률(%)
+                    avg_unit_price = float(item.get('price', 0.0))  # 매입 평단가 (Unit Price)
+                    pnl_pct = float(item.get('pnl_pct', 0.0))       # 수익률(%)
                     
-                    # 수량이 정수가 아니라면 정수 처리 (미국 주식 소수점 가능성 고려 시 float 유지 권장이나 여기선 int)
+                    # 수량이 정수가 아니라면 정수 처리
                     qty = int(qty)
 
-                    # 현재가 및 진입가 역산
-                    current_price = eval_amt / qty if qty > 0 else 0.0
+                    # [수정] 1. 현재가 계산 (평단가 * 수익률 적용)
+                    # 수익률이 반영된 '현재 1주당 가격'을 구합니다.
+                    current_price = avg_unit_price * (1.0 + pnl_pct / 100.0)
+
+                    # [수정] 2. 평가 금액 계산 (현재가 * 보유수량)
+                    # 비로소 '총 평가 금액'이 제대로 계산됩니다.
+                    eval_amt = current_price * qty
+                    
+                    # 진입가 역산 (평단가가 정확하다면 avg_unit_price와 같음)
+                    entry_price = avg_unit_price
                     
                     # API 수익률 기반 진입가 역산 (API 평단가가 부정확할 경우 대비)
                     if (1 + pnl_pct/100.0) != 0:
