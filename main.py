@@ -280,6 +280,15 @@ def main():
             # B. [매도] 보유 종목 관리 (Check Exit)
             # ---------------------------------------------------------
             for ticker in list(portfolio.positions.keys()):
+                
+                # [추가] 1. 미체결 주문 확인 (중복 매도 방지)
+                try:
+                    pending_orders = kis.get_pending_orders(ticker)
+                    if pending_orders:
+                        # 이미 매도 주문이 걸려있으면 패스 (로그 생략 가능)
+                        continue 
+                except Exception:
+                    pass
                 # [수정] 단순 현재가(get_current_price) ❌ -> 분봉 데이터(get_minute_candles) ✅
                 # 00초에 실행되므로 df.iloc[-2]가 방금 마감된 1분봉입니다.
                 df = kis.get_minute_candles("NAS", ticker, limit=60)
@@ -338,41 +347,30 @@ def main():
             for sym in targets_to_check:
                 
                 # =========================================================
-                # 🛡️ [Ghost Stock & Liquidity Blocker] (공식 API 검증)
+                # 🛡️ [Real-time LQI Filter] 실시간 호가 정밀 검문 (유지!)
                 # =========================================================
                 try:
-                    # [Step 1] 데이터 존재 여부 확인 (어제 데이터가 없으면 유령 주식)
-                    daily_stat = kis.get_daily_liquidity_status(sym)
+                    # 1. 현재 호가와 잔량(Volume) 가져오기
+                    ask, bid, ask_vol, bid_vol = kis.get_market_spread(sym)
                     
-                    if not daily_stat:
-                        logger.warning(f"👻 [Ghost] {sym}: API 일봉 데이터 없음. 거래 영구 제외.")
-                        portfolio.ban_list.add(sym) 
-                        continue
-                        
-                    # 조건: 어제 거래량이 5만 주 미만이면 위험 (잡주 필터링)
-                    if daily_stat['volume'] < 50000:
-                        logger.warning(f"💧 [Volume] {sym}: 전일 거래량 부족({daily_stat['volume']:,}주). 거래 제외.")
-                        portfolio.ban_list.add(sym)
-                        continue
-                        
-                    # [Step 2] 실시간 호가 스프레드 체크 (급락주/호가공백 방어)
-                    ask, bid = kis.get_market_spread(sym)
-                    
-                    # 실전(Real)에서만 작동 (모의투자는 0 반환 가능)
                     if ask > 0 and bid > 0:
+                        # [검문 1] 스프레드(Spread) 체크 (사용자 요청으로 유지)
                         spread_pct = (ask - bid) / ask * 100
                         
-                        # 경고: 호가 차이가 2% 이상이면 진입 금지 (시장가 매수 시 즉시 손실 위험)
-                        if spread_pct > 2.0:
-                            logger.warning(f"⚠️ [Spread] {sym}: 호가 괴리율 과다 ({spread_pct:.2f}%). 진입 보류.")
-                            continue # 밴은 하지 않고 이번 턴만 패스
-                    elif ask == 0 and bid == 0:
-                        # 모의투자거나 호가 데이터가 일시적으로 없을 때 -> 패스(허용)
-                        pass 
+                        if spread_pct > 2.0: 
+                            logger.warning(f"⚠️ [Spread] {sym}: 괴리율 과다 ({spread_pct:.2f}%). 진입 보류.")
+                            continue 
+
+                        # [검문 2] 호가 얇음(Thin Book) 체크
+                        bid_money = bid * bid_vol
+                        if bid_money < 2000: 
+                            logger.warning(f"📉 [Liquidity] {sym}: 매수 잔량 부족 (${bid_money:,.0f}). 진입 위험.")
+                            continue
 
                 except Exception as e:
-                    logger.error(f"❌ 검증 로직 에러({sym}): {e}")
-                    continue # 에러 발생 시 안전하게 건너뜀
+                    # 호가 조회 실패 시 안전하게 패스
+                    logger.error(f"❌ 호가 검증 실패({sym}): {e}")
+                    continue
 
                 # =========================================================
                 # [기존 로직] 여기서부터 원래 코드입니다
