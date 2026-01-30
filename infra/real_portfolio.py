@@ -1,3 +1,4 @@
+#infra/real_portfolio.py
 import logging
 from config import Config
 import datetime
@@ -188,57 +189,50 @@ class RealPortfolio:
         중복 주문 방지 및 반응 속도 향상
         """
         ticker = fill['ticker']
-        qty = fill['qty']
-        price = fill['price']
+        qty = int(fill['qty'])
+        price = float(fill['price'])
         
         if fill['type'] == 'BUY':
             cost = qty * price
             self.balance -= cost
             
-            # 이미 있는 경우 (추가 매수) 처리
+            # 🕒 [Time Cut] 현재 미국 시간 기록
+            now_et = datetime.datetime.now(pytz.timezone('US/Eastern'))
+
+            # [수정 1] VIVS 사태 방지: 기존 데이터가 있으면 삭제 후 덮어쓰기 (강제 초기화)
             if ticker in self.positions:
-                old_pos = self.positions[ticker]
-                new_qty = old_pos['qty'] + qty
-                # 평단가 단순 가중 평균 계산
-                new_avg = ((old_pos['entry_price'] * old_pos['qty']) + cost) / new_qty
-                
-                # [수정] 추가 매수 시에는 기존 진입 시간(entry_time)을 유지하거나,
-                # 필요하다면 물타기 시점으로 갱신할 수도 있습니다. (여기선 유지)
-                self.positions[ticker].update({
-                    'qty': new_qty,
-                    'entry_price': new_avg,
-                    'current_price': price,
-                    'eval_value': old_pos['eval_value'] + cost
-                })
-            else:
-                # [신규 매수] -> 여기가 핵심입니다!
-                # 🕒 [Time Cut] 현재 미국 시간 기록
-                now_et = datetime.datetime.now(pytz.timezone('US/Eastern'))
-                
-                self.positions[ticker] = {
-                    'ticker': ticker,
-                    'qty': qty,
-                    'entry_price': price,
-                    'current_price': price,
-                    'eval_value': cost,
-                    'pnl_pct': 0.0,
-                    'highest_price': price, 
-                    'entry_time': now_et  # ✨ [추가] 진입 시간 저장
-                }
+                self.logger.warning(f"⚠️ [Data Clean] {ticker} 기존 데이터 삭제 후 재진입")
+                del self.positions[ticker]
+
+            # [수정 2] 신규 데이터 생성 (평단가 = 현재 매수가로 고정)
+            self.positions[ticker] = {
+                'ticker': ticker,
+                'qty': qty,
+                'entry_price': price,        # 진입가 확실하게 기록
+                'current_price': price,
+                'eval_value': cost,
+                'pnl_pct': 0.0,
+                'highest_price': price, 
+                'entry_time': now_et         # 진입 시간 기록
+            }
             
-            self.logger.info(f"✅ [Local Update] BUY {ticker} ({qty} @ {price}) Time: {now_et.strftime('%H:%M')}")
+            self.logger.info(f"✅ [Local Update] BUY {ticker} ({qty}주 @ ${price}) | Balance: ${self.balance:.2f}")
             
         elif fill['type'] == 'SELL':
-            revenue = qty * price
+            # [수정 3] 수수료(0.2% 가정)를 뗀 금액만 예수금에 반영하여 '자금 부족' 방지
+            revenue = (qty * price) * 0.998 
             self.balance += revenue
             
             if ticker in self.positions:
                 del self.positions[ticker]
                 self.ban_list.add(ticker) # 매도 시 즉시 밴 리스트 추가
-                self.logger.info(f"👋 [Local Update] SELL {ticker} -> Added to Ban List")
-                # [✅ 필수 추가] 주문 직후 총 자산(Equity) 재계산 (비중 축소 방지)
+                
+                self.logger.info(f"👋 [Local Update] SELL {ticker} -> Added to Ban List | Balance: ${self.balance:.2f}")
+                
+                # [필수] 주문 직후 총 자산(Equity) 재계산
                 current_val = sum(p['qty'] * p['current_price'] for p in self.positions.values())
                 self.total_equity = self.balance + current_val
+
     def update_highest_price(self, ticker, current_price):
         """
         [Backtest Logic 이식] 트레일링 스탑을 위한 고가 갱신
@@ -250,6 +244,20 @@ class RealPortfolio:
                 self.positions[ticker]['highest_price'] = current_price
                 # (선택) 로그가 너무 많으면 주석 처리 가능
                 # self.logger.info(f"📈 [{ticker}] 고가 갱신: ${old_high} -> ${current_price}")
+    
+    # [신규 추가] 외부(main.py)에서 호출할 잔고 강제 동기화 함수
+    def sync_balance(self):
+        """API를 통해 예수금만 강제 동기화 (매도 직후 사용)"""
+        try:
+            # get_buyable_cash는 kis_api에 구현되어 있어야 함
+            cash = self.kis.get_buyable_cash() 
+            if cash > 0:
+                old_balance = self.balance
+                self.balance = float(cash)
+                self.logger.info(f"💰 [Sync] 잔고 갱신 완료: ${old_balance:.2f} -> ${self.balance:.2f}")
+        except Exception as e:
+            self.logger.error(f"❌ 잔고 동기화 실패: {e}")
+    
     def _log_status(self):
         """현재 상태 로그 출력 (디버깅용)"""
         pos_str = ", ".join([f"{k}({v.get('pnl_pct',0):.1f}%)" for k, v in self.positions.items()])
