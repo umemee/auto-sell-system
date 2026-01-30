@@ -49,8 +49,8 @@ class EmaStrategy:
         # -----------------------------------------------------------
         now_et = self._get_current_et_time()
         
-        # [Warm-up Guard] 장 시작(04:00) 후 10분간 대기 (지표 안정화)
-        if now_et.hour == 4 and now_et.minute < 10:
+        # [Warm-up Guard] 장 시작(04:00) 후 5분간 대기 (지표 안정화)
+        if now_et.hour == 4 and now_et.minute < 5:
              return None
              
         # [Entry Deadline] 10:00 ET 이후 진입 금지
