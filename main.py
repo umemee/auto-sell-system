@@ -316,7 +316,7 @@ def main():
                     if result:
                         bot.send_message(result['msg'])
                         save_state(portfolio.ban_list, active_candidates)
-
+            
             # ---------------------------------------------------------
             # C. [스캔] 신규 급등주 포착
             # ---------------------------------------------------------
@@ -403,6 +403,13 @@ def main():
                             logger.warning(f"🚌 [실패] {sym} 매수 실패. 금일 제외.")
                             portfolio.ban_list.add(sym)
                             save_state(portfolio.ban_list, active_candidates)
+            
+            # =========================================================
+            # 💰 [Sync] 매도 후 잔고 최신화 (자금 부족 해결)
+            # =========================================================
+            if not portfolio.positions and portfolio.balance < 10:
+                logger.info("🔄 [Sync] 매도 후 잔고 재동기화 수행...")
+                portfolio.sync_balance() 
 
             # ---------------------------------------------------------
             # 루프 종료 후 대기
