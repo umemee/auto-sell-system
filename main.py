@@ -345,64 +345,69 @@ def main():
             listener.current_watchlist = targets_to_check 
 
             for sym in targets_to_check:
-                
-                # =========================================================
-                # 🛡️ [Real-time LQI Filter] 실시간 호가 정밀 검문 (유지!)
-                # =========================================================
                 try:
-                    # 1. 현재 호가와 잔량(Volume) 가져오기
-                    ask, bid, ask_vol, bid_vol = kis.get_market_spread(sym)
+                    # =========================================================
+                    # [API 최적화] 분봉 데이터 조회 (하나로 통합)
+                    # =========================================================
+                    # 기존: 호가 조회(get_market_spread) -> 분봉 조회(get_minute_candles) 2번 호출
+                    # 변경: 분봉 조회(get_recent_candles) 1번만 호출하여 판단 (API 절약)
                     
-                    if ask > 0 and bid > 0:
-                        # [검문 1] 스프레드(Spread) 체크 (사용자 요청으로 유지)
-                        spread_pct = (ask - bid) / ask * 100
-                        
-                        if spread_pct > 2.0: 
-                            logger.warning(f"⚠️ [Spread] {sym}: 괴리율 과다 ({spread_pct:.2f}%). 진입 보류.")
-                            continue 
+                    # kis_api.py에 새로 만든 함수 호출 (limit=60분)
+                    # 이 함수는 API 문서에 맞춘 필드명(open, close 등)을 반환합니다.
+                    df = kis.get_recent_candles(sym, limit=60)
 
-                        # [검문 2] 호가 얇음(Thin Book) 체크
-                        bid_money = bid * bid_vol
-                        if bid_money < 2000: 
-                            logger.warning(f"📉 [Liquidity] {sym}: 매수 잔량 부족 (${bid_money:,.0f}). 진입 위험.")
-                            continue
+                    if df.empty or len(df) < 20:
+                        continue
+
+                    # =========================================================
+                    # 🧠 [Strategy] 전략 엔진 호출 (T-1 확정 봉 기준)
+                    # =========================================================
+                    # 수정된 strategy.py는 df의 [-2]번 인덱스(직전 완성봉)를 분석합니다.
+                    signal = strategy.check_entry(sym, df)
+
+                    if signal and signal['type'] == 'BUY':
+                        
+                        # [Double Check] 호가 확인 (선택 사항)
+                        # 매수 신호가 떴을 때만 호가를 조회하여 슬리피지 방지
+                        ask, bid, ask_vol, bid_vol = kis.get_market_spread(sym)
+                        
+                        # 호가 스프레드가 너무 크거나(3% 이상), 매도 물량(ask_vol)이 없으면 스킵
+                        if ask > 0 and bid > 0:
+                            spread = (ask - bid) / ask * 100
+                            if spread > 3.0:
+                                logger.warning(f"⚠️ [Spread] {sym}: 괴리율 과다 ({spread:.2f}%). 진입 보류.")
+                                continue
+                        
+                        # 신호에 현재가(ask) 정보 업데이트 (시장가 매수 시 참고용)
+                        signal['price'] = ask if ask > 0 else signal['price']
+                        signal['ticker'] = sym
+
+                        # =========================================================
+                        # ⚡ [Execution] 주문 집행
+                        # =========================================================
+                        if portfolio.has_open_slot():
+                            result = order_manager.execute_buy(portfolio, signal)
+                            
+                            if result:
+                                if result.get('msg'):
+                                    bot.send_message(result['msg'])
+                                
+                                if result['status'] == 'success':
+                                    save_state(portfolio.ban_list, active_candidates)
+                                    if not portfolio.has_open_slot():
+                                        break # 슬롯 꽉 차면 루프 종료
+                                else:
+                                    # 실패 시 밴 처리
+                                    logger.warning(f"🚌 [실패] {sym} 매수 실패. 금일 제외.")
+                                    portfolio.ban_list.add(sym)
+                                    save_state(portfolio.ban_list, active_candidates)
+
+                    # [Rate Limit] API 호출 간격 조절 (초당 5회 제한 준수)
+                    time.sleep(0.2)
 
                 except Exception as e:
-                    # 호가 조회 실패 시 안전하게 패스
-                    logger.error(f"❌ 호가 검증 실패({sym}): {e}")
+                    logger.error(f"❌ 매수 로직 에러({sym}): {e}")
                     continue
-
-                # =========================================================
-                # [기존 로직] 여기서부터 원래 코드입니다
-                # =========================================================
-                # [필수] 과거 60분치 데이터 (EMA 계산용)
-                df = kis.get_minute_candles("NAS", sym, limit=60)
-                
-                if df.empty or len(df) < 20:
-                    continue
-
-                # 전략 호출 (수정된 strategy.py는 iloc[-2]를 봅니다)
-                signal = strategy.check_buy_signal(df, ticker=sym)
-                
-                if signal:
-                    signal['ticker'] = sym
-                    
-                    if portfolio.has_open_slot():
-                        result = order_manager.execute_buy(portfolio, signal)
-                        
-                        if result:
-                            if result.get('msg'):
-                                bot.send_message(result['msg'])
-                            
-                            if result['status'] == 'success':
-                                save_state(portfolio.ban_list, active_candidates)
-                                if not portfolio.has_open_slot():
-                                    break
-                        else:
-                            # 로직상 매수인데 실패(잔고부족 등) -> 밴
-                            logger.warning(f"🚌 [실패] {sym} 매수 실패. 금일 제외.")
-                            portfolio.ban_list.add(sym)
-                            save_state(portfolio.ban_list, active_candidates)
             
             # =========================================================
             # 💰 [Sync] 매도 후 잔고 최신화 (자금 부족 해결)
