@@ -483,3 +483,77 @@ class KisApi:
                     })
                     
         return pending_list
+    
+    def get_recent_candles(self, ticker, limit=120):
+        """
+        [해외주식 분봉 조회] - 공식 문서 기반 수정 (TR_ID: HHDFS76950200)
+        문서 출처: [해외주식] 기본시세.xlsx - 해외주식분봉조회.csv
+        """
+        # URL 및 TR_ID 설정 (실전 투자 기준)
+        path = "/uapi/overseas-price/v1/quotations/inquire-time-itemchartprice"
+        tr_id = "HHDFS76950200" 
+
+        # [요청 헤더 준비]
+        headers = self._get_header(tr_id)
+
+        # [요청 파라미터 준비]
+        # EXCD(거래소)는 편의상 'NAS'(나스닥)으로 고정하나, 필요 시 인자로 받아야 함
+        params = {
+            "AUTH": "",
+            "EXCD": "NAS",      # 나스닥(NAS), 뉴욕(NYS), 아멕스(AMS)
+            "SYMB": ticker,
+            "NMIN": "1",        # 1분봉
+            "PINC": "1",        # 전일 포함 ("1" 필수)
+            "NEXT": "",         # 처음 조회 시 공백
+            "NREC": str(limit), # 최대 120
+            "FILL": "",
+            "KEYB": ""
+        }
+
+        # API 호출
+        try:
+            res = requests.get(
+                url=f"{self.base_url}{path}",
+                headers=headers,
+                params=params
+            )
+            
+            if res.status_code != 200:
+                self.logger.error(f"분봉 조회 실패({ticker}): {res.text}")
+                return pd.DataFrame()
+
+            data = res.json()
+            
+            # 응답 코드가 성공이 아니면 빈 DF 반환
+            if data['rt_cd'] != '0': 
+                return pd.DataFrame()
+
+            if 'output2' in data:
+                # [공식 문서 필드명 매핑]
+                # tymd: 현지영업일자, xhms: 현지기준시간
+                # open: 시가, high: 고가, low: 저가, last: 종가, evol: 체결량
+                df = pd.DataFrame(data['output2'])
+                
+                # 필요한 컬럼만 추출 및 이름 변경
+                # API 필드명 -> 내부 사용 변수명
+                df = df[['tymd', 'xhms', 'open', 'high', 'low', 'last', 'evol']]
+                df.columns = ['date', 'time', 'open', 'high', 'low', 'close', 'volume']
+                
+                # 데이터 타입 변환 (문자열 -> 숫자)
+                cols = ['open', 'high', 'low', 'close', 'volume']
+                df[cols] = df[cols].apply(pd.to_numeric)
+                
+                # 날짜와 시간을 합쳐서 datetime 객체 생성 (정렬을 위해)
+                # 예: date='20240222', time='160000' -> '2024-02-22 16:00:00'
+                df['datetime'] = pd.to_datetime(df['date'] + df['time'], format='%Y%m%d%H%M%S')
+                
+                # 시간 역순(최신이 0번)으로 들어오므로, 과거->현재 순으로 정렬
+                df = df.sort_values('datetime').reset_index(drop=True)
+                
+                return df
+                
+            return pd.DataFrame()
+            
+        except Exception as e:
+            self.logger.error(f"get_recent_candles 예외 발생: {e}")
+            return pd.DataFrame()
