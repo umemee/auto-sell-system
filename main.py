@@ -246,7 +246,7 @@ def main():
                 portfolio.sync_with_kis() # 자고 일어나면 잔고 동기화
 
             # =========================================================
-            # 💓 [Heartbeat] 생존 신고
+            # 💓 [Heartbeat] 생존 신고 (상세 정보 추가)
             # =========================================================
             if time.time() - last_heartbeat_time > HEARTBEAT_INTERVAL:
                 eq = portfolio.total_equity
@@ -254,7 +254,22 @@ def main():
                 cur_k = datetime.datetime.now(tz_kst).strftime("%H:%M")
                 cur_n = datetime.datetime.now(tz_et).strftime("%H:%M")
                 
-                bot.send_message(f"💓 [생존] KR {cur_k} / NY {cur_n}\n자산 ${eq:,.0f} | 보유 {pos_cnt}개")
+                # [NEW] 감시 및 밴 리스트 현황 파악
+                watching_list = list(active_candidates)
+                banned_list = list(portfolio.ban_list)
+                
+                # 메시지가 너무 길어지는 것 방지 (최대 5개씩만 표기)
+                watch_str = ", ".join(watching_list[:5]) + ("..." if len(watching_list) > 5 else "")
+                ban_str = ", ".join(banned_list[:5]) + ("..." if len(banned_list) > 5 else "")
+                
+                msg = (
+                    f"💓 [생존] KR {cur_k} / NY {cur_n}\n"
+                    f"💰 자산 ${eq:,.0f} | 보유 {pos_cnt}개\n"
+                    f"👁️ 감시({len(watching_list)}): {watch_str}\n"
+                    f"🚫 제외({len(banned_list)}): {ban_str}"
+                )
+                
+                bot.send_message(msg)
                 last_heartbeat_time = time.time()
 
             # =========================================================
@@ -394,8 +409,45 @@ def main():
                                 
                                 if result['status'] == 'success':
                                     save_state(portfolio.ban_list, active_candidates)
+                                    
+                                    # -----------------------------------------------------
+                                    # 🟠 [NEW] 매수 성공 즉시 '지정가 익절 주문' 미리 넣기
+                                    # -----------------------------------------------------
+                                    try:
+                                        # 1. 체결 단가 확인
+                                        buy_price = result.get('avg_price', signal['price']) # avg_price가 없으면 신호가 사용
+                                        if buy_price > 0:
+                                            # 2. 목표가 계산 (10% 수익)
+                                            target_price = buy_price * (1.0 + getattr(Config, 'TARGET_PROFIT_PCT', 0.10))
+                                            
+                                            # 호가 단위(Tick Size) 맞추기 (대략 소수점 2자리 반올림)
+                                            target_price = round(target_price, 2)
+                                            
+                                            qty = result.get('qty', 0)
+                                            
+                                            if qty > 0:
+                                                # 3. 매도 주문 전송 (지정가)
+                                                logger.info(f"⚡ [Pre-Order] {sym} 익절 주문 전송: ${target_price} ({qty}주)")
+                                                
+                                                sell_resp = kis.send_order(
+                                                    ticker=sym,
+                                                    side="SELL",
+                                                    qty=qty,
+                                                    price=target_price,
+                                                    order_type="00" # 지정가
+                                                )
+                                                
+                                                if sell_resp and sell_resp.get('rt_cd') == '0':
+                                                    bot.send_message(f"🔒 [잠금] 익절 주문 완료\n💵 목표: ${target_price} (+10%)")
+                                                else:
+                                                    logger.error(f"❌ 익절 주문 실패: {sell_resp}")
+                                                    
+                                    except Exception as e:
+                                        logger.error(f"❌ 익절 주문 중 에러: {e}")
+
+                                    # 슬롯 꽉 찼으면 루프 종료
                                     if not portfolio.has_open_slot():
-                                        break # 슬롯 꽉 차면 루프 종료
+                                        break 
                                 else:
                                     # 실패 시 밴 처리
                                     logger.warning(f"🚌 [실패] {sym} 매수 실패. 금일 제외.")
