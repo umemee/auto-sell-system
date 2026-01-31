@@ -97,3 +97,7 @@ class EmaStrategy:
             return {'type': 'SELL', 'reason': 'STOP_LOSS'}
             
         return None
+    
+    # Factory 함수
+def get_strategy():
+    return EmaStrategy()
