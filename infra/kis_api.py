@@ -557,3 +557,46 @@ class KisApi:
         except Exception as e:
             self.logger.error(f"get_recent_candles 예외 발생: {e}")
             return pd.DataFrame()
+    
+    def cancel_order(self, ticker, order_id, qty=0, exchange="NASD"):
+        """
+        [주문 취소] 거래소 정보를 인자로 받아 유동적으로 처리
+        """
+        path = "/uapi/overseas-stock/v1/trading/order-rvsecncl"
+        tr_id = "TTTT1004U" 
+
+        token = self.tm.get_token()
+        if not token.startswith("Bearer"):
+            token = f"Bearer {token}"
+
+        headers = {
+            "content-type": "application/json; charset=utf-8",
+            "authorization": token,
+            "appkey": Config.APP_KEY,
+            "appsecret": Config.APP_SECRET,
+            "tr_id": tr_id
+        }
+
+        # [수정] 인자로 받은 exchange 사용 (기본값 NASD)
+        params = {
+            "CANO": Config.CANO,
+            "ACNT_PRDT_CD": Config.ACNT_PRDT_CD,
+            "OVRS_EXCG_CD": exchange, # 여기가 핵심!
+            "PDNO": ticker,
+            "ORGN_ODNO": order_id, 
+            "RVSE_CNCL_DVSN_CD": "02", 
+            "ORD_QTY": str(qty) if qty > 0 else "0", 
+            "OVRS_ORD_UNPR": "0",
+            "ORD_SVR_DVSN_CD": "0"
+        }
+
+        try:
+            res = requests.post(
+                url=f"{self.base_url}{path}",
+                headers=headers,
+                data=json.dumps(params)
+            )
+            return res.json()
+        except Exception as e:
+            self.logger.error(f"주문 취소 실패: {e}")
+            return None
