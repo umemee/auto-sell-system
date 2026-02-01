@@ -185,8 +185,6 @@ def main():
             current_minute_str = now.strftime("%H:%M")
             
             # [핵심 수정] 0초~5초 사이(매분 시작)에만 로직 실행 (캔들 마감 확인용)
-            # 59초 방식은 데이터가 덜 닫힌 상태일 수 있어 위험합니다.
-            # 5초가 넘어가면 다음 분까지 대기합니다.
             if now.second > 5:
                 # CPU 낭비 방지를 위해 적당히 쉽니다 (0.5초)
                 time.sleep(0.5)
@@ -199,8 +197,30 @@ def main():
                 
             # --- 여기서부터는 매 분의 00초~05초 사이에 "딱 한 번"만 실행됩니다 ---
             last_processed_minute = current_minute_str
-            # logger.info(f"⏱️ [New Candle] {current_minute_str} Analysis Start...") 
             
+            # =========================================================
+            # 💤 [Sleep Mode] 활동 시간 체크 (위치 이동: 주말 오작동 방지)
+            # =========================================================
+            # [수정] EOD 체크보다 먼저 수행하여 주말에 강제 청산 로직이 도는 것을 막습니다.
+            is_active, reason = is_active_market_time()
+            
+            if not is_active:
+                if not was_sleeping:
+                    logger.warning(f"💤 Sleep Mode: {reason}")
+                    bot.send_message(f"💤 [대기] {reason}")
+                    was_sleeping = True
+                    save_state(portfolio.ban_list, active_candidates) # 자기 전 상태 저장
+                
+                # 활동 시간이 아니면 1분 통째로 대기
+                time.sleep(30)
+                continue
+            
+            # [기상] 잠에서 깨어난 경우
+            if was_sleeping:
+                bot.send_message(f"🌅 [기상] 시장 감시 시작 ({reason})")
+                was_sleeping = False
+                portfolio.sync_with_kis() # 자고 일어나면 잔고 동기화
+
             # ---------------------------------------------------------
             # 🛑 [EOD] 장 마감 강제 청산 (안전장치)
             # ---------------------------------------------------------
@@ -211,10 +231,11 @@ def main():
                 logger.warning(f"⏰ [장 마감] 강제 청산 실행 ({cutoff_time})")
                 bot.send_message(f"🚨 [장 마감] {cutoff_time} 강제 청산 실행")
                 
-                # 보유 중인 모든 종목 시장가 매도
-                if portfolio.is_holding():
+                # [수정] TypeError 해결: is_holding() 대신 positions 딕셔너리 직접 확인
+                if portfolio.positions:
                     for ticker in list(portfolio.positions.keys()):
-                        order_manager.execute_sell(portfolio, ticker, "FORCE_EOD_EXIT")
+                        # 강제 청산 시에도 '시장가'로 확실하게 탈출
+                        order_manager.execute_sell(portfolio, ticker, "FORCE_EOD_EXIT", price=0)
                         time.sleep(0.2) # 주문 간격
                 
                 # 상태 저장 후 루프 종료 (다음 날 재실행 필요)
@@ -222,28 +243,6 @@ def main():
                 logger.info("👋 [System] 장 마감으로 시스템을 종료합니다.")
                 time.sleep(300) 
                 continue
-
-            # =========================================================
-            # 💤 [Sleep Mode] 활동 시간 체크
-            # =========================================================
-            is_active, reason = is_active_market_time()
-            
-            if not is_active:
-                if not was_sleeping:
-                    logger.warning(f"💤 Sleep Mode: {reason}")
-                    bot.send_message(f"💤 [대기] {reason}")
-                    was_sleeping = True
-                    save_state(portfolio.ban_list, active_candidates) # 자기 전 상태 저장
-                
-                # 활동 시간이 아니면 1분 통째로 대기 (다음 분 0초까지 대기)
-                time.sleep(30)
-                continue
-            
-            # [기상] 잠에서 깨어난 경우
-            if was_sleeping:
-                bot.send_message(f"🌅 [기상] 시장 감시 시작 ({reason})")
-                was_sleeping = False
-                portfolio.sync_with_kis() # 자고 일어나면 잔고 동기화
 
             # =========================================================
             # 💓 [Heartbeat] 생존 신고 (상세 정보 추가)
@@ -258,7 +257,7 @@ def main():
                 watching_list = list(active_candidates)
                 banned_list = list(portfolio.ban_list)
                 
-                # 메시지가 너무 길어지는 것 방지 (최대 5개씩만 표기)
+                # 메시지가 너무 길어지는 것 방지
                 watch_str = ", ".join(watching_list[:5]) + ("..." if len(watching_list) > 5 else "")
                 ban_str = ", ".join(banned_list[:5]) + ("..." if len(banned_list) > 5 else "")
                 
@@ -300,12 +299,12 @@ def main():
                 try:
                     pending_orders = kis.get_pending_orders(ticker)
                     if pending_orders:
-                        # 이미 매도 주문이 걸려있으면 패스 (로그 생략 가능)
+                        # 이미 매도 주문이 걸려있으면 패스
                         continue 
                 except Exception:
                     pass
-                # [수정] 단순 현재가(get_current_price) ❌ -> 분봉 데이터(get_minute_candles) ✅
-                # 00초에 실행되므로 df.iloc[-2]가 방금 마감된 1분봉입니다.
+                
+                # [수정] 단순 현재가 ❌ -> 분봉 데이터 ✅
                 df = kis.get_minute_candles("NAS", ticker, limit=60)
 
                 if df.empty or len(df) < 1: 
@@ -319,14 +318,16 @@ def main():
                 entry_time = pos.get('entry_time')
 
                 # 전략에 매도 문의
-                exit_signal = strategy.check_exit_signal(
+                exit_signal = strategy.check_exit(
+                    ticker=ticker,
+                    position=pos,
                     current_price=real_time_price, 
-                    entry_price=entry_price,
-                    entry_time=entry_time
+                    now_time=datetime.datetime.now(pytz.timezone('US/Eastern'))
                 )
                 
                 if exit_signal:
                     reason = exit_signal['reason']
+                    # [중요] price=real_time_price 필수 (0원이면 주문 거부됨)
                     result = order_manager.execute_sell(portfolio, ticker, reason, price=real_time_price)
                     if result:
                         bot.send_message(result['msg'])
@@ -362,13 +363,8 @@ def main():
             for sym in targets_to_check:
                 try:
                     # =========================================================
-                    # [API 최적화] 분봉 데이터 조회 (하나로 통합)
+                    # [API 최적화] 분봉 데이터 조회
                     # =========================================================
-                    # 기존: 호가 조회(get_market_spread) -> 분봉 조회(get_minute_candles) 2번 호출
-                    # 변경: 분봉 조회(get_recent_candles) 1번만 호출하여 판단 (API 절약)
-                    
-                    # kis_api.py에 새로 만든 함수 호출 (limit=60분)
-                    # 이 함수는 API 문서에 맞춘 필드명(open, close 등)을 반환합니다.
                     df = kis.get_recent_candles(sym, limit=60)
 
                     if df.empty or len(df) < 20:
@@ -377,23 +373,21 @@ def main():
                     # =========================================================
                     # 🧠 [Strategy] 전략 엔진 호출 (T-1 확정 봉 기준)
                     # =========================================================
-                    # 수정된 strategy.py는 df의 [-2]번 인덱스(직전 완성봉)를 분석합니다.
                     signal = strategy.check_entry(sym, df)
 
                     if signal and signal['type'] == 'BUY':
                         
-                        # [Double Check] 호가 확인 (선택 사항)
-                        # 매수 신호가 떴을 때만 호가를 조회하여 슬리피지 방지
+                        # [Double Check] 호가 확인
                         ask, bid, ask_vol, bid_vol = kis.get_market_spread(sym)
                         
-                        # 호가 스프레드가 너무 크거나(3% 이상), 매도 물량(ask_vol)이 없으면 스킵
+                        # 호가 스프레드 체크
                         if ask > 0 and bid > 0:
                             spread = (ask - bid) / ask * 100
                             if spread > 3.0:
                                 logger.warning(f"⚠️ [Spread] {sym}: 괴리율 과다 ({spread:.2f}%). 진입 보류.")
                                 continue
                         
-                        # 신호에 현재가(ask) 정보 업데이트 (시장가 매수 시 참고용)
+                        # 신호에 현재가(ask) 정보 업데이트
                         signal['price'] = ask if ask > 0 else signal['price']
                         signal['ticker'] = sym
 
@@ -414,21 +408,14 @@ def main():
                                     # 🟠 [NEW] 매수 성공 즉시 '지정가 익절 주문' 미리 넣기
                                     # -----------------------------------------------------
                                     try:
-                                        # 1. 체결 단가 확인
-                                        buy_price = result.get('avg_price', signal['price']) # avg_price가 없으면 신호가 사용
+                                        buy_price = result.get('avg_price', signal['price'])
                                         if buy_price > 0:
-                                            # 2. 목표가 계산 (10% 수익)
                                             target_price = buy_price * (1.0 + getattr(Config, 'TARGET_PROFIT_PCT', 0.10))
-                                            
-                                            # 호가 단위(Tick Size) 맞추기 (대략 소수점 2자리 반올림)
                                             target_price = round(target_price, 2)
-                                            
                                             qty = result.get('qty', 0)
                                             
                                             if qty > 0:
-                                                # 3. 매도 주문 전송 (지정가)
                                                 logger.info(f"⚡ [Pre-Order] {sym} 익절 주문 전송: ${target_price} ({qty}주)")
-                                                
                                                 sell_resp = kis.send_order(
                                                     ticker=sym,
                                                     side="SELL",
@@ -436,25 +423,21 @@ def main():
                                                     price=target_price,
                                                     order_type="00" # 지정가
                                                 )
-                                                
                                                 if sell_resp and sell_resp.get('rt_cd') == '0':
                                                     bot.send_message(f"🔒 [잠금] 익절 주문 완료\n💵 목표: ${target_price} (+10%)")
                                                 else:
                                                     logger.error(f"❌ 익절 주문 실패: {sell_resp}")
-                                                    
                                     except Exception as e:
                                         logger.error(f"❌ 익절 주문 중 에러: {e}")
 
-                                    # 슬롯 꽉 찼으면 루프 종료
                                     if not portfolio.has_open_slot():
                                         break 
                                 else:
-                                    # 실패 시 밴 처리
                                     logger.warning(f"🚌 [실패] {sym} 매수 실패. 금일 제외.")
                                     portfolio.ban_list.add(sym)
                                     save_state(portfolio.ban_list, active_candidates)
 
-                    # [Rate Limit] API 호출 간격 조절 (초당 5회 제한 준수)
+                    # [Rate Limit] API 호출 간격 조절
                     time.sleep(0.2)
 
                 except Exception as e:
@@ -462,7 +445,7 @@ def main():
                     continue
             
             # =========================================================
-            # 💰 [Sync] 매도 후 잔고 최신화 (자금 부족 해결)
+            # 💰 [Sync] 매도 후 잔고 최신화
             # =========================================================
             if not portfolio.positions and portfolio.balance < 10:
                 logger.info("🔄 [Sync] 매도 후 잔고 재동기화 수행...")
@@ -471,7 +454,6 @@ def main():
             # ---------------------------------------------------------
             # 루프 종료 후 대기
             # ---------------------------------------------------------
-            # 이미 상단에서 타이밍 제어를 하므로 여기선 짧게 쉽니다.
             time.sleep(0.1)
 
         except KeyboardInterrupt:
