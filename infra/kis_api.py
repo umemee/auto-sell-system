@@ -559,15 +559,20 @@ class KisApi:
             return pd.DataFrame()
         
     def _get_header(self, tr_id=None):
-        """API 요청용 헤더 생성 헬퍼"""
+        """API 요청용 헤더 생성 헬퍼 (수정 완료)"""
         if tr_id is None:
             raise ValueError("API 요청 시 tr_id는 필수입니다.")
             
+        # [수정 포인트]
+        # 1. self.token_manager -> self.tm (변수명 일치)
+        # 2. get_access_token() -> get_token() (메서드명 일치)
+        # 3. self.tm.APP_KEY -> Config.APP_KEY (Config 객체 직접 참조로 안전성 확보)
+        
         return {
             "content-type": "application/json; charset=utf-8",
-            "authorization": f"Bearer {self.token_manager.get_access_token()}",
-            "appkey": self.token_manager.APP_KEY,
-            "appsecret": self.token_manager.APP_SECRET,
+            "authorization": f"Bearer {self.tm.get_token()}",
+            "appkey": Config.APP_KEY,
+            "appsecret": Config.APP_SECRET,
             "tr_id": tr_id
         }
     
