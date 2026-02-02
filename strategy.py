@@ -15,8 +15,8 @@ class EmaStrategy:
         self.logger = get_logger("Strategy")
         
         # 설정값 로드
-        self.ma_length = getattr(Config, 'EMA_LENGTH', 10) 
-        self.tp_pct = getattr(Config, 'TARGET_PROFIT_PCT', 0.10)
+        self.ma_length = getattr(Config, 'EMA_LENGTH', 20) 
+        self.tp_pct = getattr(Config, 'TARGET_PROFIT_PCT', 0.12)
         self.sl_pct = getattr(Config, 'STOP_LOSS_PCT', 0.40)
         self.dip_tolerance = getattr(Config, 'DIP_TOLERANCE', 0.005)
         # 타임 컷 설정값 로드
