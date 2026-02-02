@@ -23,15 +23,28 @@ STATE_FILE = "system_state.json"
 # 💾 [상태 저장/로드] 시스템 재부팅 대비
 # =========================================================
 def save_state(ban_list, active_candidates):
-    """[설명] 밴 리스트와 감시 중인 종목을 파일로 저장합니다."""
+    """
+    [설명] 밴 리스트와 감시 중인 종목(발견 시간 포함)을 파일로 저장합니다.
+    """
     try:
+        # active_candidates가 dict라면 그대로, set/list라면 dict로 변환하여 저장
+        candidates_data = {}
+        if isinstance(active_candidates, dict):
+            candidates_data = active_candidates
+        else:
+            # 혹시 모를 호환성 대비 (현재 시간으로 채움)
+            now_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            candidates_data = {sym: now_str for sym in active_candidates}
+
         state = {
             "ban_list": list(ban_list),
-            "active_candidates": list(active_candidates),
+            "active_candidates": candidates_data, # 시간 정보가 포함된 딕셔너리 저장
             "date": datetime.datetime.now().strftime("%Y-%m-%d")
         }
+        
         with open(STATE_FILE, "w") as f:
-            json.dump(state, f)
+            json.dump(state, f, indent=4) # 보기 좋게 indent 추가
+            
     except Exception as e:
         logger.error(f"⚠️ 상태 저장 실패: {e}")
 
@@ -50,7 +63,15 @@ def load_state():
             logger.info("📅 날짜 변경으로 저장된 상태를 초기화합니다.")
             return set(), set()
             
-        return set(state.get("ban_list", [])), set(state.get("active_candidates", []))
+        loaded_ban = set(state.get("ban_list", []))
+        loaded_candidates = state.get("active_candidates", {})
+        
+        # 호환성 처리: 만약 옛날 파일이라 리스트라면 -> 현재 시간으로 딕셔너리 변환
+        if isinstance(loaded_candidates, list):
+            loaded_candidates = {sym: datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S") for sym in loaded_candidates}
+            
+        return loaded_ban, loaded_candidates
+    
     except Exception as e:
         logger.error(f"⚠️ 상태 로드 실패: {e}")
         return set(), set()
@@ -287,8 +308,36 @@ def main():
             # 🧠 [Logic] 매매 로직 시작 (매 분 1회 실행)
             # =========================================================
             
-            # A. 포트폴리오 동기화 (오차 방지)
+            # 1. 동기화 전, 현재 보유 종목 명단 기억
+            prev_holdings = set(portfolio.positions.keys())
+            
+            # 2. 증권사 서버와 싱크 (여기서 익절된 종목은 positions에서 사라짐)
             portfolio.sync_with_kis()
+            
+            # 3. 동기화 후, 명단 확인
+            current_holdings = set(portfolio.positions.keys())
+            
+            # 4. [핵심] 사라진 종목 찾기 (내가 판 게 아닌데 사라졌으면 -> 익절 체결임)
+            sold_tickers = prev_holdings - current_holdings
+            
+            for ticker in sold_tickers:
+                # 이미 밴 리스트에 있다면(손절/타임컷 등) 중복 알림 방지
+                if ticker in portfolio.ban_list:
+                    continue
+                    
+                # 익절 알림 전송
+                logger.info(f"🎉 [익절 감지] {ticker} 목표가 도달 확인!")
+                msg = (
+                    f"🎉 <b>[익절 체결 확인]</b>\n"
+                    f"📦 종목: {ticker}\n"
+                    f"💰 결과: 목표가(+10%) 달성 추정\n"
+                    f"✅ 잔고에서 자동으로 청산되었습니다."
+                )
+                bot.send_message(msg)
+                
+                # 익절한 종목도 오늘 재진입 금지 (Ban)
+                portfolio.ban_list.add(ticker)
+                save_state(portfolio.ban_list, active_candidates)
 
             # ---------------------------------------------------------
             # B. [매도] 보유 종목 관리 (Check Exit)
@@ -342,9 +391,11 @@ def main():
             )
             
             if fresh_targets:
-                active_candidates.update(fresh_targets)
+                for sym in fresh_targets:
+                    if sym not in active_candidates:
+                        # 현재 시간을 문자열로 저장 (JSON 저장 호환성 위함)
+                        active_candidates[sym] = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                 save_state(portfolio.ban_list, active_candidates)
-            
             # ---------------------------------------------------------
             # D. [매수] 진입 타점 확인 (핵심 수정: 히스토리 로딩)
             # ---------------------------------------------------------
@@ -361,6 +412,24 @@ def main():
             listener.current_watchlist = targets_to_check 
 
             for sym in targets_to_check:
+                # -----------------------------------------------------
+                # 🕒 [Time Cut] 60분 경과 시 감시 해제 (좀비 방지)
+                # -----------------------------------------------------
+                try:
+                    found_time_str = active_candidates.get(sym)
+                    if found_time_str:
+                        # 문자열 -> datetime 변환
+                        found_time = datetime.datetime.strptime(found_time_str, "%Y-%m-%d %H:%M:%S")
+                        elapsed_minutes = (datetime.datetime.now() - found_time).total_seconds() / 60
+                        
+                        if elapsed_minutes > 60: # 60분 초과
+                            logger.info(f"🗑️ [Timeout] {sym} {int(elapsed_minutes)}분 경과 -> 감시 해제")
+                            if sym in active_candidates:
+                                del active_candidates[sym]
+                            continue # 다음 종목으로 넘어감
+                except Exception:
+                    pass # 시간 포맷 에러 시엔 일단 패스
+
                 try:
                     # =========================================================
                     # [API 최적화] 분봉 데이터 조회
@@ -376,6 +445,17 @@ def main():
                     signal = strategy.check_entry(sym, df)
 
                     if signal and signal['type'] == 'BUY':
+                        
+                        # -----------------------------------------------------
+                        # 🚌 [Missed Bus] 자리 없으면 -> 영구 제외 (Ban)
+                        # -----------------------------------------------------
+                        if not portfolio.has_open_slot():
+                            logger.warning(f"🚌 [Missed Bus] {sym} 진입 신호 왔으나 자리 없음 -> 영구 제외")
+                            portfolio.ban_list.add(sym)      # 밴 리스트 추가
+                            if sym in active_candidates:
+                                del active_candidates[sym]   # 감시 목록 삭제
+                            save_state(portfolio.ban_list, active_candidates)
+                            continue # 다음 종목으로
                         
                         # [Double Check] 호가 확인
                         ask, bid, ask_vol, bid_vol = kis.get_market_spread(sym)
