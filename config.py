@@ -25,7 +25,7 @@ class Config:
     # ==========================================
     # [1] 진입 제한 (Entry Limit)
     # 오전 10시(ET) 이후에는 신규 진입 금지 (승률 하락 구간)
-    ENTRY_DEADLINE_HOUR_ET = 15 
+    ENTRY_DEADLINE_HOUR_ET = 11 
 
     # [2] 타임 컷 (Time Cut)
     # 진입 후 90분(1.5시간) 경과 시 강제 청산 (오후 반등 노림수)
@@ -123,4 +123,5 @@ class Config:
     STOP_LOSS_PCT = 0.40      # -40% 손절
     TARGET_PROFIT_PCT = 0.12  # +12% 목표 수익률 (TP)
     TP_PCT = TARGET_PROFIT_PCT # (호환성 유지)
+
 
