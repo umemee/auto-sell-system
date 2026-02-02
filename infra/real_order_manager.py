@@ -40,11 +40,8 @@ class RealOrderManager:
             ticker=ticker,
             side="BUY",
             qty=qty,
-            price=0,        # 시장가는 가격 0
-            order_type="00" # 지정가(00)지만 KIS API 특성상 별도 처리 필요할 수 있음.
-                            # 보통 급등주는 '시장가'가 유리하나, 
-                            # 안전을 위해 '최우선 지정가' 등을 고려 가능. 
-                            # 여기서는 사용자가 쓰던 방식 유지.
+            price=price,        # ✅ Signal에서 받은 현재가 ($3.32 등) 전달
+            order_type="MARKET" # ✅ KisApi.buy_market() 호출 유도
         )
         
         # 4. 결과 처리
