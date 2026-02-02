@@ -190,6 +190,26 @@ class RealPortfolio:
             
         return final_amount
 
+    def calculate_qty(self, price):
+        """
+        [주문 수량 계산]
+        현재 가용 자금과 목표 투자 비중을 고려하여 주문할 수량을 계산합니다.
+        """
+        if price <= 0:
+            return 0
+            
+        # 1. 1회 주문 최대 금액 계산
+        max_order_amt = self.get_max_order_amount()
+        
+        # 2. 수량 계산 (소수점 버림)
+        qty = int(max_order_amt / price)
+        
+        # 3. 최소 주문 수량 체크 (1주 미만 불가)
+        if qty < 1:
+            return 0
+            
+        return qty
+
     def update_local_after_order(self, fill):
         """
         [Optimistic Update]
