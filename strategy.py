@@ -19,7 +19,8 @@ class EmaStrategy:
         self.tp_pct = getattr(Config, 'TARGET_PROFIT_PCT', 0.10)
         self.sl_pct = getattr(Config, 'STOP_LOSS_PCT', 0.40)
         self.dip_tolerance = getattr(Config, 'DIP_TOLERANCE', 0.005)
-
+        # 타임 컷 설정값 로드
+        self.max_holding_minutes = getattr(Config, 'MAX_HOLDING_MINUTES', 90)
         # 중복 진입 방지용 (마지막으로 신호 보낸 캔들 시간 저장)
         self.processed_candles = {} 
 
@@ -64,7 +65,8 @@ class EmaStrategy:
 
         # 조건 3: T-1 시점 지지 성공 (Close Defense)
         # 종가가 EMA를 크게 이탈하지 않고 지켜냈는가? (0.1% 오차 허용)
-        if t1['close'] < t1['ema'] * 0.999:
+        # 백테스트 로직: 종가가 EMA보다 확실히 위에 있어야 함 (Strict Support)
+        if t1['close'] <= t1['ema']:
             return None # 지지 실패 (무너짐)
 
         # 조건 4: (옵션) T-1은 음봉이어야 더 신뢰도 높음 (눌림목의 정석)
@@ -84,18 +86,33 @@ class EmaStrategy:
         }
 
     def check_exit(self, ticker, position, current_price, now_time):
-        """청산 로직 (익절/손절)"""
+        """청산 로직 (익절/손절/타임컷)"""
         entry_price = position['entry_price']
         pnl_pct = (current_price - entry_price) / entry_price
         
-        # 익절
+        # 1. 익절 (Take Profit)
         if pnl_pct >= self.tp_pct:
             return {'type': 'SELL', 'reason': 'TAKE_PROFIT'}
         
-        # 손절
+        # 2. 손절 (Stop Loss)
         if pnl_pct <= -self.sl_pct:
             return {'type': 'SELL', 'reason': 'STOP_LOSS'}
             
+        # 3. 🔴 [추가] 타임 컷 (Time Cut)
+        # 진입 시간이 기록되어 있다면 경과 시간 체크
+        if 'entry_time' in position and position['entry_time']:
+            entry_time = position['entry_time']
+            # entry_time이 timezone 정보가 없을 수 있으므로 안전하게 처리
+            if entry_time.tzinfo is None:
+                 entry_time = pytz.timezone('US/Eastern').localize(entry_time)
+            
+            # 경과 시간(분) 계산
+            elapsed_minutes = (now_time - entry_time).total_seconds() / 60
+            
+            if elapsed_minutes >= self.max_holding_minutes:
+                # 90분 지났으면 무조건 청산 (시장가 매도를 위해 특별 이유코드 부여)
+                return {'type': 'SELL', 'reason': 'TIME_CUT'}
+                
         return None
     
     # Factory 함수

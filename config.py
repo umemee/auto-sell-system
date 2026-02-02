@@ -28,8 +28,8 @@ class Config:
     ENTRY_DEADLINE_HOUR_ET = 10 
 
     # [2] 타임 컷 (Time Cut)
-    # 진입 후 240분(4시간) 경과 시 강제 청산 (오후 반등 노림수)
-    MAX_HOLDING_MINUTES = 240
+    # 진입 후 90분(1.5시간) 경과 시 강제 청산 (오후 반등 노림수)
+    MAX_HOLDING_MINUTES = 90
 
     # ==========================================
     # 🏦 [계좌 및 인증]
@@ -114,12 +114,12 @@ class Config:
     MAX_SLOTS = 2             # 2종목 동시 보유
 
     # [진입 설정]
-    EMA_LENGTH = 10           
+    EMA_LENGTH = 20           
     DIP_TOLERANCE = 0.005    # 눌림목 인정 오차 (0.5%)
     HOVER_TOLERANCE = 0.002  # 반등 인정 오차 (0.2%)
 
     # [청산 설정]
     STOP_LOSS_PCT = 0.40      # -40% 손절
-    TARGET_PROFIT_PCT = 0.10  # +10% 목표 수익률 (TP)
+    TARGET_PROFIT_PCT = 0.12  # +12% 목표 수익률 (TP)
     TP_PCT = TARGET_PROFIT_PCT # (호환성 유지)
 
