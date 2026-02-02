@@ -442,6 +442,7 @@ def main():
 
                 except Exception as e:
                     logger.error(f"❌ 매수 로직 에러({sym}): {e}")
+                    bot.send_message(f"⚠️ [System Error] 매수 로직 중 오류 발생\n종목: {sym}\n내용: {str(e)}")
                     continue
             
             # =========================================================
