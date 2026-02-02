@@ -24,6 +24,7 @@ class MarketListener:
         
         # 1. Config 로드
         THRESHOLD = getattr(Config, 'MIN_CHANGE_PCT', 42.0)
+        MAX_THRESHOLD = getattr(Config, 'MAX_CHANGE_PCT', 300.0) # [추가] 상한선 로드
         MIN_P = getattr(Config, 'FILTER_MIN_PRICE', 0.5)
         MAX_P = getattr(Config, 'FILTER_MAX_PRICE', 50.0)
         MIN_VAL = getattr(Config, 'FILTER_MIN_TX_VALUE', 50000)
@@ -71,6 +72,10 @@ class MarketListener:
                 # =========================================================
                 # 🛡️ [Strategic Filter]
                 # =========================================================
+                # [추가] 너무 많이 오른 종목(300% 이상)은 제외
+                if rate > MAX_THRESHOLD:
+                    continue
+
                 # "출신 성분 검증" (전일 종가 역산)
                 if rate > -99.0:
                     prev_close = price / (1 + (rate / 100.0))
