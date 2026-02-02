@@ -19,7 +19,7 @@ class RealOrderManager:
 
     def execute_buy(self, portfolio, signal):
         """
-        [매수 집행] 시장가 진입 + 스프레드 방어 로직 추가
+        [매수 집행] 시장가 진입 + 스프레드 방어 로직 (수정된 안전 버전)
         """
         ticker = signal['ticker']
         # signal에 가격이 없으면 현재가 조회, 그래도 없으면 0 (시장가)
@@ -28,70 +28,71 @@ class RealOrderManager:
         # ============================================================
         # 🛡️ [Safety Protocol] 0. 스프레드(호가 간격) 체크
         # ============================================================
-        # 매수 호가(Bid)와 매도 호가(Ask) 차이가 너무 크면(예: 1.5% 이상),
-        # 시장가로 긁었을 때 비싸게 체결될 위험이 크므로 진입을 포기합니다.
         try:
             ask, bid, ask_vol, bid_vol = self.kis.get_market_spread(ticker)
             
             if ask > 0 and bid > 0:
-                spread = (ask - bid) / bid
+                spread = (ask - bid) / bid # (매도-매수)/매수
                 
                 # [설정] 허용 스프레드: 1.5% (0.015)
-                # 급등주는 호가가 얇아 1% 정도는 흔하지만, 1.5%를 넘으면 위험합니다.
                 if spread > 0.015: 
                     self.logger.warning(f"⚠️ [Spread Reject] {ticker} 호가 공백 과다 ({spread*100:.2f}%) -> 매수 포기")
                     return None
-            else:
-                # 호가 데이터가 0으로 들어오면 일시적 오류일 수 있으므로 경고만 남김
-                self.logger.warning(f"⚠️ [Data Check] {ticker} 호가 수신 실패 (Ask:{ask}, Bid:{bid})")
-
         except Exception as e:
-            # 호가 체크 중 에러가 나더라도, 매수 자체를 막을지 말지는 선택 사항입니다.
-            # 여기서는 로그만 남기고 일단 진행하도록 처리했습니다.
             self.logger.error(f"⚠️ 스프레드 체크 중 오류: {e}")
+            # 에러가 나도 매수는 진행하도록 pass (선택 사항)
 
         # ============================================================
-        # 1. 쿨다운 체크 (기존 로직)
+        # 1. 쿨다운 체크
         # ============================================================
         if portfolio.is_banned(ticker):
             self.logger.warning(f"🚫 [Buy Reject] 금일 매매 금지 종목 ({ticker})")
             return None
 
-        # 2. 수량 계산 (자금 관리)
+        # 2. 수량 계산
         qty = portfolio.calculate_qty(price)
         if qty <= 0:
-            return {'status': 'failed', 'msg': f"잔고 부족 ({ticker})"}
+            return {'status': 'failed', 'msg': f"❌ 잔고 부족 또는 수량 계산 실패 ({ticker})"}
 
         # 3. 주문 전송 (시장가)
-        # [중요] 지난번 수정한 'MARKET' 타입 유지
         resp = self.kis.send_order(
             ticker=ticker,
             side="BUY",
             qty=qty,
-            price=price,        # 현재가 전달
-            order_type="MARKET" # 가상 시장가 주문
+            price=price,        
+            order_type="MARKET" 
         )
         
-        # 4. 결과 처리
+        # 4. 결과 처리 (수정된 부분)
         if resp and resp.get('rt_cd') == '0':
-            avg_price = float(resp['output']['ODNO']) if 'ODNO' in resp['output'] else price 
-            
-            portfolio.update_position({
-                'ticker': ticker,
-                'qty': qty,
-                'entry_price': price,
-                'type': 'BUY'
-            })
+            # [수정] ODNO(주문번호)를 가격으로 변환하던 버그 제거
+            # 시장가 주문 직후에는 정확한 체결가를 알 수 없으므로,
+            # 일단 진입 시도한 가격(price)을 평단가로 가정합니다.
+            entry_guess = price 
+            odno = resp['output'].get('ODNO', 'Unknown')
+
+            try:
+                portfolio.update_position({
+                    'ticker': ticker,
+                    'qty': qty,
+                    'price': entry_guess,  # <--- ✨ 여기가 핵심 수정입니다 ('price'로 통일)
+                    'type': 'BUY',
+                    'time': datetime.datetime.now() # 시간 정보도 명시적으로 전달
+                })
+            except Exception as e:
+                self.logger.error(f"❌ 포트폴리오 업데이트 실패: {e}")
+                # 포트폴리오 업데이트 실패해도 메시지는 보내야 함
             
             msg = (
-                f"⚡ 매수 주문 전송 (시장가)\n"
+                f"⚡ <b>매수 주문 완료</b>\n"
                 f"📦 종목: {ticker}\n"
                 f"🔢 수량: {qty}주\n"
-                f"📝 결과: 주문번호 {resp['output'].get('ODNO')}"
+                f"💵 기준가: ${price}\n"
+                f"📝 주문번호: {odno}"
             )
             return {'status': 'success', 'msg': msg, 'qty': qty, 'avg_price': price}
         else:
-            fail_msg = resp.get('msg1', '알 수 없는 오류')
+            fail_msg = resp.get('msg1', '알 수 없는 오류') if resp else '응답 없음'
             return {'status': 'failed', 'msg': f"❌ 매수 실패 ({ticker}): {fail_msg}"}
 
     def execute_sell(self, portfolio, ticker, reason, price=0):
