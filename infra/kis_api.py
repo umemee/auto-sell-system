@@ -557,6 +557,19 @@ class KisApi:
         except Exception as e:
             self.logger.error(f"get_recent_candles 예외 발생: {e}")
             return pd.DataFrame()
+        
+    def _get_header(self, tr_id=None):
+        """API 요청용 헤더 생성 헬퍼"""
+        if tr_id is None:
+            raise ValueError("API 요청 시 tr_id는 필수입니다.")
+            
+        return {
+            "content-type": "application/json; charset=utf-8",
+            "authorization": f"Bearer {self.token_manager.get_access_token()}",
+            "appkey": self.token_manager.APP_KEY,
+            "appsecret": self.token_manager.APP_SECRET,
+            "tr_id": tr_id
+        }
     
     def cancel_order(self, ticker, order_id, qty=0, exchange="NASD"):
         """
