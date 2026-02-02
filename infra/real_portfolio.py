@@ -209,7 +209,17 @@ class RealPortfolio:
             return 0
             
         return qty
-
+    def update_position(self, fill):
+        """
+        [호환성 래퍼] RealOrderManager가 호출하는 메서드명 맞춤
+        내부적으로 update_local_after_order를 호출합니다.
+        """
+        # fill 딕셔너리에 'time'이 없으면 현재 시간 추가 (안전장치)
+        if 'time' not in fill:
+            fill['time'] = datetime.datetime.now(pytz.timezone('US/Eastern'))
+            
+        return self.update_local_after_order(fill)
+    
     def update_local_after_order(self, fill):
         """
         [Optimistic Update]
