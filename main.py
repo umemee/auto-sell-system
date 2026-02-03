@@ -51,30 +51,37 @@ def save_state(ban_list, active_candidates):
 def load_state():
     """[설명] 저장된 상태 파일이 있다면 불러옵니다 (재부팅 시 유용)."""
     if not os.path.exists(STATE_FILE):
-        return set(), set()
+        return set(), {} # 빈 딕셔너리 반환
     
     try:
         with open(STATE_FILE, "r") as f:
             state = json.load(f)
             
-        # 날짜가 바뀌었으면(어제 파일이면) 초기화
+        # 날짜 변경 체크
         today = datetime.datetime.now().strftime("%Y-%m-%d")
         if state.get("date") != today:
             logger.info("📅 날짜 변경으로 저장된 상태를 초기화합니다.")
-            return set(), set()
+            return set(), {} # 빈 딕셔너리 반환
             
         loaded_ban = set(state.get("ban_list", []))
-        loaded_candidates = state.get("active_candidates", {})
+        raw_candidates = state.get("active_candidates", {})
         
-        # 호환성 처리: 만약 옛날 파일이라 리스트라면 -> 현재 시간으로 딕셔너리 변환
-        if isinstance(loaded_candidates, list):
-            loaded_candidates = {sym: datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S") for sym in loaded_candidates}
+        # [CRITICAL FIX] 어떤 형태(list, set, dict)든 무조건 dict로 변환
+        loaded_candidates = {}
+        
+        if isinstance(raw_candidates, dict):
+            loaded_candidates = raw_candidates
+        elif isinstance(raw_candidates, (list, set)): # 리스트나 셋이면 변환
+            now_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            loaded_candidates = {sym: now_str for sym in raw_candidates}
+        else:
+            loaded_candidates = {} # 알 수 없는 형식이면 초기화
             
         return loaded_ban, loaded_candidates
     
     except Exception as e:
         logger.error(f"⚠️ 상태 로드 실패: {e}")
-        return set(), set()
+        return set(), {}
 
 # =========================================================
 # 🕒 [시간 체크] 한국 시간 vs 미국 시간
@@ -155,7 +162,12 @@ def main():
         
         loaded_ban, loaded_candidates = load_state()
         portfolio.ban_list.update(loaded_ban)
-        active_candidates = loaded_candidates 
+        
+        # [안전장치] 혹시라도 set으로 왔다면 다시 dict로 변환
+        if isinstance(loaded_candidates, (set, list)):
+             active_candidates = {sym: datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S") for sym in loaded_candidates}
+        else:
+             active_candidates = loaded_candidates
         
         logger.info(f"💾 [Memory] 복구 완료 | 🚫Ban: {len(portfolio.ban_list)}개, 👁️Watch: {len(active_candidates)}개")
         
