@@ -25,11 +25,15 @@ class Config:
     # ==========================================
     # [1] 진입 제한 (Entry Limit)
     # 오전 10시(ET) 이후에는 신규 진입 금지 (승률 하락 구간)
-    ENTRY_DEADLINE_HOUR_ET = 14 
-
+    ENTRY_DEADLINE_HOUR_ET = 13
+    ENTRY_START_TIME = "04:10"  # 04:10 이전 진입 금지 (노이즈 회피)
+    UPPER_BUFFER = 0.02         # 이평선 위 2% 이내까지만 눌림 인정 (천장 확인)
+    ACTIVATION_THRESHOLD = 0.40 # 당일 40% 이상 상승 이력 필요
+    MAX_DAILY_CHANGE = 0.80     # 당일 80% 이상 폭등 시 진입 금지 (과열 필터)
+    
     # [2] 타임 컷 (Time Cut)
-    # 진입 후 90분(1.5시간) 경과 시 강제 청산 (오후 반등 노림수)
-    MAX_HOLDING_MINUTES = 90
+    # 진입 후 00분 무제한
+    MAX_HOLDING_MINUTES = 0
 
     # ==========================================
     # 🏦 [계좌 및 인증]
@@ -115,7 +119,7 @@ class Config:
     MAX_SLOTS = 2             # 2종목 동시 보유
 
     # [진입 설정]
-    EMA_LENGTH = 20           
+    EMA_LENGTH = 10           
     DIP_TOLERANCE = 0.005    # 눌림목 인정 오차 (0.5%)
     HOVER_TOLERANCE = 0.002  # 반등 인정 오차 (0.2%)
 
@@ -123,5 +127,4 @@ class Config:
     STOP_LOSS_PCT = 0.40      # -40% 손절
     TARGET_PROFIT_PCT = 0.12  # +12% 목표 수익률 (TP)
     TP_PCT = TARGET_PROFIT_PCT # (호환성 유지)
-
 
