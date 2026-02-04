@@ -515,7 +515,8 @@ class KisApi:
             res = requests.get(
                 url=f"{self.base_url}{path}",
                 headers=headers,
-                params=params
+                params=params,
+                timeout=10
             )
             
             if res.status_code != 200:
@@ -612,7 +613,8 @@ class KisApi:
             res = requests.post(
                 url=f"{self.base_url}{path}",
                 headers=headers,
-                data=json.dumps(params)
+                data=json.dumps(params),
+                timeout=5
             )
             return res.json()
         except Exception as e:
