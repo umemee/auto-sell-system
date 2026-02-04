@@ -349,6 +349,11 @@ def main():
                 
                 # 익절한 종목도 오늘 재진입 금지 (Ban)
                 portfolio.ban_list.add(ticker)
+                
+                # [Fix] 이미 졸업한 종목이니 감시 목록에서도 삭제 (로그 정리)
+                if ticker in active_candidates:
+                    del active_candidates[ticker]
+                    
                 save_state(portfolio.ban_list, active_candidates)
 
             # ---------------------------------------------------------
