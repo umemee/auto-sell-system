@@ -1,47 +1,66 @@
 # infra/real_order_manager.py
 import time
-import datetime
 from config import Config
 from infra.utils import get_logger
 
-logger = get_logger("OrderManager")
-
 class RealOrderManager:
     """
-    [Real Order Manager V3.0 - Smart Execution]
-    
-    핵심 기능:
-    1. 선주문(Pre-Order) 대응: 매도 신호 발생 시, 기존에 걸려있던 익절 주문을 자동으로 '취소'하고 신규 주문을 넣습니다.
-    2. 3중 안전장치: 손절/타임컷/장마감 시 '시장가'로 강제 청산합니다.
+    [Real Order Manager V3.1 - Smart Logging Edition]
+    - 스프레드 과다 시 1분 간격으로만 로그 기록 (I/O 부하 방지)
+    - 호가 잔량(Volume) 정보를 함께 기록하여 원인 분석 강화
+    - Bid가 0일 경우(매수세 실종) 0으로 나누기 에러 방지
     """
     def __init__(self, kis_api):
         self.kis = kis_api
         self.logger = get_logger("OrderManager")
+        
+        # 🛡️ [로그 폭탄 방지] 종목별 마지막 로그 시간 기록부
+        self.log_throttle_map = {} 
 
     def execute_buy(self, portfolio, signal):
         """
-        [매수 집행] 시장가 진입 + 스프레드 방어 로직 (수정된 안전 버전)
+        [매수 집행] 시장가 진입 + 스프레드 방어 로직
         """
         ticker = signal['ticker']
-        # signal에 가격이 없으면 현재가 조회, 그래도 없으면 0 (시장가)
         price = signal.get('price', 0) 
 
         # ============================================================
-        # 🛡️ [Safety Protocol] 0. 스프레드(호가 간격) 체크
+        # 🛡️ [Safety Protocol] 1. 스프레드 및 호가 잔량 체크
         # ============================================================
         try:
+            # API를 통해 4가지 데이터 모두 수신
             ask, bid, ask_vol, bid_vol = self.kis.get_market_spread(ticker)
             
-            if ask > 0 and bid > 0:
-                spread = (ask - bid) / bid # (매도-매수)/매수
+            # [방어] 매수 호가(Bid)가 0이면(살 사람이 아예 없으면) 계산 불가 -> 즉시 포기
+            if bid == 0:
+                self.logger.warning(f"📉 [MISS] {ticker} 매수 잔량 없음 (Bid Price: 0) -> 진입 불가")
+                return None
+
+            # 스프레드 계산
+            spread = (ask - bid) / bid
+            
+            # [설정] 허용 스프레드 1.5% (0.015)
+            if spread > 0.015:
+                # 🛡️ [Smart Logging] 1분 쿨타임 적용
+                last_log = self.log_throttle_map.get(ticker, 0)
+                now = time.time()
                 
-                # [설정] 허용 스프레드: 1.5% (0.015)
-                if spread > 0.015: 
-                    self.logger.warning(f"⚠️ [Spread Reject] {ticker} 호가 공백 과다 ({spread*100:.2f}%) -> 매수 포기")
-                    return None
+                # 60초가 지났을 때만 로그 기록
+                if now - last_log > 60:
+                    self.logger.warning(
+                        f"📉 [MISS] {ticker} 스프레드({spread*100:.2f}%) 과다로 매수 포기 "
+                        f"| Price: {bid}(Bid) vs {ask}(Ask) "
+                        f"| Vol: {bid_vol} vs {ask_vol}"  # ✅ 핵심 증거 추가
+                    )
+                    # 기록 시간 갱신
+                    self.log_throttle_map[ticker] = now
+                    
+                return None # 주문 안 함
+
         except Exception as e:
-            self.logger.error(f"⚠️ 스프레드 체크 중 오류: {e}")
-            # 에러가 나도 매수는 진행하도록 pass (선택 사항)
+            self.logger.error(f"⚠️ 스프레드 체크 중 오류({ticker}): {e}")
+            # 안전을 위해 에러 발생 시 매수 포기 (보수적 접근)
+            return None
 
         # ============================================================
         # 1. 쿨다운 체크
