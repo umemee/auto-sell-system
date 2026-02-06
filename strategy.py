@@ -2,25 +2,41 @@
 import pandas as pd
 import datetime
 import pytz
+import logging
+import time
+import os
 from config import Config
 from infra.utils import get_logger
 
 class EmaStrategy:
     """
-    [EMA Deterministic Strategy V9.2]
-    - 업데이트: 'DROP' 신호 추가 (좀비 감시 방지)
-    - 차트 훼손 시 즉시 감시 해제 요청
+    [EMA Deterministic Strategy V9.5 - Full Logic + Debug Logging]
+    - 원본 기능 100% 유지 (인덱스 보정, 일봉 격리, GapZone 로직)
+    - 디버깅 기능 추가: 진입 실패 사유 정밀 기록
     """
     def __init__(self):
         self.name = "EMA_Deterministic_V9"
         self.logger = get_logger("Strategy")
         
-        # 설정값 로드
+        # ------------------------------------------------------------------
+        # [신규] 디버그 로거 설정 (1분 스로틀링용)
+        # ------------------------------------------------------------------
+        self.debug_logger = logging.getLogger("StrategyDebug")
+        self.debug_logger.setLevel(logging.DEBUG)
+        if not self.debug_logger.hasHandlers():
+            log_dir = os.path.join(os.getcwd(), "logs")
+            if not os.path.exists(log_dir): os.makedirs(log_dir)
+            fh = logging.FileHandler(os.path.join(log_dir, "strategy_debug.log"), encoding='utf-8')
+            fh.setFormatter(logging.Formatter('%(asctime)s [%(levelname)s] %(message)s'))
+            self.debug_logger.addHandler(fh)
+        
+        # ------------------------------------------------------------------
+        # 기존 설정값 로드
+        # ------------------------------------------------------------------
         self.ma_length = getattr(Config, 'EMA_LENGTH', 20) 
         self.tp_pct = getattr(Config, 'TARGET_PROFIT_PCT', 0.12)
         self.sl_pct = getattr(Config, 'STOP_LOSS_PCT', 0.40)
         self.dip_tolerance = getattr(Config, 'DIP_TOLERANCE', 0.005)
-        # 타임 컷 설정값 로드
         self.max_holding_minutes = getattr(Config, 'MAX_HOLDING_MINUTES', 0) # 0=무제한
         
         # [GapZone V3.0 New Configs]
@@ -30,8 +46,17 @@ class EmaStrategy:
         self.activation_threshold = getattr(Config, 'ACTIVATION_THRESHOLD', 0.40)
         self.max_daily_change = getattr(Config, 'MAX_DAILY_CHANGE', 0.80)
 
-        # 중복 진입 방지용 (마지막으로 신호 보낸 캔들 시간 저장)
+        # 상태 관리
         self.processed_candles = {}
+        self.log_throttle_map = {} # 스로틀링 맵
+
+    def _log_rejection(self, ticker, reason, price=0):
+        """[내부 함수] 거절 사유를 1분에 한 번만 기록"""
+        now = time.time()
+        last_log = self.log_throttle_map.get(ticker, 0)
+        if now - last_log > 60:
+            self.debug_logger.debug(f"📉 [REJECT] {ticker} | Price: ${price} | Reason: {reason}")
+            self.log_throttle_map[ticker] = now
         
     def check_entry(self, ticker, df):
         """
@@ -40,6 +65,7 @@ class EmaStrategy:
         """
         # 데이터 개수 확인
         if len(df) < self.ma_length + 2:
+            self._log_rejection(ticker, f"데이터 부족 (Len {len(df)} < {self.ma_length+2})")
             return None 
 
         # =========================================================
@@ -50,16 +76,9 @@ class EmaStrategy:
             try:
                 # Case 1: 'date'와 'time' 컬럼이 존재 (가장 일반적)
                 if 'date' in df.columns and 'time' in df.columns:
-                    # time 컬럼을 문자열로 변환하고 자리수 맞춤 (HHMMSS or HHMM)
                     time_str = df['time'].astype(str).str.zfill(4)
-                    
-                    # 날짜 + 시간 문자열 합치기
-                    # 예: 20260203 + 093000
                     datetime_str = df['date'].astype(str) + time_str
-                    
-                    # 포맷 자동 감지 (4자리는 HHMM, 6자리는 HHMMSS)
                     fmt = '%Y%m%d%H%M' if len(time_str.iloc[-1]) == 4 else '%Y%m%d%H%M%S'
-                    
                     df['datetime'] = pd.to_datetime(datetime_str, format=fmt, errors='coerce')
                     df.set_index('datetime', inplace=True)
                 
@@ -72,17 +91,19 @@ class EmaStrategy:
 
             except Exception as e:
                 self.logger.error(f"❌ [Strategy] 인덱스 변환 중 에러({ticker}): {e}")
+                self._log_rejection(ticker, f"인덱스 변환 에러: {e}")
                 return None
 
         # 변환 후에도 인덱스가 시간이 아니면 포기
         if not isinstance(df.index, pd.DatetimeIndex):
-             # self.logger.error(f"❌ [Strategy] {ticker} 인덱스 변환 실패") 
+             self._log_rejection(ticker, "인덱스 변환 실패(Not DatetimeIndex)") 
              return None
 
         # =========================================================
         # ✅ 이하 기존 V3.0 로직 동일
         # =========================================================
         current_time = df.index[-1]
+        current_price = df['close'].iloc[-1] # For logging
 
         # 1. 중복 진입 방지
         last_processed_time = self.processed_candles.get(ticker)
@@ -94,9 +115,11 @@ class EmaStrategy:
         
         if (current_time.hour < start_h) or \
            (current_time.hour == start_h and current_time.minute < start_m):
+            self._log_rejection(ticker, f"시간 미달 ({current_time.strftime('%H:%M')} < {self.entry_start_time_str})", current_price)
             return None 
 
         if current_time.hour >= self.entry_end_hour:
+            self._log_rejection(ticker, f"시간 초과 ({current_time.strftime('%H:%M')} >= {self.entry_end_hour}:00)", current_price)
             return None 
 
         # 3. 지표 계산
@@ -112,17 +135,26 @@ class EmaStrategy:
         df_today = df[df.index.date == today_date]
         
         if df_today.empty or len(df_today) < 2: 
+            self._log_rejection(ticker, "당일 데이터 부족", current_price)
             return None
 
         day_open = df_today['open'].iloc[0]
         day_high = df_today['high'].iloc[:-1].max()
 
-        if day_open == 0: return None
+        if day_open == 0: 
+            self._log_rejection(ticker, "시가 0", current_price)
+            return None
+            
         activation_ratio = (day_high - day_open) / day_open
 
         # 6. 진입 조건 검사
-        if activation_ratio >= self.max_daily_change: return None 
-        if activation_ratio < self.activation_threshold: return None
+        if activation_ratio >= self.max_daily_change: 
+            self._log_rejection(ticker, f"일간 등락폭 과다({activation_ratio*100:.1f}% >= {self.max_daily_change*100}%)", current_price)
+            return None 
+            
+        if activation_ratio < self.activation_threshold: 
+            self._log_rejection(ticker, f"변동성 부족({activation_ratio*100:.1f}% < {self.activation_threshold*100}%)", current_price)
+            return None
 
         lower_bound = prev_ema * (1 - self.dip_tolerance)
         upper_bound = prev_ema * (1 + self.upper_buffer) 
@@ -133,6 +165,7 @@ class EmaStrategy:
 
         if is_supported and is_close_enough and is_above_ema:
             self.processed_candles[ticker] = current_time
+            self.logger.info(f"⚡ [BUY SIGNAL] {ticker} 조건 만족! 진입 시도.")
             return {
                 'type': 'BUY',
                 'ticker': ticker,
@@ -140,7 +173,16 @@ class EmaStrategy:
                 'time': datetime.datetime.now()
             }
         
+        # 조건 불만족 시 상세 로그 (이유 분석용)
+        if not is_supported:
+            self._log_rejection(ticker, f"지지선 이탈 (Low {prev_low} < Bound {lower_bound:.2f})", current_price)
+        elif not is_close_enough:
+            self._log_rejection(ticker, f"눌림목 범위 벗어남 (Low {prev_low} > Upper {upper_bound:.2f})", current_price)
+        elif not is_above_ema:
+             self._log_rejection(ticker, f"EMA 하향 이탈 (Close {prev_close} <= EMA {prev_ema:.2f})", current_price)
+        
         if prev_close < prev_ema * 0.98:
+             self.debug_logger.debug(f"🗑️ [DROP] {ticker} 추세 붕괴")
              return {'type': 'DROP', 'reason': 'Trend Broken'}
 
         return None
@@ -174,6 +216,6 @@ class EmaStrategy:
                 
         return None
     
-# Factory 함수
+# Factory 함수 (필수 연동)
 def get_strategy():
     return EmaStrategy()
