@@ -33,18 +33,18 @@ class EmaStrategy:
         # ------------------------------------------------------------------
         # 기존 설정값 로드
         # ------------------------------------------------------------------
-        self.ma_length = getattr(Config, 'EMA_LENGTH', 20) 
+        self.ma_length = getattr(Config, 'EMA_LENGTH', 200) 
         self.tp_pct = getattr(Config, 'TARGET_PROFIT_PCT', 0.12)
         self.sl_pct = getattr(Config, 'STOP_LOSS_PCT', 0.40)
         self.dip_tolerance = getattr(Config, 'DIP_TOLERANCE', 0.005)
         self.max_holding_minutes = getattr(Config, 'MAX_HOLDING_MINUTES', 0) # 0=무제한
         
         # [GapZone V3.0 New Configs]
-        self.entry_end_hour = getattr(Config, 'ENTRY_DEADLINE_HOUR_ET', 13)
+        self.entry_end_hour = getattr(Config, 'ENTRY_DEADLINE_HOUR_ET', 10)
         self.entry_start_time_str = getattr(Config, 'ENTRY_START_TIME', "04:10")
         self.upper_buffer = getattr(Config, 'UPPER_BUFFER', 0.02)
         self.activation_threshold = getattr(Config, 'ACTIVATION_THRESHOLD', 0.40)
-        self.max_daily_change = getattr(Config, 'MAX_DAILY_CHANGE', 0.80)
+        self.max_daily_change = getattr(Config, 'MAX_DAILY_CHANGE', 1.5)
 
         # 상태 관리
         self.processed_candles = {}
@@ -138,14 +138,28 @@ class EmaStrategy:
             self._log_rejection(ticker, "당일 데이터 부족", current_price)
             return None
 
-        day_open = df_today['open'].iloc[0]
+        current_time = df.index[-1]
+        today_date = current_time.date()
+    
+        # 전체 데이터에서 "오늘 이전 날짜"의 데이터만 추출
+        prev_data = df[df.index.date < today_date]
+    
+        if prev_data.empty:
+            # 전일 데이터가 없으면(신규 상장 등) 어쩔 수 없이 당일 시가 사용
+            ref_price = df[df.index.date == today_date]['open'].iloc[0]
+        else:
+            # 전일 데이터의 마지막 종가를 기준가로 설정
+            ref_price = prev_data['close'].iloc[-1]
+
+        # 당일 고가 (현재 봉 제외)
         day_high = df_today['high'].iloc[:-1].max()
 
-        if day_open == 0: 
-            self._log_rejection(ticker, "시가 0", current_price)
+        if ref_price == 0: 
+            self._log_rejection(ticker, "기준가(ref_price) 0", current_price)
             return None
-            
-        activation_ratio = (day_high - day_open) / day_open
+        
+        # [핵심 변경] 시가(day_open)가 아닌 '전일 종가(ref_price)' 대비 상승률 계산
+        activation_ratio = (day_high - ref_price) / ref_price
 
         # 6. 진입 조건 검사
         if activation_ratio >= self.max_daily_change: 

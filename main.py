@@ -451,7 +451,7 @@ def main():
                     # =========================================================
                     # [API 최적화] 분봉 데이터 조회
                     # =========================================================
-                    df = kis.get_recent_candles(sym, limit=60)
+                    df = kis.get_recent_candles(sym, limit=400)
 
                     if df.empty or len(df) < 20:
                         continue
