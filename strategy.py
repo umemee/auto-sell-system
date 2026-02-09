@@ -102,7 +102,8 @@ class EmaStrategy:
         # =========================================================
         # ✅ 이하 기존 V3.0 로직 동일
         # =========================================================
-        current_time = df.index[-1]
+        #current_time = df.index[-1]- 분봉 데이터의 시간 사용 (잘못됨) 
+        current_time = datetime.datetime.now(pytz.timezone('America/New_York'))
         current_price = df['close'].iloc[-1] # For logging
 
         # 1. 중복 진입 방지
