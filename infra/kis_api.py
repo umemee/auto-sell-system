@@ -233,36 +233,84 @@ class KisApi:
 
     def get_minute_candles(self, market, symbol, limit=400):
         """
-        분봉 데이터 조회 (Fast Track)
-        - Strategy.py가 요구하는 컬럼명(date, time, open, high, low, close, volume)과 정확히 일치합니다.
-        - 데이터 정렬(과거->현재)도 이미 적용되어 있어 수정할 필요가 없습니다.
+        [수정] 분봉 데이터 연속 조회 (Pagination) 구현
+        - API 최대 120건 제한을 넘어 limit 개수만큼 과거 데이터까지 조회
+        - Strategy가 요구하는 200개 이상의 캔들을 확보하기 위함
         """
         path = "/uapi/overseas-price/v1/quotations/inquire-time-itemchartprice"
-        params = {
-            "AUTH": "", "EXCD": "NAS", "SYMB": symbol,
-            "NMIN": "1", "PINC": "1", "NEXT": "", "NREC": str(limit), "KEYB": ""
-        }
         
-        # [최적화] timeout 3초 유지
-        data = self._fetch_with_retry(path, params, "HHDFS76950200", timeout=3)
+        # 거래소 코드 변환 (NASD -> NAS 등)
+        lookup_excd = self._get_lookup_excd(market) if market else "NAS"
         
-        if data and data.get('output2'):
-            df = pd.DataFrame(data['output2'])
-            df = df.rename(columns={
-                'kymd': 'date', 'khms': 'time',
-                'open': 'open', 'high': 'high', 'low': 'low', 
-                'last': 'close', 'vols': 'volume', 'evol': 'volume'
-            })
-            for col in ['open', 'high', 'low', 'close', 'volume']:
-                if col in df.columns:
-                    df[col] = df[col].apply(self._safe_float)
+        all_data = []
+        next_key = ""
+        is_next = ""
+        
+        # [Loop] 목표 개수를 채우거나 더 이상 데이터가 없을 때까지 반복
+        while len(all_data) < limit:
+            params = {
+                "AUTH": "", 
+                "EXCD": lookup_excd, 
+                "SYMB": symbol,
+                "NMIN": "1", 
+                "PINC": "1", 
+                "NEXT": is_next, 
+                "NREC": "120", # API 1회 최대 요청 개수
+                "KEYB": next_key
+            }
             
-            # [유지] 시간순 정렬 (과거 -> 현재)
-            df = df.iloc[::-1].reset_index(drop=True)
+            # _fetch_with_retry 사용하여 안정성 확보
+            data = self._fetch_with_retry(path, params, "HHDFS76950200", timeout=3)
             
-            return df
+            if not data or not data.get('output2'):
+                break
             
-        return pd.DataFrame()
+            chunk = data['output2']
+            if not chunk:
+                break
+                
+            all_data.extend(chunk)
+            
+            # [Pagination Logic] 다음 페이지가 있는지 확인
+            if len(chunk) < 120: # 120개 미만이면 더 이상 과거 데이터가 없는 것
+                break
+                
+            # 다음 조회를 위한 KEYB 생성 (마지막 데이터의 시간 기준)
+            last_item = chunk[-1]
+            if 'kymd' in last_item and 'khms' in last_item:
+                next_key = last_item['kymd'] + last_item['khms']
+                is_next = "1"
+            else:
+                break
+            
+            time.sleep(0.1) # API 호출 간격 준수
+            
+        # 데이터프레임 변환
+        if not all_data:
+            return pd.DataFrame()
+
+        df = pd.DataFrame(all_data)
+        
+        # 컬럼명 통일 (Strategy 호환)
+        df = df.rename(columns={
+            'kymd': 'date', 'khms': 'time',
+            'open': 'open', 'high': 'high', 'low': 'low', 
+            'last': 'close', 'vols': 'volume', 'evol': 'volume'
+        })
+        
+        # 숫자 형변환
+        for col in ['open', 'high', 'low', 'close', 'volume']:
+            if col in df.columns:
+                df[col] = df[col].apply(self._safe_float)
+        
+        # 정렬: API는 [최신 -> 과거] 순서이므로 [과거 -> 최신]으로 뒤집기
+        df = df.iloc[::-1].reset_index(drop=True)
+        
+        # 요청한 limit만큼 자르기 (최신 데이터 기준)
+        if len(df) > limit:
+            df = df.iloc[-limit:].reset_index(drop=True)
+            
+        return df
 
     # =================================================================
     # 🔫 [주문 관련] 매수/매도 실행 (수정됨)
@@ -484,7 +532,7 @@ class KisApi:
                     
         return pending_list
     
-    def get_recent_candles(self, ticker, limit=120):
+    def get_recent_candles(self, ticker, limit=400):
         """
         [해외주식 분봉 조회] - 공식 문서 기반 수정 (TR_ID: HHDFS76950200)
         문서 출처: [해외주식] 기본시세.xlsx - 해외주식분봉조회.csv
