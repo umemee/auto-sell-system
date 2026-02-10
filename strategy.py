@@ -144,8 +144,8 @@ class EmaStrategy:
             self._log_rejection(ticker, "당일 데이터 부족", current_price)
             return None
 
-        current_time = df.index[-1]
-        today_date = current_time.date()
+        #current_time = df.index[-1] 삭제
+        #today_date = current_time.date() 삭제
     
         # 전체 데이터에서 "오늘 이전 날짜"의 데이터만 추출
         prev_data = df[df.index.date < today_date]
