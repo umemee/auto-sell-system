@@ -25,7 +25,7 @@ class Config:
     # ==========================================
     # [1] 진입 제한 (Entry Limit)
     # 오전 10시(ET) 이후에는 신규 진입 금지 (승률 하락 구간)
-    ENTRY_DEADLINE_HOUR_ET = 15
+    ENTRY_DEADLINE_HOUR_ET = 10
     ENTRY_START_TIME = "04:10"  # 04:10 이전 진입 금지 (노이즈 회피)
     UPPER_BUFFER = 0.02         # 이평선 위 2% 이내까지만 눌림 인정 (천장 확인)
     ACTIVATION_THRESHOLD = 0.40 # 당일 40% 이상 상승 이력 필요
@@ -127,4 +127,5 @@ class Config:
     STOP_LOSS_PCT = 0.40      # -40% 손절
     TARGET_PROFIT_PCT = 0.12  # +12% 목표 수익률 (TP)
     TP_PCT = TARGET_PROFIT_PCT # (호환성 유지)
+
 
