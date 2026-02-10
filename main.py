@@ -439,7 +439,7 @@ def main():
                         found_time = datetime.datetime.strptime(found_time_str, "%Y-%m-%d %H:%M:%S")
                         elapsed_minutes = (datetime.datetime.now() - found_time).total_seconds() / 60
                         
-                        if elapsed_minutes > 60: # 60분 초과
+                        if elapsed_minutes > 120: # 120분 초과
                             logger.info(f"🗑️ [Timeout] {sym} {int(elapsed_minutes)}분 경과 -> 감시 해제")
                             if sym in active_candidates:
                                 del active_candidates[sym]

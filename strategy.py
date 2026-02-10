@@ -137,44 +137,44 @@ class EmaStrategy:
         prev_ema = df['ema'].iloc[-2]
         
         # 5. Daily Isolation
-        today_date = current_time.date()
-        df_today = df[df.index.date == today_date]
+        #today_date = current_time.date()
+        #df_today = df[df.index.date == today_date]
         
-        if df_today.empty or len(df_today) < 2: 
-            self._log_rejection(ticker, "당일 데이터 부족", current_price)
-            return None
+        #if df_today.empty or len(df_today) < 2: 
+            #self._log_rejection(ticker, "당일 데이터 부족", current_price)
+            #return None
 
         #current_time = df.index[-1] 삭제
         #today_date = current_time.date() 삭제
     
         # 전체 데이터에서 "오늘 이전 날짜"의 데이터만 추출
-        prev_data = df[df.index.date < today_date]
+        #prev_data = df[df.index.date < today_date]
     
-        if prev_data.empty:
+        #if prev_data.empty:
             # 전일 데이터가 없으면(신규 상장 등) 어쩔 수 없이 당일 시가 사용
-            ref_price = df[df.index.date == today_date]['open'].iloc[0]
-        else:
+            #ref_price = df[df.index.date == today_date]['open'].iloc[0]
+        #else:
             # 전일 데이터의 마지막 종가를 기준가로 설정
-            ref_price = prev_data['close'].iloc[-1]
+            #ref_price = prev_data['close'].iloc[-1]
 
         # 당일 고가 (현재 봉 제외)
-        day_high = df_today['high'].iloc[:-1].max()
+        #day_high = df_today['high'].iloc[:-1].max()
 
-        if ref_price == 0: 
-            self._log_rejection(ticker, "기준가(ref_price) 0", current_price)
-            return None
+        #if ref_price == 0: 
+            #self._log_rejection(ticker, "기준가(ref_price) 0", current_price)
+            #return None
         
         # [핵심 변경] 시가(day_open)가 아닌 '전일 종가(ref_price)' 대비 상승률 계산
-        activation_ratio = (day_high - ref_price) / ref_price
+        #activation_ratio = (day_high - ref_price) / ref_price
 
         # 6. 진입 조건 검사
-        if activation_ratio >= self.max_daily_change: 
-            self._log_rejection(ticker, f"일간 등락폭 과다({activation_ratio*100:.1f}% >= {self.max_daily_change*100}%)", current_price)
-            return None 
+        #if activation_ratio >= self.max_daily_change: 
+            #self._log_rejection(ticker, f"일간 등락폭 과다({activation_ratio*100:.1f}% >= {self.max_daily_change*100}%)", current_price)
+            #return None 
             
-        if activation_ratio < self.activation_threshold: 
-            self._log_rejection(ticker, f"변동성 부족({activation_ratio*100:.1f}% < {self.activation_threshold*100}%)", current_price)
-            return None
+        #if activation_ratio < self.activation_threshold: 
+            #self._log_rejection(ticker, f"변동성 부족({activation_ratio*100:.1f}% < {self.activation_threshold*100}%)", current_price)
+            #return None
 
         lower_bound = prev_ema * (1 - self.dip_tolerance)
         upper_bound = prev_ema * (1 + self.upper_buffer) 
