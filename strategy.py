@@ -93,6 +93,11 @@ class EmaStrategy:
                 self.logger.error(f"❌ [Strategy] 인덱스 변환 중 에러({ticker}): {e}")
                 self._log_rejection(ticker, f"인덱스 변환 에러: {e}")
                 return None
+            
+        if df.index.tz is None:
+            df.index = df.index.tz_localize('UTC').tz_convert('America/New_York')
+        elif str(df.index.tz) != 'America/New_York':
+            df.index = df.index.tz_convert('America/New_York')
 
         # 변환 후에도 인덱스가 시간이 아니면 포기
         if not isinstance(df.index, pd.DatetimeIndex):
