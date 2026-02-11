@@ -60,21 +60,41 @@ class EmaStrategy:
         
     def check_entry(self, ticker, df):
         """
-        [진입 신호 확인 - GapZone V3.0 Logic Injection]
-        - [Fix] 데이터프레임 인덱스 자동 보정 기능 추가
+        [진입 신호 확인 - GapZone V3.0 Final Logic]
+        - 데이터 건전성 체크 추가 (EMA 왜곡 방지)
+        - 장 시작 5분 대기 룰 추가 (노이즈/API오류 회피)
+        - 부정확한 변동성 재계산 로직 제거
         """
-        # 데이터 개수 확인
+        # ======================================================================
+        # 🕵️‍♂️ [DEBUG] 데이터 건전성 정밀 검사 (Data Sanity Check)
+        # ======================================================================
+        data_count = len(df)
+        if data_count > 0:
+            start_time = df.index[0]  # 데이터 시작 시간
+            end_time = df.index[-1]   # 데이터 끝 시간
+            
+            # EMA 계산을 위해 최소한 ma_length(200)보다 넉넉한 데이터가 있는지 확인
+            # 데이터가 너무 적으면(예: 400개 미만) 경고 로그 출력
+            if data_count < self.ma_length + 200: 
+                self.logger.warning(
+                    f"⚠️ [DATA SHORTAGE] {ticker} 데이터 부족! "
+                    f"Count: {data_count} (Require > {self.ma_length}) | "
+                    f"Range: {start_time} ~ {end_time}"
+                )
+        else:
+            self._log_rejection(ticker, "데이터 없음(Empty DataFrame)")
+            return None
+
+        # 데이터 개수 절대 부족 시 리턴
         if len(df) < self.ma_length + 2:
-            self._log_rejection(ticker, f"데이터 부족 (Len {len(df)} < {self.ma_length+2})")
             return None 
 
         # =========================================================
         # 🛠️ [CRITICAL FIX] 인덱스 보정 (Index Correction)
         # =========================================================
-        # 인덱스가 날짜형식(DatetimeIndex)이 아니면(즉, 0,1,2 숫자라면) 변환 수행
         if not isinstance(df.index, pd.DatetimeIndex):
             try:
-                # Case 1: 'date'와 'time' 컬럼이 존재 (가장 일반적)
+                # Case 1: 'date'와 'time' 컬럼 존재
                 if 'date' in df.columns and 'time' in df.columns:
                     time_str = df['time'].astype(str).str.zfill(4)
                     datetime_str = df['date'].astype(str) + time_str
@@ -82,7 +102,7 @@ class EmaStrategy:
                     df['datetime'] = pd.to_datetime(datetime_str, format=fmt, errors='coerce')
                     df.set_index('datetime', inplace=True)
                 
-                # Case 2: 'stck_bsop_date' 등 한투 API 원본 컬럼
+                # Case 2: 한투 API 원본 컬럼
                 elif 'stck_bsop_date' in df.columns and 'stck_cntg_hour' in df.columns:
                     time_str = df['stck_cntg_hour'].astype(str).str.zfill(6)
                     datetime_str = df['stck_bsop_date'].astype(str) + time_str
@@ -91,44 +111,50 @@ class EmaStrategy:
 
             except Exception as e:
                 self.logger.error(f"❌ [Strategy] 인덱스 변환 중 에러({ticker}): {e}")
-                self._log_rejection(ticker, f"인덱스 변환 에러: {e}")
                 return None
             
+        # Timezone 처리
         if df.index.tz is None:
             df.index = df.index.tz_localize('UTC').tz_convert('America/New_York')
         elif str(df.index.tz) != 'America/New_York':
             df.index = df.index.tz_convert('America/New_York')
 
-        # 변환 후에도 인덱스가 시간이 아니면 포기
         if not isinstance(df.index, pd.DatetimeIndex):
-             self._log_rejection(ticker, "인덱스 변환 실패(Not DatetimeIndex)") 
+             self._log_rejection(ticker, "인덱스 변환 실패") 
              return None
 
         # =========================================================
-        # ✅ 이하 기존 V3.0 로직 동일
+        # ✅ 진입 로직 시작
         # =========================================================
-        #current_time = df.index[-1]- 분봉 데이터의 시간 사용 (잘못됨) 
         current_time = datetime.datetime.now(pytz.timezone('America/New_York'))
-        current_price = df['close'].iloc[-1] # For logging
+        current_price = df['close'].iloc[-1]
 
         # 1. 중복 진입 방지
         last_processed_time = self.processed_candles.get(ticker)
         if last_processed_time == current_time:
             return None
 
-        # 2. 시간 제한 체크 (04:10 ~ 13:00)
+        # 2. 시간 제한 체크
+        # (1) 진입 시작 시간 체크
         start_h, start_m = map(int, self.entry_start_time_str.split(':'))
-        
         if (current_time.hour < start_h) or \
            (current_time.hour == start_h and current_time.minute < start_m):
             self._log_rejection(ticker, f"시간 미달 ({current_time.strftime('%H:%M')} < {self.entry_start_time_str})", current_price)
             return None 
 
+        # (2) 진입 마감 시간 체크
         if current_time.hour >= self.entry_end_hour:
             self._log_rejection(ticker, f"시간 초과 ({current_time.strftime('%H:%M')} >= {self.entry_end_hour}:00)", current_price)
             return None 
 
-        # 3. 지표 계산
+        # 🛡️ [New Rule] 장 시작 후 5분간 진입 금지 (Market Open Filter)
+        # 미국 시간 09:30 ~ 09:35 (한국 23:30 ~ 23:35) 노이즈 및 API 오류 회피
+        if current_time.hour == 9 and current_time.minute < 35:
+             # 로그를 남기고 싶으면 주석 해제
+             # self._log_rejection(ticker, "장 초반 대기 (Market Open Wait)", current_price)
+             return None
+
+        # 3. 지표 계산 (EMA)
         df['ema'] = df['close'].ewm(span=self.ma_length, adjust=False).mean()
 
         # 4. 데이터 격리 (T-1 시점 기준)
@@ -136,46 +162,13 @@ class EmaStrategy:
         prev_low = df['low'].iloc[-2]
         prev_ema = df['ema'].iloc[-2]
         
-        # 5. Daily Isolation
-        #today_date = current_time.date()
-        #df_today = df[df.index.date == today_date]
-        
-        #if df_today.empty or len(df_today) < 2: 
-            #self._log_rejection(ticker, "당일 데이터 부족", current_price)
-            #return None
+        # -------------------------------------------------------------
+        # [삭제됨] 부정확한 변동성(Daily Change) 재계산 로직 제거 완료
+        # Market Listener가 이미 검증된 종목을 보내주므로 중복 검사 불필요
+        # -------------------------------------------------------------
 
-        #current_time = df.index[-1] 삭제
-        #today_date = current_time.date() 삭제
-    
-        # 전체 데이터에서 "오늘 이전 날짜"의 데이터만 추출
-        #prev_data = df[df.index.date < today_date]
-    
-        #if prev_data.empty:
-            # 전일 데이터가 없으면(신규 상장 등) 어쩔 수 없이 당일 시가 사용
-            #ref_price = df[df.index.date == today_date]['open'].iloc[0]
-        #else:
-            # 전일 데이터의 마지막 종가를 기준가로 설정
-            #ref_price = prev_data['close'].iloc[-1]
-
-        # 당일 고가 (현재 봉 제외)
-        #day_high = df_today['high'].iloc[:-1].max()
-
-        #if ref_price == 0: 
-            #self._log_rejection(ticker, "기준가(ref_price) 0", current_price)
-            #return None
-        
-        # [핵심 변경] 시가(day_open)가 아닌 '전일 종가(ref_price)' 대비 상승률 계산
-        #activation_ratio = (day_high - ref_price) / ref_price
-
-        # 6. 진입 조건 검사
-        #if activation_ratio >= self.max_daily_change: 
-            #self._log_rejection(ticker, f"일간 등락폭 과다({activation_ratio*100:.1f}% >= {self.max_daily_change*100}%)", current_price)
-            #return None 
-            
-        #if activation_ratio < self.activation_threshold: 
-            #self._log_rejection(ticker, f"변동성 부족({activation_ratio*100:.1f}% < {self.activation_threshold*100}%)", current_price)
-            #return None
-
+        # 5. 진입 조건 검사
+        # self.dip_tolerance는 __init__에서 0.03(3%) 등으로 설정되어 있어야 함
         lower_bound = prev_ema * (1 - self.dip_tolerance)
         upper_bound = prev_ema * (1 + self.upper_buffer) 
 
@@ -185,7 +178,10 @@ class EmaStrategy:
 
         if is_supported and is_close_enough and is_above_ema:
             self.processed_candles[ticker] = current_time
-            self.logger.info(f"⚡ [BUY SIGNAL] {ticker} 조건 만족! 진입 시도.")
+            
+            # 로그에 데이터 개수 정보도 같이 남김 (확인용)
+            self.logger.info(f"⚡ [BUY SIGNAL] {ticker} 조건 만족! (Data: {data_count} bars)")
+            
             return {
                 'type': 'BUY',
                 'ticker': ticker,
@@ -193,7 +189,7 @@ class EmaStrategy:
                 'time': datetime.datetime.now()
             }
         
-        # 조건 불만족 시 상세 로그 (이유 분석용)
+        # 조건 불만족 시 상세 로그
         if not is_supported:
             self._log_rejection(ticker, f"지지선 이탈 (Low {prev_low} < Bound {lower_bound:.2f})", current_price)
         elif not is_close_enough:
