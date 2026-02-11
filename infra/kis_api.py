@@ -233,21 +233,22 @@ class KisApi:
 
     def get_minute_candles(self, market, symbol, limit=400):
         """
-        [수정] 분봉 데이터 연속 조회 (Pagination) 구현
-        - API 최대 120건 제한을 넘어 limit 개수만큼 과거 데이터까지 조회
-        - Strategy가 요구하는 200개 이상의 캔들을 확보하기 위함
+        [수정 완료] 분봉 데이터 연속 조회 (Pagination)
+        - 해결: KEYB를 '현지 시간'으로 설정하여 120개 제한 돌파
         """
         path = "/uapi/overseas-price/v1/quotations/inquire-time-itemchartprice"
         
-        # 거래소 코드 변환 (NASD -> NAS 등)
+        # 거래소 코드 변환
         lookup_excd = self._get_lookup_excd(market) if market else "NAS"
         
         all_data = []
-        next_key = ""
-        is_next = ""
+        next_key = ""  # 초기값 공백
         
         # [Loop] 목표 개수를 채우거나 더 이상 데이터가 없을 때까지 반복
         while len(all_data) < limit:
+            # 첫 요청은 NEXT="", 이후 요청부터는 NEXT="1"
+            is_next = "1" if next_key else ""
+            
             params = {
                 "AUTH": "", 
                 "EXCD": lookup_excd, 
@@ -255,11 +256,11 @@ class KisApi:
                 "NMIN": "1", 
                 "PINC": "1", 
                 "NEXT": is_next, 
-                "NREC": "120", # API 1회 최대 요청 개수
-                "KEYB": next_key
+                "NREC": "120", 
+                "KEYB": next_key  # 현지 시간 기준 키값
             }
             
-            # _fetch_with_retry 사용하여 안정성 확보
+            # API 호출
             data = self._fetch_with_retry(path, params, "HHDFS76950200", timeout=3)
             
             if not data or not data.get('output2'):
@@ -269,39 +270,43 @@ class KisApi:
             if not chunk:
                 break
 
-            # ================================================================
-            # 🛠️ [Fix] 중복 데이터 방지 로직 (여기부터 추가하세요)
-            # ================================================================
+            # -----------------------------------------------------------
+            # 🛡️ 무한 루프 방지 (중복 데이터 체크)
+            # -----------------------------------------------------------
             if all_data:
-                # API는 [최신 -> 과거] 순으로 데이터를 줍니다.
-                # 따라서 이번 chunk의 첫 번째(가장 최신) 데이터 시간은
-                # 기존 all_data의 마지막(가장 과거) 데이터 시간보다 더 과거여야 합니다.
+                # [기존 데이터 끝] vs [새 데이터 시작] 시간 비교
+                last_saved_korea = all_data[-1]['kymd'] + all_data[-1]['khms']
+                first_new_korea = chunk[0]['kymd'] + chunk[0]['khms']
                 
-                last_saved_time = all_data[-1]['kymd'] + all_data[-1]['khms']
-                first_new_time = chunk[0]['kymd'] + chunk[0]['khms']
-                
-                # 만약 새로 받은 데이터의 시간이 기존 데이터보다 같거나 더 미래라면? 
-                # -> API가 같은 페이지를 또 보낸 것입니다. (종료해야 함)
-                if first_new_time >= last_saved_time:
-                    self.logger.warning(f"⚠️ [Pagination] 중복 데이터 감지 ({symbol}) -> 수집 종료")
+                # 주의: 경계선 데이터는 시간이 같을 수 있음 (>= 가 아니라 > 로 비교해야 함)
+                # 만약 새 데이터가 더 미래라면(=API가 첫 페이지를 다시 줌), 루프 종료
+                if first_new_korea > last_saved_korea:
+                    self.logger.warning(f"⚠️ [Pagination] 중복/미래 데이터 감지 ({symbol}) -> 수집 종료")
                     break
-            # ================================================================
+            # -----------------------------------------------------------
              
             all_data.extend(chunk)
             
-            # [Pagination Logic] 다음 페이지가 있는지 확인
-            if len(chunk) < 120: # 120개 미만이면 더 이상 과거 데이터가 없는 것
-                break
-                
-            # 다음 조회를 위한 KEYB 생성 (마지막 데이터의 시간 기준)
-            last_item = chunk[-1]
-            if 'kymd' in last_item and 'khms' in last_item:
-                next_key = last_item['kymd'] + last_item['khms']
-                is_next = "1"
-            else:
+            # 목표 개수 충족 시 조기 종료
+            if len(all_data) >= limit:
                 break
             
-            time.sleep(0.1) # API 호출 간격 준수
+            # 데이터가 120개 미만이면 더 이상 과거 데이터가 없는 것
+            if len(chunk) < 120:
+                break
+                
+            # -----------------------------------------------------------
+            # ✅ [핵심 수정] 다음 조회를 위한 KEYB는 '현지 시간'을 써야 함
+            # -----------------------------------------------------------
+            last_item = chunk[-1]
+            if 'xymd' in last_item and 'xhms' in last_item:
+                # 현지 일자 + 현지 시간 (이게 정답)
+                next_key = last_item['xymd'] + last_item['xhms']
+            else:
+                # 비상시 한국 시간 (데이터 없을 경우 대비)
+                next_key = last_item['kymd'] + last_item['khms']
+            
+            time.sleep(0.2) # API 부하 방지
             
         # 데이터프레임 변환
         if not all_data:
@@ -309,7 +314,7 @@ class KisApi:
 
         df = pd.DataFrame(all_data)
         
-        # 컬럼명 통일 (Strategy 호환)
+        # 컬럼명 통일
         df = df.rename(columns={
             'kymd': 'date', 'khms': 'time',
             'open': 'open', 'high': 'high', 'low': 'low', 
@@ -321,10 +326,10 @@ class KisApi:
             if col in df.columns:
                 df[col] = df[col].apply(self._safe_float)
         
-        # 정렬: API는 [최신 -> 과거] 순서이므로 [과거 -> 최신]으로 뒤집기
+        # 정렬: [과거 -> 최신] 순서로 변경
         df = df.iloc[::-1].reset_index(drop=True)
         
-        # 요청한 limit만큼 자르기 (최신 데이터 기준)
+        # 요청한 limit만큼 자르기 (최신순 유지)
         if len(df) > limit:
             df = df.iloc[-limit:].reset_index(drop=True)
             
