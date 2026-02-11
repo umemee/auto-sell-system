@@ -32,9 +32,16 @@ class RealOrderManager:
             ask, bid, ask_vol, bid_vol = self.kis.get_market_spread(ticker)
             
             # [방어] 매수 호가(Bid)가 0이면(살 사람이 아예 없으면) 계산 불가 -> 즉시 포기
-            if bid == 0:
-                self.logger.warning(f"📉 [MISS] {ticker} 매수 잔량 없음 (Bid Price: 0) -> 진입 불가")
-                return None
+            if bid <= 0:
+                # 호가가 없더라도, 전략이 넘겨준 '현재가(price)'가 있다면 그걸 믿고 진행
+                if price > 0:
+                    self.logger.warning(f"⚠️ [Liquidity] {ticker} 호가(Bid) 0 발견 -> 전략가({price})로 대체하여 강제 진입")
+                    bid = price
+                    ask = price # 스프레드를 0으로 가정하여 통과시킴
+                else:
+                    # 현재가조차 없으면 진짜 위험한 상태이므로 차단
+                    self.logger.warning(f"📉 [MISS] {ticker} 매수 잔량 없음 (Bid:0, Last:0) -> 진입 불가")
+                    return None
 
             # 스프레드 계산
             spread = (ask - bid) / bid

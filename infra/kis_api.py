@@ -269,6 +269,12 @@ class KisApi:
             if not chunk:
                 break
                 
+            # [추가할 코드] 중복 데이터 방지 로직
+            current_first_time = chunk[0]['kymd'] + chunk[0]['khms']
+            if all_data and current_first_time == (all_data[-1]['kymd'] + all_data[-1]['khms']):
+                 print("⚠️ [Pagination] 중복 데이터 감지 -> 수집 종료")
+                 break
+             
             all_data.extend(chunk)
             
             # [Pagination Logic] 다음 페이지가 있는지 확인
