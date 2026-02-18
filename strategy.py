@@ -10,9 +10,10 @@ from infra.utils import get_logger
 
 class EmaStrategy:
     """
-    [EMA Deterministic Strategy V9.5 - Full Logic + Debug Logging]
-    - 원본 기능 100% 유지 (인덱스 보정, 일봉 격리, GapZone 로직)
-    - 디버깅 기능 추가: 진입 실패 사유 정밀 기록
+    [EMA Deterministic Strategy V9.6 - Emergency Patch]
+    - 원본 기능 100% 유지
+    - [FIX] 과열 종목(Overheat) 진입 방지 로직 추가 (매뉴얼 F-01 준수)
+    - 디버깅 기능 포함
     """
     def __init__(self):
         self.name = "EMA_Deterministic_V9"
@@ -44,7 +45,10 @@ class EmaStrategy:
         self.entry_start_time_str = getattr(Config, 'ENTRY_START_TIME', "04:10")
         self.upper_buffer = getattr(Config, 'UPPER_BUFFER', 0.02)
         self.activation_threshold = getattr(Config, 'ACTIVATION_THRESHOLD', 0.40)
-        self.max_daily_change = getattr(Config, 'MAX_DAILY_CHANGE', 1.5)
+        
+        # [Emergency Fix] 과열 기준 (기본 150% = 1.5, OBAI 방어용)
+        # Config에 없으면 3.0(300%)을 기본값으로 하여 안전장치 마련
+        self.max_daily_change = getattr(Config, 'MAX_DAILY_CHANGE', 3.0)
 
         # 상태 관리
         self.processed_candles = {}
@@ -60,10 +64,11 @@ class EmaStrategy:
         
     def check_entry(self, ticker, df):
         """
-        [진입 신호 확인 - GapZone V3.0 Final Logic]
-        - 데이터 건전성 체크 추가 (EMA 왜곡 방지)
-        - 장 시작 5분 대기 룰 추가 (노이즈/API오류 회피)
-        - 부정확한 변동성 재계산 로직 제거
+        [진입 신호 확인 - GapZone V3.0 Final Logic + Emergency Fix]
+        - 데이터 건전성 체크
+        - 인덱스 보정
+        - 시간 제한 체크
+        - [NEW] 과열(Overheat) 체크 추가
         """
         # ======================================================================
         # 🕵️‍♂️ [DEBUG] 데이터 건전성 정밀 검사 (Data Sanity Check)
@@ -74,7 +79,6 @@ class EmaStrategy:
             end_time = df.index[-1]   # 데이터 끝 시간
             
             # EMA 계산을 위해 최소한 ma_length(200)보다 넉넉한 데이터가 있는지 확인
-            # 데이터가 너무 적으면(예: 400개 미만) 경고 로그 출력
             if data_count < self.ma_length + 200: 
                 self.logger.warning(
                     f"⚠️ [DATA SHORTAGE] {ticker} 데이터 부족! "
@@ -163,28 +167,40 @@ class EmaStrategy:
         prev_ema = df['ema'].iloc[-2]
         
         # =========================================================
-        # 🛑 [Step 4.5] 추격 매수 방지 (Anti-Chasing Logic) - [추가됨]
+        # 🛑 [Step 4.5] 추격 매수 방지 (Anti-Chasing Logic)
         # =========================================================
-        # 현재 시가(Current Open)가 이평선보다 너무 높게 형성됐다면(Gap Up),
-        # 이는 눌림목이 아니라 '급등 후 추격'입니다.
-        
-        # [솔루션] 시가가 EMA보다 5% 이상 높으면 진입 거부
-        # (통상적인 눌림목은 EMA 근처 0~2% 내외에서 형성됨)
         chasing_threshold = prev_ema * 1.05 
         current_open = df['open'].iloc[-1]
         
         if current_open > chasing_threshold:
              self._log_rejection(ticker, f"🚀 [Anti-Chasing] 이평선 괴리 과다 (Open ${current_open} > EMA ${prev_ema:.2f} + 5%)", current_price)
              return None
-        # =========================================================
 
-        # -------------------------------------------------------------
-        # [삭제됨] 부정확한 변동성(Daily Change) 재계산 로직 제거 완료
-        # Market Listener가 이미 검증된 종목을 보내주므로 중복 검사 불필요
-        # -------------------------------------------------------------
+        # =========================================================
+        # 🔥 [Step 4.6] 과열 종목 방지 (Overheat Protection) - EMERGENCY ADD
+        # =========================================================
+        # 당일 시가(Day Open) 찾기: 현재 날짜와 같은 날짜의 첫 봉
+        try:
+            today_date = df.index[-1].normalize() # 시간 제거, 날짜만
+            today_candles = df[df.index >= today_date]
+            
+            if len(today_candles) > 0:
+                day_open = today_candles['open'].iloc[0]
+                if day_open > 0:
+                    daily_change_pct = (current_price - day_open) / day_open
+                    
+                    if daily_change_pct > self.max_daily_change:
+                        self._log_rejection(
+                            ticker, 
+                            f"🔥 [OVERHEAT] 당일 등락률 초과 ({daily_change_pct*100:.1f}% > {self.max_daily_change*100:.0f}%)", 
+                            current_price
+                        )
+                        return None
+        except Exception as e:
+            self.logger.error(f"⚠️ [Check Entry] 과열 체크 중 오류: {e}")
+            # 에러 발생 시 안전을 위해 통과시키거나 보수적으로 차단 (여기선 로그만 남김)
 
         # 5. 진입 조건 검사
-        # self.dip_tolerance는 __init__에서 0.03(3%) 등으로 설정되어 있어야 함
         lower_bound = prev_ema * (1 - self.dip_tolerance)
         upper_bound = prev_ema * (1 + self.upper_buffer) 
 
@@ -195,7 +211,6 @@ class EmaStrategy:
         if is_supported and is_close_enough and is_above_ema:
             self.processed_candles[ticker] = current_time
             
-            # 로그에 데이터 개수 정보도 같이 남김 (확인용)
             self.logger.info(f"⚡ [BUY SIGNAL] {ticker} 조건 만족! (Data: {data_count} bars)")
             
             return {
