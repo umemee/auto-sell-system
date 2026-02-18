@@ -167,8 +167,9 @@ class RealPortfolio:
 
     def get_max_order_amount(self):
         """
-        [Double Engine 자금 관리]
+        [Double Engine 자금 관리 - Fixed for Market Order]
         목표: 전체 자산의 50% 베팅 (단, 현금 범위 내에서)
+        수정: 시장가 주문(+5% 할증)을 고려하여 현금 버퍼를 2% -> 10%로 확대
         """
         # 1. 현재 슬롯 확인 (이미 꽉 찼으면 0 반환)
         if len(self.positions) >= self.MAX_SLOTS:
@@ -177,9 +178,9 @@ class RealPortfolio:
         # 2. 1슬롯당 목표 금액 계산 (총 자산 / 2)
         target_amount = self.total_equity / self.MAX_SLOTS
         
-        # 3. [안전 장치] 주문 가능 현금의 98% (수수료/슬리피지 버퍼)
-        # 중요: 목표 금액이 아무리 커도, 내 수중에 있는 현금보다 많이 주문할 순 없음
-        safe_cash = self.balance * 0.98 
+        # 3. [안전 장치] 주문 가능 현금의 90% (수수료 + 시장가 할증 5% 커버)
+        # 기존 0.98은 Limit 주문용이며, Market 주문(Limit+5%) 시 자금 부족 발생함
+        safe_cash = self.balance * 0.90 
         
         # 4. 최종 주문 금액 (둘 중 작은 값)
         final_amount = min(target_amount, safe_cash)
