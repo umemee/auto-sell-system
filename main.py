@@ -138,7 +138,7 @@ def main():
     
     # [수정] 중복 실행 방지를 위한 변수 추가
     last_processed_minute = None
-    
+    eod_processed = False  # 👈 [추가] 장 마감 처리 완료 여부 플래그
     current_date_str = now_et_start.strftime("%Y-%m-%d")
 
     try:
@@ -255,16 +255,19 @@ def main():
                 portfolio.sync_with_kis() # 자고 일어나면 잔고 동기화
 
             # ---------------------------------------------------------
-            # 🛑 [EOD] 장 마감 강제 청산 (안전장치)
+            # 🛑 [EOD] 장 마감 강제 청산 (안전장치 강화판)
             # ---------------------------------------------------------
-            # settings.py의 TIME_HARD_CUTOFF 확인 (기본값 15:55)
-            cutoff_time = getattr(Config, 'TIME_HARD_CUTOFF', "15:55") 
+            cutoff_time_str = getattr(Config, 'TIME_HARD_CUTOFF', "15:55")
+            cutoff_h, cutoff_m = map(int, cutoff_time_str.split(':'))
             
-            if now.strftime("%H:%M") == cutoff_time:
-                logger.warning(f"⏰ [장 마감] 강제 청산 실행 ({cutoff_time})")
-                bot.send_message(f"🚨 [장 마감] {cutoff_time} 강제 청산 실행")
+            # 현재 시각이 설정된 컷오프 시간 '이후'인지 확인 (== 대신 >= 사용)
+            is_after_cutoff = (now.hour > cutoff_h) or (now.hour == cutoff_h and now.minute >= cutoff_m)
+            
+            if is_after_cutoff and not eod_processed:
+                logger.warning(f"⏰ [장 마감] 강제 청산 실행 (Current: {now.strftime('%H:%M')} >= Cutoff: {cutoff_time_str})")
+                bot.send_message(f"🚨 [장 마감] 강제 청산 실행")
                 
-                # [수정] TypeError 해결: is_holding() 대신 positions 딕셔너리 직접 확인
+                # [수정] positions 딕셔너리 직접 확인
                 if portfolio.positions:
                     for ticker in list(portfolio.positions.keys()):
                         # 강제 청산 시에도 '시장가'로 확실하게 탈출
@@ -274,8 +277,14 @@ def main():
                 # 상태 저장 후 루프 종료 (다음 날 재실행 필요)
                 save_state(portfolio.ban_list, active_candidates)
                 logger.info("👋 [System] 장 마감으로 시스템을 종료합니다.")
+                
+                eod_processed = True # 오늘 처리가 끝났음을 표시
                 time.sleep(300) 
                 continue
+            
+            # 날짜가 바뀌거나 장 시간이 지나지 않았으면 플래그 초기화
+            if not is_after_cutoff:
+                eod_processed = False
 
             # =========================================================
             # 💓 [Heartbeat] 생존 신고 (상세 정보 추가)
@@ -449,90 +458,86 @@ def main():
 
                 try:
                     # =========================================================
-                    # [API 최적화] 분봉 데이터 조회
+                    # [API 최적화] limit 400 -> 300 (속도 향상)
                     # =========================================================
-                    df = kis.get_minute_candles("NAS", sym, limit=400)
+                    df = kis.get_minute_candles("NAS", sym, limit=300)
 
                     if df.empty or len(df) < 20:
                         continue
 
                     # =========================================================
-                    # 🧠 [Strategy] 전략 엔진 호출 (T-1 확정 봉 기준)
+                    # 🧠 [Strategy] 전략 엔진 호출
                     # =========================================================
                     signal = strategy.check_entry(sym, df)
 
-                    if signal and signal['type'] == 'BUY':
-                        
-                        # -----------------------------------------------------
-                        # 🚌 [Missed Bus] 자리 없으면 -> 영구 제외 (Ban)
-                        # -----------------------------------------------------
-                        if not portfolio.has_open_slot():
-                            logger.warning(f"🚌 [Missed Bus] {sym} 진입 신호 왔으나 자리 없음 -> 영구 제외")
-                            portfolio.ban_list.add(sym)      # 밴 리스트 추가
-                            if sym in active_candidates:
-                                del active_candidates[sym]   # 감시 목록 삭제
-                            save_state(portfolio.ban_list, active_candidates)
-                            continue # 다음 종목으로
-                        
-                        # [Double Check] 호가 확인
-                        ask, bid, ask_vol, bid_vol = kis.get_market_spread(sym)
-                        
-                        # 호가 스프레드 체크
-                        if ask > 0 and bid > 0:
-                            spread = (ask - bid) / ask * 100
-                            if spread > 3.0:
-                                logger.warning(f"⚠️ [Spread] {sym}: 괴리율 과다 ({spread:.2f}%). 진입 보류.")
-                                continue
-                        
-                        # 신호에 현재가(ask) 정보 업데이트
-                        signal['price'] = ask if ask > 0 else signal['price']
-                        signal['ticker'] = sym
-
-                        # =========================================================
-                        # ⚡ [Execution] 주문 집행
-                        # =========================================================
-                        if portfolio.has_open_slot():
-                            result = order_manager.execute_buy(portfolio, signal)
+                    if signal:
+                        # [CASE 1] 매수 신호 (BUY)
+                        if signal['type'] == 'BUY':
                             
-                            if result:
-                                if result.get('msg'):
-                                    bot.send_message(result['msg'])
-                                
-                                if result['status'] == 'success':
-                                    save_state(portfolio.ban_list, active_candidates)
-                                    
-                                    # -----------------------------------------------------
-                                    # 🟠 [NEW] 매수 성공 즉시 '지정가 익절 주문' 미리 넣기
-                                    # -----------------------------------------------------
-                                    try:
-                                        buy_price = result.get('avg_price', signal['price'])
-                                        if buy_price > 0:
-                                            target_price = buy_price * (1.0 + getattr(Config, 'TARGET_PROFIT_PCT', 0.10))
-                                            target_price = round(target_price, 2)
-                                            qty = result.get('qty', 0)
-                                            
-                                            if qty > 0:
-                                                logger.info(f"⚡ [Pre-Order] {sym} 익절 주문 전송: ${target_price} ({qty}주)")
-                                                sell_resp = kis.send_order(
-                                                    ticker=sym,
-                                                    side="SELL",
-                                                    qty=qty,
-                                                    price=target_price,
-                                                    order_type="00" # 지정가
-                                                )
-                                                if sell_resp and sell_resp.get('rt_cd') == '0':
-                                                    bot.send_message(f"🔒 [잠금] 익절 주문 완료\n💵 목표: ${target_price} (+10%)")
-                                                else:
-                                                    logger.error(f"❌ 익절 주문 실패: {sell_resp}")
-                                    except Exception as e:
-                                        logger.error(f"❌ 익절 주문 중 에러: {e}")
+                            # -----------------------------------------------------
+                            # 🚌 [Missed Bus] 자리 없으면 -> 영구 제외 (Ban)
+                            # -----------------------------------------------------
+                            if not portfolio.has_open_slot():
+                                logger.warning(f"🚌 [Missed Bus] {sym} 진입 신호 왔으나 자리 없음 -> 영구 제외")
+                                portfolio.ban_list.add(sym)      
+                                if sym in active_candidates:
+                                    del active_candidates[sym]   
+                                save_state(portfolio.ban_list, active_candidates)
+                                continue 
+                            
+                            # [Double Check] 호가 확인
+                            ask, bid, ask_vol, bid_vol = kis.get_market_spread(sym)
+                            
+                            if ask > 0 and bid > 0:
+                                spread = (ask - bid) / ask * 100
+                                if spread > 3.0:
+                                    logger.warning(f"⚠️ [Spread] {sym}: 괴리율 과다 ({spread:.2f}%). 진입 보류.")
+                                    continue
+                            
+                            signal['price'] = ask if ask > 0 else signal['price']
+                            signal['ticker'] = sym
 
-                                    if not portfolio.has_open_slot():
-                                        break 
-                                else:
-                                    logger.warning(f"🚌 [실패] {sym} 매수 실패. 금일 제외.")
-                                    portfolio.ban_list.add(sym)
-                                    save_state(portfolio.ban_list, active_candidates)
+                            # =========================================================
+                            # ⚡ [Execution] 주문 집행
+                            # =========================================================
+                            if portfolio.has_open_slot():
+                                result = order_manager.execute_buy(portfolio, signal)
+                                
+                                if result:
+                                    if result.get('msg'):
+                                        bot.send_message(result['msg'])
+                                    
+                                    if result['status'] == 'success':
+                                        save_state(portfolio.ban_list, active_candidates)
+                                        
+                                        # 익절 주문 미리 넣기 (기존 로직 유지)
+                                        try:
+                                            buy_price = result.get('avg_price', signal['price'])
+                                            if buy_price > 0:
+                                                target_price = buy_price * (1.0 + getattr(Config, 'TARGET_PROFIT_PCT', 0.10))
+                                                target_price = round(target_price, 2)
+                                                qty = result.get('qty', 0)
+                                                
+                                                if qty > 0:
+                                                    logger.info(f"⚡ [Pre-Order] {sym} 익절 주문 전송: ${target_price}")
+                                                    kis.send_order(sym, "SELL", qty, target_price, "00")
+                                                    bot.send_message(f"🔒 [잠금] 익절 주문 완료 (${target_price})")
+                                        except Exception as e:
+                                            logger.error(f"❌ 익절 주문 중 에러: {e}")
+
+                                        if not portfolio.has_open_slot():
+                                            break 
+                                    else:
+                                        logger.warning(f"🚌 [실패] {sym} 매수 실패. 금일 제외.")
+                                        portfolio.ban_list.add(sym)
+                                        save_state(portfolio.ban_list, active_candidates)
+
+                        # [CASE 2] 추세 붕괴 (DROP) - 👈 [신규] 좀비 종목 제거 로직
+                        elif signal['type'] == 'DROP':
+                            logger.info(f"🗑️ [DROP] {sym} 추세 붕괴 확인 -> 감시 해제")
+                            if sym in active_candidates:
+                                del active_candidates[sym]
+                            save_state(portfolio.ban_list, active_candidates)
 
                     # [Rate Limit] API 호출 간격 조절
                     time.sleep(0.2)
