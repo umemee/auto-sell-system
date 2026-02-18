@@ -50,6 +50,10 @@ class EmaStrategy:
         # Config에 없으면 3.0(300%)을 기본값으로 하여 안전장치 마련
         self.max_daily_change = getattr(Config, 'MAX_DAILY_CHANGE', 3.0)
 
+        # ✅ [NEW] 하이브리드 필터 설정 로드
+        self.gap_limit_global = getattr(Config, 'GAP_LIMIT_GLOBAL', 0.30)
+        self.gap_limit_late = getattr(Config, 'GAP_LIMIT_LATE', 0.10)
+        self.late_hour_start = getattr(Config, 'LATE_HOUR_START', 9)
         # 상태 관리
         self.processed_candles = {}
         self.log_throttle_map = {} # 스로틀링 맵
@@ -181,7 +185,7 @@ class EmaStrategy:
         # =========================================================
         # 당일 시가(Day Open) 찾기: 현재 날짜와 같은 날짜의 첫 봉
         try:
-            today_date = df.index[-1].normalize() # 시간 제거, 날짜만
+            today_date = df.index[-1].normalize()
             today_candles = df[df.index >= today_date]
             
             if len(today_candles) > 0:
@@ -189,16 +193,29 @@ class EmaStrategy:
                 if day_open > 0:
                     daily_change_pct = (current_price - day_open) / day_open
                     
-                    if daily_change_pct > self.max_daily_change:
-                        self._log_rejection(
+                    # 🛡️ 1. [Global Safety] "독이 든 성배" 필터
+                    # 시간 불문, 시가 대비 30% 이상 이미 폭등한 종목은 하방이 열려있어 위험
+                    if daily_change_pct > self.gap_limit_global:
+                         self._log_rejection(
                             ticker, 
-                            f"🔥 [OVERHEAT] 당일 등락률 초과 ({daily_change_pct*100:.1f}% > {self.max_daily_change*100:.0f}%)", 
+                            f"🛡️ [GAP_GLOBAL] 상승폭 과다 ({daily_change_pct*100:.1f}% > {self.gap_limit_global*100:.0f}%)", 
                             current_price
                         )
-                        return None
+                         return None
+
+                    # 🛡️ 2. [Late Morning Guard] "9시 이후 설거지 방지" 필터
+                    # 9시 이후에는 이미 10% 이상 오른 종목은 차익실현 매물 위험
+                    if current_time.hour >= self.late_hour_start and daily_change_pct > self.gap_limit_late:
+                         self._log_rejection(
+                            ticker, 
+                            f"🛡️ [GAP_LATE] 9시 이후 과열 ({daily_change_pct*100:.1f}% > {self.gap_limit_late*100:.0f}%)", 
+                            current_price
+                        )
+                         return None
+                        
         except Exception as e:
             self.logger.error(f"⚠️ [Check Entry] 과열 체크 중 오류: {e}")
-            # 에러 발생 시 안전을 위해 통과시키거나 보수적으로 차단 (여기선 로그만 남김)
+            # 데이터 오류 시에는 안전을 위해 패스하거나, 보수적으로 차단할 수 있음
 
         # 5. 진입 조건 검사
         lower_bound = prev_ema * (1 - self.dip_tolerance)

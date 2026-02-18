@@ -25,12 +25,17 @@ class Config:
     # ==========================================
     # [1] 진입 제한 (Entry Limit)
     # 오전 10시(ET) 이후에는 신규 진입 금지 (승률 하락 구간)
-    ENTRY_DEADLINE_HOUR_ET = 10
+    ENTRY_DEADLINE_HOUR_ET = 15
     ENTRY_START_TIME = "04:10"  # 04:10 이전 진입 금지 (노이즈 회피)
     UPPER_BUFFER = 0.02         # 이평선 위 2% 이내까지만 눌림 인정 (천장 확인)
     ACTIVATION_THRESHOLD = 0.40 # 당일 40% 이상 상승 이력 필요
     MAX_DAILY_CHANGE = 1.5     # 당일 150% 이상 폭등 시 진입 금지 (과열 필터)
     
+    # ✅ [NEW] 하이브리드 필터 설정 (수익 방어용)
+    GAP_LIMIT_GLOBAL = 0.30    # [전역] 시가 대비 30% 이상 상승 시 진입 금지
+    GAP_LIMIT_LATE = 0.10      # [오전] 9시 이후에는 10% 이상 상승 시 진입 금지
+    LATE_HOUR_START = 9        # [기준] 늦은 오전 기준 시간 (09:00 ET)
+   
     # [2] 타임 컷 (Time Cut)
     # 진입 후 00분 무제한
     MAX_HOLDING_MINUTES = 0
@@ -127,5 +132,4 @@ class Config:
     STOP_LOSS_PCT = 0.40      # -40% 손절
     TARGET_PROFIT_PCT = 0.12  # +12% 목표 수익률 (TP)
     TP_PCT = TARGET_PROFIT_PCT # (호환성 유지)
-
 
