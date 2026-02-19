@@ -1,6 +1,7 @@
 # data/market_listener.py
 import logging
 import os
+import datetime
 from infra.utils import get_logger
 from config import Config
 
@@ -26,6 +27,10 @@ class MarketListener:
             self.debug_logger.handlers.clear()
         self.debug_logger.addHandler(file_handler)
 
+        # ✅ [NEW] 중복 알림 방지용 메모리
+        self.notified_stocks = set()
+        self.last_scan_date = None
+
     def scan_markets(self, ban_list=None, active_candidates=None):
         """
         [실시간 급등주 검색 v5.5 - Debug Edition]
@@ -34,6 +39,12 @@ class MarketListener:
         """
         if ban_list is None: ban_list = set()
         if active_candidates is None: active_candidates = set()
+
+        # ✅ [NEW] 날짜가 바뀌면 알림 메모리 초기화
+        today_str = datetime.datetime.now().strftime('%Y-%m-%d')
+        if self.last_scan_date != today_str:
+            self.notified_stocks.clear()
+            self.last_scan_date = today_str
 
         detected_stocks = []
         
@@ -110,12 +121,15 @@ class MarketListener:
                 # ✅ 최종 선정 (All Pass)
                 # =========================================================
                 if rate >= THRESHOLD:
-                    if sym not in active_candidates:
+                    # ✅ [FIX] 오늘 이미 알림을 보낸 종목은 콘솔 로그 출력 생략
+                    if sym not in active_candidates and sym not in self.notified_stocks:
                         self.logger.info(
                             f"🚨 [급등 포착] {sym} ({name}) (+{rate}%) "
                             f"| Price ${price} "
                             f"| Val ${trade_value/1000:,.0f}k"
                         )
+                        self.notified_stocks.add(sym) # 알림을 보냈다고 도장 쾅
+                    
                     detected_stocks.append(sym)
 
         except Exception as e:
