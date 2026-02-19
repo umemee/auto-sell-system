@@ -124,12 +124,13 @@ class Config:
     MAX_SLOTS = 2             # 2종목 동시 보유
 
     # [진입 설정]
-    EMA_LENGTH = 55           
+    EMA_LENGTH = 60           
     DIP_TOLERANCE = 0.005    # 눌림목 인정 오차 (0.5%)
     HOVER_TOLERANCE = 0.002  # 반등 인정 오차 (0.2%)
 
     # [청산 설정]
     STOP_LOSS_PCT = 0.40      # -40% 손절
-    TARGET_PROFIT_PCT = 0.15  # +12% 목표 수익률 (TP)
+    TARGET_PROFIT_PCT = 0.16  # +16% 목표 수익률 (TP)
     TP_PCT = TARGET_PROFIT_PCT # (호환성 유지)
+
 
