@@ -157,7 +157,7 @@ class EmaStrategy:
 
         # 🛡️ [New Rule] 장 시작 후 5분간 진입 금지 (Market Open Filter)
         # 미국 시간 09:30 ~ 09:35 (한국 23:30 ~ 23:35) 노이즈 및 API 오류 회피
-        if current_time.hour == 9 and current_time.minute < 35:
+        if current_time.hour == 9 and 30 <= current_time.minute < 35:
              # 로그를 남기고 싶으면 주석 해제
              self._log_rejection(ticker, "장 초반 대기 (Market Open Wait)", current_price)
              return None
@@ -173,11 +173,11 @@ class EmaStrategy:
         # =========================================================
         # 🛑 [Step 4.5] 추격 매수 방지 (Anti-Chasing Logic)
         # =========================================================
-        chasing_threshold = prev_ema * 1.05 
+        chasing_threshold = prev_ema * 1.03  # EMA보다 3% 이상 높으면 추격 매수로 간주 
         current_open = df['open'].iloc[-1]
         
         if current_open > chasing_threshold:
-             self._log_rejection(ticker, f"🚀 [Anti-Chasing] 이평선 괴리 과다 (Open ${current_open} > EMA ${prev_ema:.2f} + 5%)", current_price)
+             self._log_rejection(ticker, f"🚀 [Anti-Chasing] 이평선 괴리 과다 (Open ${current_open} > EMA ${prev_ema:.2f} + 3%)", current_price)
              return None
 
         # =========================================================
@@ -217,6 +217,16 @@ class EmaStrategy:
             self.logger.error(f"⚠️ [Check Entry] 과열 체크 중 오류: {e}")
             # 데이터 오류 시에는 안전을 위해 패스하거나, 보수적으로 차단할 수 있음
 
+        # =========================================================
+        # 🔥 [Step 4.7] 최근 10봉 내 3% 급등(모멘텀) 이력 확인 (Backtest Sync)
+        # =========================================================
+        recent_highs = df['high'].iloc[-11:-1]
+        if not recent_highs.empty:
+            recent_peak = recent_highs.max()
+            if recent_peak < prev_ema * 1.03:
+                self._log_rejection(ticker, f"모멘텀 부족 (최고점 {recent_peak:.2f} < EMA 3% {prev_ema*1.03:.2f})", current_price)
+                return None
+            
         # 5. 진입 조건 검사
         lower_bound = prev_ema * (1 - self.dip_tolerance)
         upper_bound = prev_ema * (1 + self.upper_buffer) 
