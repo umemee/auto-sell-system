@@ -95,8 +95,8 @@ class EmaStrategy:
 
         # 데이터 개수 절대 부족 시 리턴
         if len(df) < self.ma_length + 2:
-            return None 
-
+            self._log_rejection(ticker, f"데이터 부족 ({len(df)} < {self.ma_length + 2})")
+            return None
         # =========================================================
         # 🛠️ [CRITICAL FIX] 인덱스 보정 (Index Correction)
         # =========================================================
@@ -159,7 +159,7 @@ class EmaStrategy:
         # 미국 시간 09:30 ~ 09:35 (한국 23:30 ~ 23:35) 노이즈 및 API 오류 회피
         if current_time.hour == 9 and current_time.minute < 35:
              # 로그를 남기고 싶으면 주석 해제
-             # self._log_rejection(ticker, "장 초반 대기 (Market Open Wait)", current_price)
+             self._log_rejection(ticker, "장 초반 대기 (Market Open Wait)", current_price)
              return None
 
         # 3. 지표 계산 (EMA)

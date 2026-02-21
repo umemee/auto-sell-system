@@ -462,7 +462,8 @@ def main():
                     # =========================================================
                     df = kis.get_minute_candles("NAS", sym, limit=300)
 
-                    if df.empty or len(df) < 20:
+                    if df.empty or len(df) < 26:
+                        logger.debug(f"📉 [SKIP] {sym} 데이터 부족 (Count: {len(df) if not df.empty else 0} < 26)")
                         continue
 
                     # =========================================================
