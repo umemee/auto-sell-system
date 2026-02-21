@@ -105,7 +105,7 @@ class KisApi:
             if data.get('rt_cd') != '0':
                 # 단, 장 종료 등 흔한 메시지는 로그 레벨을 낮출 수 있음
                 msg = data.get('msg1')
-                # self.logger.warning(f"⚠️ API 호출 실패 [{tr_id}]: {msg}")
+                self.logger.warning(f"⚠️ API 호출 실패 [{tr_id}]: {msg}")
                 return None
                 
             return data
