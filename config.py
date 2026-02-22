@@ -64,7 +64,7 @@ class Config:
     # 🔍 [스캐닝 설정]
     # ==========================================
     MIN_CHANGE_PCT = 42.0           # 급등주 필터 (42% 이상)
-    MAX_CHANGE_PCT = 80.0          # [추가] 150% 이상 폭등주는 위험하므로 제외
+    MAX_CHANGE_PCT = 150.0          # [추가] 150% 이상 폭등주는 위험하므로 제외
     
     # [실전 필터링 기준]
     FILTER_MIN_PRICE = 0.5          # 최소 주가 $0.5 (동전주 제외)
@@ -124,14 +124,12 @@ class Config:
     MAX_SLOTS = 2             # 2종목 동시 보유
 
     # [진입 설정]
-    EMA_LENGTH = 24           
+    EMA_LENGTH = 200           
     DIP_TOLERANCE = 0.005    # 눌림목 인정 오차 (0.5%)
     HOVER_TOLERANCE = 0.002  # 반등 인정 오차 (0.2%)
 
     # [청산 설정]
     STOP_LOSS_PCT = 0.40      # -40% 손절
-    TARGET_PROFIT_PCT = 0.15  # +15% 목표 수익률 (TP)
+    TARGET_PROFIT_PCT = 0.15  # +12% 목표 수익률 (TP)
     TP_PCT = TARGET_PROFIT_PCT # (호환성 유지)
-
-
 
