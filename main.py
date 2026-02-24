@@ -542,8 +542,8 @@ def main():
                                 pass
                             save_state(portfolio.ban_list, active_candidates)
 
-                    # [Rate Limit] API 호출 간격 조절
-                    time.sleep(0.2)
+                    # [Rate Limit] API 호출 간격 조절 (초당 2건 제한 준수)
+                    time.sleep(0.55)
 
                 except Exception as e:
                     logger.error(f"❌ 매수 로직 에러({sym}): {e}")
