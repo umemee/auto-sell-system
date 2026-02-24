@@ -441,20 +441,20 @@ def main():
                 # -----------------------------------------------------
                 # 🕒 [Time Cut] 60분 경과 시 감시 해제 (좀비 방지)
                 # -----------------------------------------------------
-                try:
-                    found_time_str = active_candidates.get(sym)
-                    if found_time_str:
+                #try:
+                    #found_time_str = active_candidates.get(sym)
+                    #if found_time_str:
                         # 문자열 -> datetime 변환
-                        found_time = datetime.datetime.strptime(found_time_str, "%Y-%m-%d %H:%M:%S")
-                        elapsed_minutes = (datetime.datetime.now() - found_time).total_seconds() / 60
+                        #found_time = datetime.datetime.strptime(found_time_str, "%Y-%m-%d %H:%M:%S")
+                        #elapsed_minutes = (datetime.datetime.now() - found_time).total_seconds() / 60
                         
-                        if elapsed_minutes > 120: # 120분 초과
-                            logger.info(f"🗑️ [Timeout] {sym} {int(elapsed_minutes)}분 경과 -> 감시 해제")
-                            if sym in active_candidates:
-                                del active_candidates[sym]
-                            continue # 다음 종목으로 넘어감
-                except Exception:
-                    pass # 시간 포맷 에러 시엔 일단 패스
+                        #if elapsed_minutes > 120: # 120분 초과
+                            #logger.info(f"🗑️ [Timeout] {sym} {int(elapsed_minutes)}분 경과 -> 감시 해제")
+                            #if sym in active_candidates:
+                                #del active_candidates[sym]
+                            #continue # 다음 종목으로 넘어감
+                #except Exception:
+                    #pass # 시간 포맷 에러 시엔 일단 패스
 
                 try:
                     # =========================================================
@@ -463,7 +463,7 @@ def main():
                     df = kis.get_minute_candles("NAS", sym, limit=300)
 
                     if df.empty or len(df) < 26:
-                        logger.debug(f"📉 [SKIP] {sym} 데이터 부족 (Count: {len(df) if not df.empty else 0} < 26)")
+                        strategy._log_rejection(sym, f"데이터 부족 (Count: {len(df) if not df.empty else 0} < 26)")
                         continue
 
                     # =========================================================
@@ -536,8 +536,10 @@ def main():
                         # [CASE 2] 추세 붕괴 (DROP) - 👈 [신규] 좀비 종목 제거 로직
                         elif signal['type'] == 'DROP':
                             logger.info(f"🗑️ [DROP] {sym} 추세 붕괴 확인 -> 감시 해제")
-                            if sym in active_candidates:
+                            try:
                                 del active_candidates[sym]
+                            except KeyError:
+                                pass
                             save_state(portfolio.ban_list, active_candidates)
 
                     # [Rate Limit] API 호출 간격 조절

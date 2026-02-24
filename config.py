@@ -32,7 +32,7 @@ class Config:
     MAX_DAILY_CHANGE = 1.5     # 당일 150% 이상 폭등 시 진입 금지 (과열 필터)
     
     # ✅ [NEW] 하이브리드 필터 설정 (수익 방어용)
-    GAP_LIMIT_GLOBAL = 0.30    # [전역] 시가 대비 30% 이상 상승 시 진입 금지
+    GAP_LIMIT_GLOBAL = 0.40    # [전역] 시가 대비 30% 이상 상승 시 진입 금지
     GAP_LIMIT_LATE = 0.10      # [오전] 9시 이후에는 10% 이상 상승 시 진입 금지
     LATE_HOUR_START = 9        # [기준] 늦은 오전 기준 시간 (09:00 ET)
    
