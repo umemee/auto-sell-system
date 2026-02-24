@@ -83,7 +83,7 @@ class EmaStrategy:
             end_time = df.index[-1]   # 데이터 끝 시간
             
             # EMA 계산을 위해 최소한 ma_length(200)보다 넉넉한 데이터가 있는지 확인
-            if data_count < self.ma_length + 200: 
+            if data_count < self.ma_length + 50: 
                 self.logger.warning(
                     f"⚠️ [DATA SHORTAGE] {ticker} 데이터 부족! "
                     f"Count: {data_count} (Require > {self.ma_length}) | "
