@@ -87,6 +87,10 @@ class KisApi:
         self._update_headers(tr_id)
         url = f"{self.base_url}{path}"
         
+        # [NEW] 로깅용 종목코드 자동 추출
+        sym = params.get('SYMB') or params.get('ITEM_CD') or params.get('PDNO') or ""
+        sym_log = f" [{sym}]" if sym else ""
+        
         try:
             # Session을 사용하여 재시도 로직 적용
             if method == "GET":
@@ -105,19 +109,19 @@ class KisApi:
             if data.get('rt_cd') != '0':
                 # 단, 장 종료 등 흔한 메시지는 로그 레벨을 낮출 수 있음
                 msg = data.get('msg1')
-                self.logger.warning(f"⚠️ API 호출 실패 [{tr_id}]: {msg}")
+                self.logger.warning(f"⚠️ API 호출 실패{sym_log} [{tr_id}]: {msg}")
                 return None
                 
             return data
             
         except requests.exceptions.Timeout:
-            self.logger.error(f"⏳ [Timeout] 요청 시간 초과: {tr_id}")
+            self.logger.error(f"⏳ [Timeout] 요청 시간 초과{sym_log}: {tr_id}")
             return None
         except requests.exceptions.RequestException as e:
-            self.logger.error(f"💥 [Network Error] 통신 실패: {e}")
+            self.logger.error(f"💥 [Network Error] 통신 실패{sym_log}: {e}")
             return None
         except json.JSONDecodeError:
-            self.logger.error(f"📝 [JSON Error] 응답 데이터 파싱 실패")
+            self.logger.error(f"📝 [JSON Error] 응답 데이터 파싱 실패{sym_log}")
             return None
 
     # =================================================================
@@ -257,6 +261,7 @@ class KisApi:
                 "PINC": "1", 
                 "NEXT": is_next, 
                 "NREC": "120", 
+                "FILL": "",
                 "KEYB": next_key  # 현지 시간 기준 키값
             }
             
@@ -306,7 +311,7 @@ class KisApi:
                 # 비상시 한국 시간 (데이터 없을 경우 대비)
                 next_key = last_item['kymd'] + last_item['khms']
             
-            time.sleep(0.2) # API 부하 방지
+            time.sleep(0.55) # [수정] 초당 2건 제한 준수 (API 부하 방지)
             
         # 데이터프레임 변환
         if not all_data:
