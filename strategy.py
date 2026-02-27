@@ -189,7 +189,12 @@ class EmaStrategy:
             today_candles = df[df.index >= today_date]
             
             if len(today_candles) > 0:
-                day_open = today_candles['open'].iloc[0]
+                # 🛑 [CRITICAL FIX] 04:00 정각의 유령 체결(Anomaly Print) 방지
+                # 첫 1분 캔들 하나에만 의존하지 않고, 장 시작 후 생성된 
+                # 처음 최대 5개 캔들의 '종가 중간값(Median)'을 기준가로 사용하여 스파이크를 제거합니다.
+                safe_open_candles = today_candles.head(5)
+                day_open = safe_open_candles['close'].median()
+                
                 if day_open > 0:
                     daily_change_pct = (current_price - day_open) / day_open
                     

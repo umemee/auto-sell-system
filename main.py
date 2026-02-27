@@ -370,15 +370,6 @@ def main():
             # ---------------------------------------------------------
             for ticker in list(portfolio.positions.keys()):
                 
-                # [추가] 1. 미체결 주문 확인 (중복 매도 방지)
-                try:
-                    pending_orders = kis.get_pending_orders(ticker)
-                    if pending_orders:
-                        # 이미 매도 주문이 걸려있으면 패스
-                        continue 
-                except Exception:
-                    pass
-                
                 # [수정] 단순 현재가 ❌ -> 분봉 데이터 ✅
                 df = kis.get_minute_candles("NAS", ticker, limit=60)
 
@@ -402,6 +393,13 @@ def main():
                 
                 if exit_signal:
                     reason = exit_signal['reason']
+                    
+                    # 🛑 [핵심 수정] 익절(TAKE_PROFIT)은 이미 진입 시점에 지정가 주문을 걸어두었으므로 무시
+                    if reason == 'TAKE_PROFIT':
+                        continue
+                        
+                    # 🚨 손절(STOP_LOSS) 또는 타임컷(TIME_CUT)일 때만 비상 탈출
+                    # real_order_manager가 기존 익절 대기 주문을 알아서 취소하고 95% 시장가로 던짐
                     # [중요] price=real_time_price 필수 (0원이면 주문 거부됨)
                     result = order_manager.execute_sell(portfolio, ticker, reason, price=real_time_price)
                     if result:
