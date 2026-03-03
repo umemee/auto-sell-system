@@ -185,38 +185,51 @@ class KisApi:
     @log_api_call("랭킹 조회(통합)")
     def get_ranking(self):
         """
-        급등주 랭킹 조회 (등락률 상위)
-        - 실패 시 거래량 상위 랭킹(Fallback)으로 자동 전환
+        급등주 랭킹 조회 (등락률 상위) — NAS + AMS + NYS 전 거래소 통합
+        [수정] EXCD: "NAS" 단일 조회 → 3개 거래소 순차 조회로 변경
+        - 배경: AMEX(AMS) 상장 종목(BATL 등)이 NAS 조회에서 누락되는 버그 수정
+        - 실전 포착 종목 30개 중 5개(16.7%)가 AMS 종목으로 확인됨 (2026-03-04 검증)
         """
-        path = "/uapi/overseas-stock/v1/ranking/updown-rate" 
-        params = {
-            "AUTH": "", "EXCD": "NAS", "GUBN": "1", "NDAY": "0", 
-            "VOL_RANG": "0", "KEYB": ""
-        }
-        
-        # [Smart Retry] 적용
-        data = self._fetch_with_retry(path, params, "HHDFS76290000", timeout=10)
-        
-        if data and data.get('output2'):
-            return data.get('output2')
+        path = "/uapi/overseas-stock/v1/ranking/updown-rate"
+        all_results = []
 
-        # 1차 조회 실패 시 백업 로직 실행 (로그 남김)
-        self.logger.warning("⚠️ 등락률 순위 조회 실패 -> 거래량 순위로 우회 시도")
+        for excd in ["NAS", "AMS", "NYS"]:
+            params = {
+                "AUTH": "", "EXCD": excd, "GUBN": "1",
+                "NDAY": "0", "VOL_RANG": "0", "KEYB": ""
+            }
+            data = self._fetch_with_retry(path, params, "HHDFS76290000", timeout=10)
+            if data and data.get('output2'):
+                for item in data['output2']:
+                    item['_excd'] = excd  # 디버깅용 거래소 태그
+                all_results.extend(data['output2'])
+                self.logger.debug(f"[Ranking] {excd}: {len(data['output2'])}개 수신")
+
+        if all_results:
+            self.logger.info(f"[Ranking] 전체 수신: {len(all_results)}개 (NAS+AMS+NYS 통합)")
+            return all_results
+
+        self.logger.warning("⚠️ 전 거래소 등락률 랭킹 실패 -> 거래량 순위로 우회 시도")
         return self._get_volume_ranking()
 
     def _get_volume_ranking(self):
-        """[Fallback] 거래량 상위 종목 조회"""
+        """[Fallback] 거래량 상위 종목 조회 — NAS + AMS + NYS 통합"""
         path = "/uapi/overseas-stock/v1/ranking/trade-vol"
-        params = {
-            "AUTH": "", "EXCD": "NAS", "GUBN": "0", "VOL_RANG": "0", "KEYB": ""
-        }
-        
-        # [Smart Retry] 여기도 적용해야 완벽합니다.
-        data = self._fetch_with_retry(path, params, "HHDFS76310010", timeout=5)
-        
-        if data and data.get('output'):
-            return data.get('output')
-        
+        all_results = []
+
+        for excd in ["NAS", "AMS", "NYS"]:
+            params = {
+                "AUTH": "", "EXCD": excd, "GUBN": "0", "VOL_RANG": "0", "KEYB": ""
+            }
+            data = self._fetch_with_retry(path, params, "HHDFS76310010", timeout=5)
+            if data and data.get('output'):
+                for item in data['output']:
+                    item['_excd'] = excd
+                all_results.extend(data['output'])
+
+        if all_results:
+            return all_results
+
         self.logger.error("❌ 랭킹 조회 최종 실패 (등락률 & 거래량 모두 응답 없음)")
         return []
 
@@ -239,6 +252,8 @@ class KisApi:
         """
         [수정 완료] 분봉 데이터 연속 조회 (Pagination)
         - 해결: KEYB를 '현지 시간'으로 설정하여 120개 제한 돌파
+        - market 파라미터: "NAS"(나스닥), "AMS"(AMEX), "NYS"(NYSE), "NASD"(→NAS 자동변환)
+        - AMS 종목(BATL 등) 분봉 조회 시 반드시 market="AMS" 로 호출할 것
         """
         path = "/uapi/overseas-price/v1/quotations/inquire-time-itemchartprice"
         
@@ -560,10 +575,12 @@ class KisApi:
                     
         return pending_list
     
-    def get_recent_candles(self, ticker, limit=400):
+    def get_recent_candles(self, ticker, limit=400, exchange="NAS"):
         """
         [해외주식 분봉 조회] - 공식 문서 기반 수정 (TR_ID: HHDFS76950200)
         문서 출처: [해외주식] 기본시세.xlsx - 해외주식분봉조회.csv
+        - exchange: "NAS"(나스닥, 기본값), "AMS"(AMEX), "NYS"(NYSE)
+        - AMS 종목(BATL 등) 조회 시 exchange="AMS" 로 호출할 것
         """
         # URL 및 TR_ID 설정 (실전 투자 기준)
         path = "/uapi/overseas-price/v1/quotations/inquire-time-itemchartprice"
@@ -573,10 +590,10 @@ class KisApi:
         headers = self._get_header(tr_id)
 
         # [요청 파라미터 준비]
-        # EXCD(거래소)는 편의상 'NAS'(나스닥)으로 고정하나, 필요 시 인자로 받아야 함
+        lookup_excd = self._get_lookup_excd(exchange)
         params = {
             "AUTH": "",
-            "EXCD": "NAS",      # 나스닥(NAS), 뉴욕(NYS), 아멕스(AMS)
+            "EXCD": lookup_excd,   # [수정] 하드코딩 "NAS" → 동적 처리
             "SYMB": ticker,
             "NMIN": "1",        # 1분봉
             "PINC": "1",        # 전일 포함 ("1" 필수)
