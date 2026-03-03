@@ -458,7 +458,7 @@ def main():
                     # =========================================================
                     # [API 최적화] limit 400 -> 300 (속도 향상)
                     # =========================================================
-                    df = kis.get_minute_candles("NAS", sym, limit=300)
+                    df = kis.get_minute_candles("NAS", sym, limit=500)
 
                     if df.empty or len(df) < 26:
                         strategy._log_rejection(sym, f"데이터 부족 (Count: {len(df) if not df.empty else 0} < 26)")
