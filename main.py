@@ -371,7 +371,7 @@ def main():
             for ticker in list(portfolio.positions.keys()):
                 
                 # [수정] 단순 현재가 ❌ -> 분봉 데이터 ✅
-                df = kis.get_minute_candles("NAS", ticker, limit=60)
+                df = kis.get_minute_candles("NAS", ticker, limit=600)
 
                 if df.empty or len(df) < 1: 
                     continue
@@ -458,7 +458,7 @@ def main():
                     # =========================================================
                     # [API 최적화] limit 400 -> 300 (속도 향상)
                     # =========================================================
-                    df = kis.get_minute_candles("NAS", sym, limit=500)
+                    df = kis.get_minute_candles("NAS", sym, limit=600)
 
                     if df.empty or len(df) < 26:
                         strategy._log_rejection(sym, f"데이터 부족 (Count: {len(df) if not df.empty else 0} < 26)")
@@ -572,4 +572,5 @@ def main():
             time.sleep(10)
 
 if __name__ == "__main__":
+
     main()
