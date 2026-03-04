@@ -122,8 +122,10 @@ class EmaStrategy:
                 return None
             
         # Timezone 처리
+        # [FIX] get_minute_candles는 xymd/xhms(현지 ET 시간)을 반환하므로
+        # UTC가 아닌 America/New_York으로 직접 localize해야 한다.
         if df.index.tz is None:
-            df.index = df.index.tz_localize('UTC').tz_convert('America/New_York')
+            df.index = df.index.tz_localize('America/New_York')
         elif str(df.index.tz) != 'America/New_York':
             df.index = df.index.tz_convert('America/New_York')
 

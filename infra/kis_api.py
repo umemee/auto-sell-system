@@ -341,7 +341,7 @@ class KisApi:
         
         # 컬럼명 통일
         df = df.rename(columns={
-            'kymd': 'date', 'khms': 'time',
+            'xymd': 'date', 'xhms': 'time',   # [FIX] KST(kymd/khms) → 현지 ET(xymd/xhms)
             'open': 'open', 'high': 'high', 'low': 'low', 
             'last': 'close', 'vols': 'volume', 'evol': 'volume'
         })
