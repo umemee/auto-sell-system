@@ -154,8 +154,8 @@ def run_ema_debug():
 
         if isinstance(df_sim.index, pd.DatetimeIndex):
             if df_sim.index.tz is None:
-                df_sim.index = df_sim.index.tz_localize('UTC').tz_convert('America/New_York')
-                print(f"  Timezone: UTC → America/New_York 변환 완료")
+                df_sim.index = df_sim.index.tz_localize('America/New_York')
+                print(f"  Timezone: America/New_York으로 직접 localize 완료")
             elif str(df_sim.index.tz) != 'America/New_York':
                 df_sim.index = df_sim.index.tz_convert('America/New_York')
                 print(f"  Timezone: {{df.index.tz}} → America/New_York 변환 완료")
@@ -206,7 +206,7 @@ def run_ema_debug():
         df_c = df.copy()
         if isinstance(df_c.index, pd.DatetimeIndex):
             if df_c.index.tz is None:
-                df_c.index = df_c.index.tz_localize('UTC').tz_convert('America/New_York')
+                df_c.index = df_c.index.tz_localize('America/New_York')
         df_c['ema'] = df_c['close'].ewm(span=EMA_LENGTH, adjust=False).mean()
         results[label] = {
             'count': len(df_c),
