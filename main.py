@@ -371,7 +371,7 @@ def main():
             for ticker in list(portfolio.positions.keys()):
                 
                 # [수정] 단순 현재가 ❌ -> 분봉 데이터 ✅
-                df = kis.get_minute_candles("NAS", ticker, limit=600)
+                df = kis.get_minute_candles("NAS", ticker, limit=60)
 
                 if df.empty or len(df) < 1: 
                     continue
@@ -574,3 +574,4 @@ def main():
 if __name__ == "__main__":
 
     main()
+
