@@ -74,6 +74,11 @@ class KisApi:
         excd_map = {"NASD": "NAS", "NYSE": "NYS", "AMEX": "AMS"}
         return excd_map.get(exchange, exchange)
 
+    def _get_order_exch(self, exchange):
+        """조회 거래소 코드를 주문 거래소 코드로 변환 (NAS->NASD, AMS->AMS, NYS->NYSE)"""
+        order_exch_map = {"NAS": "NASD", "AMS": "AMS", "NYS": "NYSE"}
+        return order_exch_map.get(exchange, "NASD")
+
     # =================================================================
     # 🛠️ [핵심] 스마트 요청 처리기 (Smart Request Handler)
     # =================================================================
@@ -435,10 +440,12 @@ class KisApi:
         self.logger.error(f"❌ 최종 주문 실패 ({symbol}): {last_error_msg}")
         return None
 
-    def sell_market(self, symbol, qty, price_hint=None):
-        """시장가(현재가 -5% 지정가) 매도"""
-        # 현재가 조회 (여기서는 _fetch_with_retry 덕분에 내부적으로 3회 시도됨)
-        current_price = self.get_current_price(symbol, exchange="NAS")
+    def sell_market(self, symbol, qty, price_hint=None, exchange="NAS"):
+        """시장가(현재가 -5% 지정가) 매도
+        - exchange: "NAS"(기본값), "AMS"(AMEX), "NYS"(NYSE)
+        """
+        # [수정] exchange 파라미터를 받아 AMS/NYS 종목도 현재가 조회 가능하게 수정
+        current_price = self.get_current_price(symbol, exchange=exchange)
         
         final_price = 0.0
         if current_price and current_price > 0:
@@ -450,16 +457,19 @@ class KisApi:
             self.logger.error(f"🚨 [매도 불가] 가격 정보 없음")
             return None 
 
-        return self.place_order_final("NASD", symbol, "SELL", qty, final_price)
+        # [수정] exchange에 맞는 거래소 코드로 주문 전송
+        return self.place_order_final(self._get_order_exch(exchange), symbol, "SELL", qty, final_price)
 
-    def send_order(self, ticker, side, qty, price=None, order_type="MARKET"):
-        """[호환성 래퍼] RealOrderManager용"""
+    def send_order(self, ticker, side, qty, price=None, order_type="MARKET", exchange="NAS"):
+        """[호환성 래퍼] RealOrderManager용
+        - exchange: "NAS"(기본값), "AMS"(AMEX), "NYS"(NYSE)
+        """
         odno = None
         if side == "SELL":
             if order_type == "MARKET" or not price or price <= 0:
-                odno = self.sell_market(ticker, qty)
+                odno = self.sell_market(ticker, qty, exchange=exchange)
             else:
-                odno = self.place_order_final("NASD", ticker, "SELL", qty, price, ord_dvsn="00")
+                odno = self.place_order_final(self._get_order_exch(exchange), ticker, "SELL", qty, price, ord_dvsn="00")
         
         elif side == "BUY":
             # [수정] 매수 시 MARKET 옵션 처리 추가
@@ -477,16 +487,18 @@ class KisApi:
     # [신규 추가] 데이터 정합성 및 유동성 검증 (공식 문서 기반)
     # -------------------------------------------------------------
 
-    def get_daily_liquidity_status(self, symbol):
+    def get_daily_liquidity_status(self, symbol, exchange="NAS"):
         """
         [Ghost Stock Check]
         문서: [해외주식] 기본시세.xlsx - 해외주식 기간별시세
         TR_ID: HHDFS76240000
+        - exchange: "NAS"(기본값), "AMS"(AMEX), "NYS"(NYSE)
         """
         path = "/uapi/overseas-price/v1/quotations/dailyprice"
+        lookup_excd = self._get_lookup_excd(exchange)  # [수정] 동적 처리
         params = {
             "AUTH": "", 
-            "EXCD": "NAS", 
+            "EXCD": lookup_excd,  # [수정] 하드코딩 "NAS" → 동적 처리
             "SYMB": symbol,
             "GUBN": "0",  # 0: 일봉
             "BYMD": "",   # 공백 시 최근일 기준
@@ -513,15 +525,17 @@ class KisApi:
             }
         return None
 
-    def get_market_spread(self, symbol):
+    def get_market_spread(self, symbol, exchange="NAS"):
         """
         [Spread Check] 현재 매수/매도 호가 및 '잔량' 조회
-        TR_ID: HHDFS76200100 
+        TR_ID: HHDFS76200100
+        - exchange: "NAS"(기본값), "AMS"(AMEX), "NYS"(NYSE)
         """
         path = "/uapi/overseas-price/v1/quotations/inquire-asking-price"
+        lookup_excd = self._get_lookup_excd(exchange)  # [수정] 동적 처리
         params = {
             "AUTH": "", 
-            "EXCD": "NAS", 
+            "EXCD": lookup_excd,  # [수정] 하드코딩 "NAS" → 동적 처리
             "SYMB": symbol
         }
         
