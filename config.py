@@ -67,7 +67,7 @@ class Config:
     MAX_CHANGE_PCT = 300.0          # [추가] 150% 이상 폭등주는 위험하므로 제외
     
     # [실전 필터링 기준]
-    FILTER_MIN_PRICE = 0.5          # 최소 주가 $0.5 (동전주 제외)
+    FILTER_MIN_PRICE = 0.4          # 최소 주가 $0.5 (동전주 제외)
     FILTER_MAX_PRICE = 50.0         # 최대 주가 $50.0 (너무 비싼 주식 제외)
     # 💡 새벽 4시(프리마켓 초기)에는 거래량이 적으므로, 이 기준에 못 미쳐 종목이 안 잡힐 수 있습니다.
     FILTER_MIN_TX_VALUE = 50000   # 최소 거래대금 $50,000 (약 7천만원)
@@ -124,12 +124,13 @@ class Config:
     MAX_SLOTS = 2             # 2종목 동시 보유
 
     # [진입 설정]
-    EMA_LENGTH = 200           
+    EMA_LENGTH = 400           
     DIP_TOLERANCE = 0.005    # 눌림목 인정 오차 (0.5%)
     HOVER_TOLERANCE = 0.002  # 반등 인정 오차 (0.2%)
 
     # [청산 설정]
-    STOP_LOSS_PCT = 0.20      # -40% 손절
-    TARGET_PROFIT_PCT = 0.09  # +12% 목표 수익률 (TP)
+    STOP_LOSS_PCT = 0.12      # -40% 손절
+    TARGET_PROFIT_PCT = 0.07  # +12% 목표 수익률 (TP)
     TP_PCT = TARGET_PROFIT_PCT # (호환성 유지)
+
 
