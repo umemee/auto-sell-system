@@ -253,7 +253,7 @@ class KisApi:
             return self._safe_float(data['output'].get('last', 0))
         return None
 
-    def get_minute_candles(self, market, symbol, limit=400):
+    def get_minute_candles(self, market, symbol, limit=800):
         """
         [수정 완료] 분봉 데이터 연속 조회 (Pagination)
         - 해결: KEYB를 '현지 시간'으로 설정하여 120개 제한 돌파
@@ -589,7 +589,7 @@ class KisApi:
                     
         return pending_list
     
-    def get_recent_candles(self, ticker, limit=400, exchange="NAS"):
+    def get_recent_candles(self, ticker, limit=800, exchange="NAS"):
         """
         [해외주식 분봉 조회] - 공식 문서 기반 수정 (TR_ID: HHDFS76950200)
         문서 출처: [해외주식] 기본시세.xlsx - 해외주식분봉조회.csv
@@ -726,4 +726,5 @@ class KisApi:
             return res.json()
         except Exception as e:
             self.logger.error(f"주문 취소 실패: {e}")
+
             return None
