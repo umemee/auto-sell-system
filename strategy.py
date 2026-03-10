@@ -183,46 +183,70 @@ class EmaStrategy:
              return None
 
         # =========================================================
-        # 🔥 [Step 4.6] 과열 종목 방지 (Overheat Protection) - EMERGENCY ADD
+        # 🔥 [Step 4.6] 과열 종목 방지 (Overheat Protection)
+        # [SYNC FIX] 기준가를 "오늘 첫 5봉 중간값" → "전일 15:59 종가"로 변경
+        # 백테스팅 ema_strategy.py의 _get_prev_close()와 완전히 동일한 로직
         # =========================================================
-        # 당일 시가(Day Open) 찾기: 현재 날짜와 같은 날짜의 첫 봉
         try:
             today_date = df.index[-1].normalize()
-            today_candles = df[df.index >= today_date]
             
-            if len(today_candles) > 0:
-                # 🛑 [CRITICAL FIX] 04:00 정각의 유령 체결(Anomaly Print) 방지
-                # 첫 1분 캔들 하나에만 의존하지 않고, 장 시작 후 생성된 
-                # 처음 최대 5개 캔들의 '종가 중간값(Median)'을 기준가로 사용하여 스파이크를 제거합니다.
-                safe_open_candles = today_candles.head(5)
-                day_open = safe_open_candles['close'].median()
-                
-                if day_open > 0:
-                    daily_change_pct = (current_price - day_open) / day_open
-                    
-                    # 🛡️ 1. [Global Safety] "독이 든 성배" 필터
-                    # 시간 불문, 시가 대비 30% 이상 이미 폭등한 종목은 하방이 열려있어 위험
-                    if daily_change_pct > self.gap_limit_global:
-                         self._log_rejection(
-                            ticker, 
-                            f"🛡️ [GAP_GLOBAL] 상승폭 과다 ({daily_change_pct*100:.1f}% > {self.gap_limit_global*100:.0f}%)", 
-                            current_price
-                        )
-                         return None
+            # ✅ [핵심 수정] 전일 정규장 종가(15:59 이전 마지막 봉)를 기준가로 사용
+            # 이유: 오늘 첫 봉 기준 시 프리마켓 시초가가 기준이 되어 activation 조건이 달라짐
+            # 04:00~04:05의 유령 체결 방지는 "데이터 자체를 04:02 이후부터 사용"으로 대응
+            past_data = df[df.index < today_date]
+            
+            if not past_data.empty:
+                # 전일 04:00~15:59 사이의 데이터 중 마지막 봉 종가 사용
+                regular_session_past = past_data.between_time('04:00', '15:59')
+                if not regular_session_past.empty:
+                    ref_price = regular_session_past.iloc[-1]['close']
+                else:
+                    ref_price = past_data.iloc[-1]['close']
+            else:
+                # 전일 데이터 없는 경우: 오늘 첫 봉 사용 (폴백)
+                today_candles = df[df.index >= today_date]
+                ref_price = today_candles.iloc[0]['close'] if not today_candles.empty else 0
 
-                    # 🛡️ 2. [Late Morning Guard] "9시 이후 설거지 방지" 필터
-                    # 9시 이후에는 이미 10% 이상 오른 종목은 차익실현 매물 위험
-                    if current_time.hour >= self.late_hour_start and daily_change_pct > self.gap_limit_late:
-                         self._log_rejection(
-                            ticker, 
-                            f"🛡️ [GAP_LATE] 9시 이후 과열 ({daily_change_pct*100:.1f}% > {self.gap_limit_late*100:.0f}%)", 
+            if ref_price > 0:
+                # 오늘 데이터 중 현재 시간까지의 최고 종가 계산 (백테스트 방식과 동일)
+                today_candles = df[df.index >= today_date]
+                today_so_far = today_candles[today_candles.index <= df.index[-1]]
+                
+                if not today_so_far.empty:
+                    max_price_so_far = today_so_far['close'].max()
+                    max_change_ratio = (max_price_so_far - ref_price) / ref_price
+                    
+                    # 🛡️ 1. [Activation] 40% 이상 상승 이력 없으면 진입 금지
+                    if max_change_ratio < self.activation_threshold:
+                        self._log_rejection(
+                            ticker,
+                            f"🛡️ [ACTIVATION] 상승 이력 부족 ({max_change_ratio*100:.1f}% < {self.activation_threshold*100:.0f}%)",
                             current_price
                         )
-                         return None
-                        
+                        return None
+                    
+                    # 🛡️ 2. [Global Safety] "독이 든 성배" 필터 (전일 종가 기준 300% 이상)
+                    if max_change_ratio >= self.max_daily_change:
+                        self._log_rejection(
+                            ticker,
+                            f"🛡️ [GAP_GLOBAL] 과열 폭등 ({max_change_ratio*100:.1f}% >= {self.max_daily_change*100:.0f}%)",
+                            current_price
+                        )
+                        return None
+
+                    # 🛡️ 3. [Late Morning Guard] "9시 이후 설거지 방지" 필터
+                    # 9시 이후에는 이미 전일 종가 대비 10% 이상 오른 경우만 진입 (백테스트 동기화)
+                    daily_change_pct = (current_price - ref_price) / ref_price
+                    if current_time.hour >= self.late_hour_start and daily_change_pct > self.gap_limit_late:
+                        self._log_rejection(
+                            ticker,
+                            f"🛡️ [GAP_LATE] 9시 이후 과열 ({daily_change_pct*100:.1f}% > {self.gap_limit_late*100:.0f}%)",
+                            current_price
+                        )
+                        return None
+
         except Exception as e:
             self.logger.error(f"⚠️ [Check Entry] 과열 체크 중 오류: {e}")
-            # 데이터 오류 시에는 안전을 위해 패스하거나, 보수적으로 차단할 수 있음
 
         # =========================================================
         # 🔥 [Step 4.7] 최근 10봉 내 3% 급등(모멘텀) 이력 확인 (Backtest Sync)
