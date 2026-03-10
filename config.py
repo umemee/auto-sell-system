@@ -29,7 +29,7 @@ class Config:
     ENTRY_START_TIME = "04:10"  # 04:10 이전 진입 금지 (노이즈 회피)
     UPPER_BUFFER = 0.02         # 이평선 위 2% 이내까지만 눌림 인정 (천장 확인)
     ACTIVATION_THRESHOLD = 0.40 # 당일 40% 이상 상승 이력 필요
-    MAX_DAILY_CHANGE = 1.5     # 당일 150% 이상 폭등 시 진입 금지 (과열 필터)
+    MAX_DAILY_CHANGE = 3.0     # 당일 150% 이상 폭등 시 진입 금지 (과열 필터)
     
     # ✅ [NEW] 하이브리드 필터 설정 (수익 방어용)
     GAP_LIMIT_GLOBAL = 0.40    # [전역] 시가 대비 30% 이상 상승 시 진입 금지
@@ -132,5 +132,6 @@ class Config:
     STOP_LOSS_PCT = 0.12      # -40% 손절
     TARGET_PROFIT_PCT = 0.07  # +12% 목표 수익률 (TP)
     TP_PCT = TARGET_PROFIT_PCT # (호환성 유지)
+
 
 
