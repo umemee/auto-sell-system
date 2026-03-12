@@ -205,6 +205,11 @@ def main():
         logger.critical(f"❌ 초기화 실패: {e}")
         return
 
+    # =========================================================
+    # 🧠 [메모리 캐싱 엔진] 800봉 데이터 임시 저장소
+    # =========================================================
+    candle_cache = {}
+
     # ---------------------------------------------------------
     # [메인 루프] 무한 반복 (Final Optimized Version)
     # ---------------------------------------------------------
@@ -348,6 +353,7 @@ def main():
                 logger.info(f"📅 [New Day] {current_date_str} -> {new_date_str}")
                 portfolio.ban_list.clear()
                 active_candidates.clear()
+                candle_cache.clear() # 👈 [신규] 다음 날을 위해 캐시 비우기
                 save_state(portfolio.ban_list, active_candidates)
                 logger.info("✨ 데이터 초기화 완료")
                 current_date_str = new_date_str
@@ -483,12 +489,47 @@ def main():
 
                 try:
                     # =========================================================
-                    # [API 최적화] limit 400 -> 300 (속도 향상)
+                    # 🚀 [메가 패치] 메모리 캐싱 + 거래소 자동 탐색 엔진
                     # =========================================================
-                    df = kis.get_minute_candles("NAS", sym, limit=800)
+                    import pandas as pd
+                    df = None
+                    
+                    if sym not in candle_cache:
+                        # [CASE A: 처음 보는 종목] 800봉 전체 다운로드 및 거래소 탐색 (약 9초 소요)
+                        for exch in ["NAS", "NYS", "AMS"]:
+                            temp_df = kis.get_minute_candles(exch, sym, limit=800)
+                            if not temp_df.empty and len(temp_df) >= 26:
+                                df = temp_df
+                                # 성공한 거래소와 데이터를 메모리에 캐싱
+                                candle_cache[sym] = {'df': df, 'exch': exch}
+                                break
+                    else:
+                        # [CASE B: 아는 종목] 해당 거래소에서 최신 120봉만 초고속 다운로드 (약 0.6초)
+                        cached_data = candle_cache[sym]
+                        old_df = cached_data['df']
+                        exch = cached_data['exch']
+                        
+                        new_df = kis.get_minute_candles(exch, sym, limit=120)
+                        
+                        if not new_df.empty:
+                            # 파이썬 메모리에서 0.01초 만에 위아래로 병합
+                            combined_df = pd.concat([old_df, new_df])
+                            combined_df = combined_df.drop_duplicates(subset=['date', 'time'], keep='last')
+                            combined_df = combined_df.sort_values(['date', 'time']).reset_index(drop=True)
+                            
+                            # 최신 800개만 유지
+                            if len(combined_df) > 800:
+                                combined_df = combined_df.iloc[-800:].reset_index(drop=True)
+                                
+                            candle_cache[sym]['df'] = combined_df
+                            df = combined_df
+                        else:
+                            df = old_df # 통신 지연 시 기존 데이터 안전하게 재활용
 
-                    if df.empty or len(df) < 26:
-                        strategy._log_rejection(sym, f"데이터 부족 (Count: {len(df) if not df.empty else 0} < 26)")
+                    if df is None or df.empty or len(df) < 26:
+                        strategy._log_rejection(sym, "데이터 부족 (NAS/NYS/AMS 전체 탐색 실패)")
+                        # 탐색 실패 시 캐시가 꼬이는 것 방지
+                        candle_cache.pop(sym, None)
                         continue
 
                     # =========================================================
@@ -507,9 +548,10 @@ def main():
                                 logger.warning(f"🚌 [Missed Bus] {sym} 진입 신호 왔으나 자리 없음 -> 영구 제외")
                                 portfolio.ban_list.add(sym)      
                                 if sym in active_candidates:
-                                    del active_candidates[sym]   
+                                    del active_candidates[sym]
+                                candle_cache.pop(sym, None) # 👈 신규 추가
                                 save_state(portfolio.ban_list, active_candidates)
-                                continue 
+                                continue
                             
                             # [Double Check] 호가 확인
                             ask, bid, ask_vol, bid_vol = kis.get_market_spread(sym)
@@ -534,6 +576,7 @@ def main():
                                         bot.send_message(result['msg'])
                                     
                                     if result['status'] == 'success':
+                                        candle_cache.pop(sym, None) # 👈 신규 추가 (샀으면 더 이상 분봉 감시 안함)
                                         save_state(portfolio.ban_list, active_candidates)
                                         
                                         # 익절 주문 미리 넣기 (기존 로직 유지)
@@ -556,6 +599,7 @@ def main():
                                     else:
                                         logger.warning(f"🚌 [실패] {sym} 매수 실패. 금일 제외.")
                                         portfolio.ban_list.add(sym)
+                                        candle_cache.pop(sym, None) # 👈 신규 추가 (실패하면 더 이상 분봉 감시 안함)
                                         save_state(portfolio.ban_list, active_candidates)
 
                         # [CASE 2] 추세 붕괴 (DROP) - 👈 [신규] 좀비 종목 제거 로직
@@ -565,6 +609,7 @@ def main():
                                 del active_candidates[sym]
                             except KeyError:
                                 pass
+                            candle_cache.pop(sym, None) # 👈 신규 추가 (추세 붕괴하면 더 이상 분봉 감시 안함)
                             save_state(portfolio.ban_list, active_candidates)
 
                     # [Rate Limit] API 호출 간격 조절 (초당 2건 제한 준수)
