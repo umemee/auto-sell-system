@@ -62,7 +62,7 @@ class EmaStrategy:
         """[내부 함수] 거절 사유를 1분에 한 번만 기록"""
         now = time.time()
         last_log = self.log_throttle_map.get(ticker, 0)
-        if now - last_log > 60:
+        if now - last_log > 50:
             self.debug_logger.debug(f"📉 [REJECT] {ticker} | Price: ${price} | Reason: {reason}")
             self.log_throttle_map[ticker] = now
         
@@ -137,7 +137,17 @@ class EmaStrategy:
         # ✅ 진입 로직 시작
         # =========================================================
         current_time = datetime.datetime.now(pytz.timezone('America/New_York'))
-        current_price = df['close'].iloc[-1]
+        
+        # 🛡️ [해결책 1: 분봉 단위 1회 스냅샷 평가 강제 (Timing Sync)]
+        # 초 단위로 가격이 요동치는 현상(Mid-minute Noise)을 무시하고 백테스트와 시야를 100% 동기화하기 위해,
+        # 새로운 분봉이 수신되었을 때 '딱 한 번만' 멈춰서 스냅샷 평가를 진행합니다.
+        latest_candle_time = df.index[-1]
+        if self.processed_candles.get(ticker) == latest_candle_time:
+            return None
+        self.processed_candles[ticker] = latest_candle_time
+
+        # 백테스트와 동일하게 현재 미완성 캔들의 종가(Close) 대신 시가(Open)를 기준가로 고정합니다.
+        current_price = df['open'].iloc[-1]
 
         # 1. 중복 진입 방지
         last_processed_time = self.processed_candles.get(ticker)
@@ -267,7 +277,7 @@ class EmaStrategy:
         is_above_ema = (prev_close > prev_ema)       
 
         if is_supported and is_close_enough and is_above_ema:
-            self.processed_candles[ticker] = current_time
+            # self.processed_candles[ticker] = latest_candle_time (상단 스냅샷으로 이동 완료)
             
             self.logger.info(f"⚡ [BUY SIGNAL] {ticker} 조건 만족! (Data: {data_count} bars)")
             
@@ -293,16 +303,26 @@ class EmaStrategy:
         return None
 
     def check_exit(self, ticker, position, current_price, now_time):
-        """청산 로직 (익절/손절/타임컷)"""
+        """청산 로직 (트레일링 스탑/손절/타임컷)"""
         entry_price = position['entry_price']
+        
+        # 🚀 [최고점 갱신 로직] 딕셔너리에 실시간 최고가를 기록하여 유지
+        highest_price = position.get('highest_price', entry_price)
+        if current_price > highest_price:
+            highest_price = current_price
+            position['highest_price'] = highest_price
+            
         pnl_pct = (current_price - entry_price) / entry_price
+        max_pnl_pct = (highest_price - entry_price) / entry_price
         
-        # 1. 익절 (Take Profit)
-        if pnl_pct >= self.tp_pct:
-            return {'type': 'SELL', 'reason': 'TAKE_PROFIT'}
+        # 1. 🚀 트레일링 스탑 (+7% 도달 시 발동, 고점 대비 -2% 하락 시 청산)
+        if max_pnl_pct >= abs(self.tp_pct):
+            trailing_stop_price = highest_price * (1 - 0.02)
+            if current_price <= trailing_stop_price:
+                return {'type': 'SELL', 'reason': 'TRAILING_STOP'}
         
-        # 2. 손절 (Stop Loss)
-        if pnl_pct <= -self.sl_pct:
+        # 2. 고정 손절 (Stop Loss)
+        if pnl_pct <= -abs(self.sl_pct):
             return {'type': 'SELL', 'reason': 'STOP_LOSS'}
             
         # 3. 🔴 [추가] 타임 컷 (Time Cut)

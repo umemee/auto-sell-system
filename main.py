@@ -210,13 +210,40 @@ def main():
     # ---------------------------------------------------------
     while True:
         try:
-            # =========================================================
-            # 🕒 [Time Sync] 캔들 완성형 (00초~05초 진입)
-            # =========================================================
             # 미국 현지 시간 기준
             now = datetime.datetime.now(pytz.timezone('America/New_York'))
             current_minute_str = now.strftime("%H:%M")
-            
+
+            # =========================================================
+            # 🚀 [초고속 매도 전용 차선] 보유 종목 실시간 1초 감시 (트레일링 스탑용)
+            # =========================================================
+            # 신규 매수를 위한 분봉 완성 대기(55초 수면)와 무관하게, 보유 종목은 매 초마다 
+            # 가장 가벼운 현재가 API 1번만 호출하여 손절선을 터치하는 즉시 탈출합니다.
+            if portfolio.positions:
+                for ticker in list(portfolio.positions.keys()):
+                    real_time_price = kis.get_current_price(ticker, exchange="NAS")
+                    
+                    if real_time_price and real_time_price > 0:
+                        pos = portfolio.positions[ticker]
+                        exit_signal = strategy.check_exit(
+                            ticker=ticker, position=pos, 
+                            current_price=real_time_price, now_time=now
+                        )
+                        
+                        if exit_signal:
+                            reason = exit_signal['reason']
+                            if reason != 'TAKE_PROFIT': # 익절은 이미 지정가 주문 대기 중이므로 무시
+                                result = order_manager.execute_sell(portfolio, ticker, reason, price=real_time_price)
+                                if result:
+                                    bot.send_message(result['msg'])
+                                    save_state(portfolio.ban_list, active_candidates)
+                    
+                    # API 초당 2건 제한 준수 (종목당 0.5초 대기)
+                    time.sleep(0.5)
+
+            # =========================================================
+            # 🕒 [Time Sync] 캔들 완성형 (00초~05초 진입) - 신규 매수 전용
+            # =========================================================
             # [핵심 수정] 0초~5초 사이(매분 시작)에만 로직 실행 (캔들 마감 확인용)
             if now.second > 5:
                 # CPU 낭비 방지를 위해 적당히 쉽니다 (0.5초)
@@ -366,45 +393,45 @@ def main():
                 save_state(portfolio.ban_list, active_candidates)
 
             # ---------------------------------------------------------
-            # B. [매도] 보유 종목 관리 (Check Exit)
+            # B. [매도] 보유 종목 관리 (Check Exit)# (기존 B. 매도 관리 블록은 최상단 초고속 차선으로 이동되었으므로 이 자리는 완벽히 비워둡니다)
             # ---------------------------------------------------------
-            for ticker in list(portfolio.positions.keys()):
+            #for ticker in list(portfolio.positions.keys()):
                 
                 # [수정] 단순 현재가 ❌ -> 분봉 데이터 ✅
-                df = kis.get_minute_candles("NAS", ticker, limit=60)
+                #df = kis.get_minute_candles("NAS", ticker, limit=60)
 
-                if df.empty or len(df) < 1: 
-                    continue
+                #if df.empty or len(df) < 1: 
+                    #continue
                 
                 # [전략] 현재가(Tick)보다는 '방금 확정된 종가' 혹은 '현재 시가'를 기준으로 판단
-                real_time_price = df.iloc[-1]['close'] # 현재 진행중인 봉의 현재가
+                #real_time_price = df.iloc[-1]['close'] # 현재 진행중인 봉의 현재가
                 
-                pos = portfolio.positions[ticker]
-                entry_price = pos['entry_price']
-                entry_time = pos.get('entry_time')
+                #pos = portfolio.positions[ticker]
+                #entry_price = pos['entry_price']
+                #entry_time = pos.get('entry_time')
 
                 # 전략에 매도 문의
-                exit_signal = strategy.check_exit(
-                    ticker=ticker,
-                    position=pos,
-                    current_price=real_time_price, 
-                    now_time=datetime.datetime.now(pytz.timezone('US/Eastern'))
-                )
+                #exit_signal = strategy.check_exit(
+                    #ticker=ticker,
+                    #position=pos,
+                    #current_price=real_time_price, 
+                    #now_time=datetime.datetime.now(pytz.timezone('US/Eastern'))
+                #)
                 
-                if exit_signal:
-                    reason = exit_signal['reason']
+                #if exit_signal:
+                    #reason = exit_signal['reason']
                     
                     # 🛑 [핵심 수정] 익절(TAKE_PROFIT)은 이미 진입 시점에 지정가 주문을 걸어두었으므로 무시
-                    if reason == 'TAKE_PROFIT':
-                        continue
+                    #if reason == 'TAKE_PROFIT':
+                        #continue
                         
                     # 🚨 손절(STOP_LOSS) 또는 타임컷(TIME_CUT)일 때만 비상 탈출
                     # real_order_manager가 기존 익절 대기 주문을 알아서 취소하고 95% 시장가로 던짐
                     # [중요] price=real_time_price 필수 (0원이면 주문 거부됨)
-                    result = order_manager.execute_sell(portfolio, ticker, reason, price=real_time_price)
-                    if result:
-                        bot.send_message(result['msg'])
-                        save_state(portfolio.ban_list, active_candidates)
+                    #result = order_manager.execute_sell(portfolio, ticker, reason, price=real_time_price)
+                    #if result:
+                        #bot.send_message(result['msg'])
+                        #save_state(portfolio.ban_list, active_candidates)
             
             # ---------------------------------------------------------
             # C. [스캔] 신규 급등주 포착
