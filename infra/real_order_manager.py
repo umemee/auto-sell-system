@@ -149,21 +149,21 @@ class RealOrderManager:
         order_price = price
 
         # [조건별 주문 유형 설정]
-        if "TAKE_PROFIT" in reason:
-            # 익절은 지정가 유지 (단, 급격한 변동 시 시장가로 바꿀 수도 있음)
-            # 여기서는 전략에 따라 받은 가격 그대로 사용
+        if reason == "TAKE_PROFIT":
+            # 익절 대기는 전략이 지정한 가격 그대로
             order_type = "00" 
-        else:
-            # 🚨 비상 상황 (손절 -40%, 타임컷 240분, 장마감 EOD)
-            # 무조건 팔려야 하므로 '시장가(Market)'로 던집니다.
-            order_price = 0 
-            order_type = "00" # 해외주식 API에서 시장가는 보통 가격 0 혹은 별도 코드 사용
-                              # (사용하시는 API 버전에 따라 '00'에 가격0이면 시장가 인지 확인 필요)
-                              # 안전하게는 현재가보다 훨씬 낮은 가격(하한가)으로 지정가 주문하면 시장가처럼 체결됨.
-            
-            # [Tip] 급등주 손절 팁: 현재가보다 3~5% 낮게 던지면 즉시 체결됨 (Slippage 감수)
+        elif reason == "TRAILING_STOP":
+            # 🚀 트레일링 스탑: 수익 보존이 목적이므로 너무 후려치지 않고 -1% 하단으로 시장가 체결 유도
+            order_type = "00"
             if price > 0:
-                order_price = price * 0.95 
+                order_price = price * 0.99
+        else:
+            # 🚨 비상 상황 (STOP_LOSS, TIME_CUT, EOD)
+            # 무조건 팔려야 하므로 현재가 대비 -5% 하한가로 강하게 집어 던짐
+            order_price = 0 
+            order_type = "00" 
+            if price > 0:
+                order_price = price * 0.95
 
         # 주문 전송
         self.logger.info(f"📉 [{reason}] 매도 시도: {ticker} (가격: {order_price}, 수량: {qty})")
