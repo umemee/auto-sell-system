@@ -303,23 +303,15 @@ class EmaStrategy:
         return None
 
     def check_exit(self, ticker, position, current_price, now_time):
-        """청산 로직 (트레일링 스탑/손절/타임컷)"""
+        """청산 로직 (고정 익절/손절/타임컷)"""
         entry_price = position['entry_price']
-        
-        # 🚀 [최고점 갱신 로직] 딕셔너리에 실시간 최고가를 기록하여 유지
-        highest_price = position.get('highest_price', entry_price)
-        if current_price > highest_price:
-            highest_price = current_price
-            position['highest_price'] = highest_price
             
         pnl_pct = (current_price - entry_price) / entry_price
-        max_pnl_pct = (highest_price - entry_price) / entry_price
         
-        # 1. 🚀 트레일링 스탑 (+7% 도달 시 발동, 고점 대비 -2% 하락 시 청산)
-        if max_pnl_pct >= abs(self.tp_pct):
-            trailing_stop_price = highest_price * (1 - 0.02)
-            if current_price <= trailing_stop_price:
-                return {'type': 'SELL', 'reason': 'TRAILING_STOP'}
+        # 1. 🎯 고정 익절 (Fixed Take Profit)
+        # 현재 수익률(pnl_pct)이 설정된 목표 수익률(tp_pct) 이상이면 즉시 매도
+        if pnl_pct >= abs(self.tp_pct):
+            return {'type': 'SELL', 'reason': 'TAKE_PROFIT'}
         
         # 2. 고정 손절 (Stop Loss)
         if pnl_pct <= -abs(self.sl_pct):
