@@ -246,11 +246,21 @@ class EmaStrategy:
 
                     # 🛡️ 3. [Late Morning Guard] "9시 이후 설거지 방지" 필터
                     # 9시 이후에는 이미 전일 종가 대비 10% 이상 오른 경우만 진입 (백테스트 동기화)
-                    daily_change_pct = (current_price - ref_price) / ref_price
-                    if current_time.hour >= self.late_hour_start and daily_change_pct > self.gap_limit_late:
+                    #daily_change_pct = (current_price - ref_price) / ref_price
+                    #if current_time.hour >= self.late_hour_start and daily_change_pct > self.gap_limit_late:
+                    #    self._log_rejection(
+                    #        ticker,
+                    #        f"🛡️ [GAP_LATE] 9시 이후 과열 ({daily_change_pct*100:.1f}% > {self.gap_limit_late*100:.0f}%)",
+                    #        current_price
+                    #    )
+                    #    return None
+                    
+                    # 🛡️ 3. [Late Morning Guard] "9시 이후 설거지 방지" 필터 (기존 방식으로 롤백)
+                    # 🚀 [ROLLBACK] 현재가가 아니라 '당일 중 한번이라도 10%를 넘긴 이력(max_change_ratio)'이 있다면 진입 영구 차단
+                    if current_time.hour >= self.late_hour_start and max_change_ratio > self.gap_limit_late:
                         self._log_rejection(
                             ticker,
-                            f"🛡️ [GAP_LATE] 9시 이후 과열 ({daily_change_pct*100:.1f}% > {self.gap_limit_late*100:.0f}%)",
+                            f"🛡️ [GAP_LATE] 9시 이후 과열 (당일최고점 {max_change_ratio*100:.1f}% > {self.gap_limit_late*100:.0f}%)",
                             current_price
                         )
                         return None
