@@ -113,7 +113,7 @@ class Config:
     ENABLE_DETAILED_LOGGING = True    
     LOG_PRICE_CHECKS = True           
     LOG_BALANCE_CHECKS = True         
-    HEARTBEAT_INTERVAL_SEC = 1800     # 30분마다 생존 신고
+    HEARTBEAT_INTERVAL_SEC = 5400     # 30분마다 생존 신고
 
     # ==========================================
     # ⚙️ [전략 파라미터] (Double Engine)
