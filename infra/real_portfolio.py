@@ -104,6 +104,7 @@ class RealPortfolio:
                             'current_price': current_price,
                             'eval_value': eval_amt,
                             'pnl_pct': pnl_pct,
+                            'entry_price': entry_price, # 👈 [핵심 추가] 실제 증권사 평단가로 덮어쓰기!
                             'entry_time': cached_entry_time # ✨ [추가] API 동기화 시 시간 정보 보존
                         })
                         
