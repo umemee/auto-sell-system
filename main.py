@@ -576,26 +576,46 @@ def main():
                                         bot.send_message(result['msg'])
                                     
                                     if result['status'] == 'success':
-                                        candle_cache.pop(sym, None) # 👈 신규 추가 (샀으면 더 이상 분봉 감시 안함)
+                                        candle_cache.pop(sym, None)
                                         save_state(portfolio.ban_list, active_candidates)
                                         
-                                        # 익절 주문 미리 넣기 (기존 로직 유지)
+                                        # ==========================================
+                                        # 💡 [핵심 수정] 실제 체결가 확인 후 익절 주문
+                                        # ==========================================
+                                        import time # 위쪽에 import time이 없다면 추가
+                                        
+                                        # 1. 증권사 서버에 체결 내역이 반영될 때까지 1.5초 대기
+                                        time.sleep(1.5) 
+                                        
+                                        # 2. 잔고를 동기화하여 '진짜 체결 평단가'를 가져옴
+                                        portfolio.sync_with_kis() 
+                                        
                                         try:
-                                            buy_price = result.get('avg_price', signal['price'])
+                                            # 3. 동기화된 포트폴리오에서 실제 평단가 추출
+                                            actual_pos = portfolio.get_position(sym)
+                                            if actual_pos and actual_pos.get('entry_price', 0) > 0:
+                                                buy_price = actual_pos['entry_price']
+                                            else:
+                                                # 혹시 동기화가 지연되면 기존 방식 사용 (백업)
+                                                buy_price = result.get('avg_price', signal['price']) 
+                                            
                                             if buy_price > 0:
-                                                target_price = buy_price * (1.0 + getattr(Config, 'TARGET_PROFIT_PCT', 0.10))
+                                                # 4. '진짜 평단가' 기반으로 7% 익절가 계산
+                                                target_profit_pct = getattr(Config, 'TARGET_PROFIT_PCT', 0.07)
+                                                target_price = buy_price * (1.0 + target_profit_pct)
                                                 target_price = round(target_price, 2)
+                                                
                                                 qty = result.get('qty', 0)
                                                 
                                                 if qty > 0:
-                                                    logger.info(f"⚡ [Pre-Order] {sym} 익절 주문 전송: ${target_price}")
+                                                    logger.info(f"⚡ [Pre-Order] {sym} 실제 평단가(${buy_price}) 기반 익절 주문 전송: ${target_price}")
                                                     kis.send_order(sym, "SELL", qty, target_price, "00")
-                                                    bot.send_message(f"🔒 [잠금] 익절 주문 완료 (${target_price})")
+                                                    bot.send_message(f"🔒 [잠금] {sym} 익절 주문 완료 (평단가: ${buy_price:.3f} -> 목표가: ${target_price})")
                                         except Exception as e:
                                             logger.error(f"❌ 익절 주문 중 에러: {e}")
 
                                         if not portfolio.has_open_slot():
-                                            break 
+                                            break
                                     else:
                                         logger.warning(f"🚌 [실패] {sym} 매수 실패. 금일 제외.")
                                         portfolio.ban_list.add(sym)
