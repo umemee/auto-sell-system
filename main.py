@@ -497,7 +497,7 @@ def main():
                     if sym not in candle_cache:
                         # [CASE A: 처음 보는 종목] 800봉 전체 다운로드 및 거래소 탐색 (약 9초 소요)
                         for exch in ["NAS", "NYS", "AMS"]:
-                            temp_df = kis.get_minute_candles(exch, sym, limit=1500)
+                            temp_df = kis.get_minute_candles(exch, sym, limit=1200)
                             if not temp_df.empty and len(temp_df) >= 26:
                                 df = temp_df
                                 # 성공한 거래소와 데이터를 메모리에 캐싱
@@ -517,9 +517,9 @@ def main():
                             combined_df = combined_df.drop_duplicates(subset=['date', 'time'], keep='last')
                             combined_df = combined_df.sort_values(['date', 'time']).reset_index(drop=True)
                             
-                            # 최신 1500개만 유지
-                            if len(combined_df) > 1500:
-                                combined_df = combined_df.iloc[-1500:].reset_index(drop=True)
+                            # 최신 1200개만 유지
+                            if len(combined_df) > 1200:
+                                combined_df = combined_df.iloc[-1200:].reset_index(drop=True)
                                 
                             candle_cache[sym]['df'] = combined_df
                             df = combined_df
