@@ -129,8 +129,8 @@ class Config:
     HOVER_TOLERANCE = 0.002  # 반등 인정 오차 (0.2%)
 
     # [청산 설정]
-    STOP_LOSS_PCT = 0.09      # -40% 손절
-    TARGET_PROFIT_PCT = 0.075  # +12% 목표 수익률 (TP)
+    STOP_LOSS_PCT = 0.095      # -40% 손절
+    TARGET_PROFIT_PCT = 0.07  # +12% 목표 수익률 (TP)
     TP_PCT = TARGET_PROFIT_PCT # (호환성 유지)
 
 
