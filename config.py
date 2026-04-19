@@ -124,7 +124,7 @@ class Config:
     MAX_SLOTS = 2             # 2종목 동시 보유
 
     # [진입 설정]
-    EMA_LENGTH = 400           
+    EMA_LENGTH = 200           
     DIP_TOLERANCE = 0.005    # 눌림목 인정 오차 (0.5%)
     HOVER_TOLERANCE = 0.002  # 반등 인정 오차 (0.2%)
 
