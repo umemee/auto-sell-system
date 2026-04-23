@@ -559,35 +559,56 @@ class KisApi:
         문서: [해외주식] 미체결내역.csv (TR_ID: TTTS3018R)
         """
         path = "/uapi/overseas-stock/v1/trading/inquire-nccs"
-        params = {
-            "CANO": Config.CANO,
-            "ACNT_PRDT_CD": Config.ACNT_PRDT_CD,
-            "OVRS_EXCG_CD": "NASD",
-            "SORT_SQN": "DS", # 내림차순
-            "CTX_AREA_FK200": "",
-            "CTX_AREA_NK200": ""
-        }
-        
-        # 미체결 내역 조회
-        data = self._fetch_with_retry(path, params, "TTTS3018R", timeout=3)
-        
-        pending_list = []
-        if data and data.get('output'):
+        pending_map = {}
+
+        for exchange in ["NASD", "NYSE", "AMS"]:
+            params = {
+                "CANO": Config.CANO,
+                "ACNT_PRDT_CD": Config.ACNT_PRDT_CD,
+                "OVRS_EXCG_CD": exchange,
+                "SORT_SQN": "DS", # 내림차순
+                "CTX_AREA_FK200": "",
+                "CTX_AREA_NK200": ""
+            }
+
+            # 미체결 내역 조회
+            data = self._fetch_with_retry(path, params, "TTTS3018R", timeout=3)
+            if not data or not data.get('output'):
+                continue
+
             for item in data['output']:
                 item_sym = item.get('pdno')
-                
+
+                try:
+                    pending_qty = int(item.get('nccs_qty', 0))
+                except (TypeError, ValueError):
+                    pending_qty = 0
+
                 # '매도' 주문이면서 '미체결 수량'이 남아있는 경우만 필터링
-                if item.get('sll_buy_dvsn_cd_name') == '매도' and int(item.get('nccs_qty', 0)) > 0:
-                    if symbol and symbol != item_sym:
-                        continue
-                    pending_list.append({
-                        "odno": item.get('odno'),
-                        "symbol": item_sym,
-                        "qty": int(item.get('nccs_qty')),
-                        "price": float(item.get('ft_ord_unpr3', 0))
-                    })
-                    
-        return pending_list
+                if item.get('sll_buy_dvsn_cd_name') != '매도' or pending_qty <= 0:
+                    continue
+
+                if symbol and symbol != item_sym:
+                    continue
+
+                odno = item.get('odno')
+                if not odno:
+                    continue
+
+                try:
+                    order_price = float(item.get('ft_ord_unpr3', 0) or 0)
+                except (TypeError, ValueError):
+                    order_price = 0.0
+
+                pending_map[odno] = {
+                    "odno": odno,
+                    "symbol": item_sym,
+                    "qty": pending_qty,
+                    "price": order_price,
+                    "ovrs_excg_cd": item.get('ovrs_excg_cd') or exchange
+                }
+
+        return list(pending_map.values())
     
     def get_recent_candles(self, ticker, limit=800, exchange="NAS"):
         """
