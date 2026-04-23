@@ -166,6 +166,30 @@ class RealPortfolio:
         """특정 종목 포지션 정보 반환"""
         return self.positions.get(ticker)
 
+    def close_position(self, ticker):
+        """
+        [Live Sell Cleanup]
+        브로커 측 매도 주문 성공 직후 로컬 포지션 상태만 정리한다.
+        현금 반영은 이후 KIS 동기화가 맡고, 여기서는 중복 매도/재매수 방지용 상태만 맞춘다.
+        """
+        removed = ticker in self.positions
+
+        if removed:
+            del self.positions[ticker]
+            self.logger.info(f"📕 [Local Close] Removed sold position: {ticker}")
+        else:
+            self.logger.info(f"📕 [Local Close] Position already absent: {ticker}")
+
+        self.ban_list.add(ticker)
+
+        current_val = sum(
+            p['qty'] * p.get('current_price', p.get('entry_price', 0.0))
+            for p in self.positions.values()
+        )
+        self.total_equity = self.balance + current_val
+
+        return removed
+
     def get_max_order_amount(self):
         """
         [Double Engine 자금 관리 - Fixed for Market Order]

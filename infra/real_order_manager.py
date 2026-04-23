@@ -11,12 +11,15 @@ class RealOrderManager:
     - 호가 잔량(Volume) 정보를 함께 기록하여 원인 분석 강화
     - Bid가 0일 경우(매수세 실종) 0으로 나누기 에러 방지
     """
+    APBK2623_CANCEL_GUARD_SECONDS = 60
+
     def __init__(self, kis_api):
         self.kis = kis_api
         self.logger = get_logger("OrderManager")
         
         # 🛡️ [로그 폭탄 방지] 종목별 마지막 로그 시간 기록부
         self.log_throttle_map = {} 
+        self.apbk2623_cancel_guard = {}
 
     def execute_buy(self, portfolio, signal):
         """
@@ -193,10 +196,32 @@ class RealOrderManager:
         [수정됨] 미체결 내역의 '거래소 코드'까지 파악하여 취소 (AMEX/NYSE 대응)
         """
         try:
+            guard = self.apbk2623_cancel_guard.get(ticker)
+            now = time.time()
+
+            if guard:
+                if now < guard['until']:
+                    last_skip_log = guard.get('last_skip_log', 0)
+                    if now - last_skip_log >= 15:
+                        remaining = max(1, int(guard['until'] - now))
+                        self.logger.warning(
+                            f"⏸️ [{ticker}] APBK2623 취소 보호 활성화 "
+                            f"({remaining}초 남음 | OID: {guard['order_id']} | {guard['exchange']}) "
+                            f"-> 반복 취소 재시도 생략"
+                        )
+                        guard['last_skip_log'] = now
+                    return
+
+                self.logger.info(
+                    f"🔁 [{ticker}] APBK2623 취소 보호 만료 -> 미체결 취소 재확인 재개"
+                )
+                self.apbk2623_cancel_guard.pop(ticker, None)
+
             # 1. 미체결 조회
             pending_list = self.kis.get_pending_orders(ticker)
             
             if not pending_list:
+                self.apbk2623_cancel_guard.pop(ticker, None)
                 return
 
             self.logger.info(f"🧹 [{ticker}] 미체결 {len(pending_list)}건 발견 -> 취소 시도")
@@ -211,7 +236,22 @@ class RealOrderManager:
                 res = self.kis.cancel_order(ticker, oid, qty=0, exchange=excd)
                 
                 if res and res.get('rt_cd') == '0':
+                    self.apbk2623_cancel_guard.pop(ticker, None)
                     self.logger.info(f"   ㄴ 취소 성공 (OID: {oid} | {excd})")
+                elif res and res.get('msg_cd') == 'APBK2623':
+                    armed_at = time.time()
+                    self.apbk2623_cancel_guard[ticker] = {
+                        'order_id': oid,
+                        'exchange': excd,
+                        'until': armed_at + self.APBK2623_CANCEL_GUARD_SECONDS,
+                        'last_skip_log': armed_at
+                    }
+                    self.logger.warning(
+                        f"⏸️ [{ticker}] APBK2623 감지 "
+                        f"(OID: {oid} | {excd}) -> "
+                        f"{self.APBK2623_CANCEL_GUARD_SECONDS}초 동안 반복 취소 재시도 차단: {res}"
+                    )
+                    break
                 else:
                     self.logger.error(f"   ㄴ 취소 실패 (OID: {oid}): {res}")
             
