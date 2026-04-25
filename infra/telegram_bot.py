@@ -4,6 +4,7 @@ import time
 import threading
 import json
 from datetime import datetime
+from pathlib import Path
 from config import Config
 from infra.utils import get_logger
 
@@ -51,6 +52,36 @@ class TelegramBot:
             requests.get(url, params=params, timeout=15)
         except Exception as e:
             logger.error(f"Telegram Send Error: {e}")
+
+    def send_document(self, file_path, caption=None):
+        """??? ???????????????????"""
+        if not self.token or not self.chat_id:
+            logger.warning("Telegram document send skipped: missing bot token/chat_id")
+            return False
+
+        target = Path(file_path)
+        if not target.exists():
+            logger.error(f"Telegram document send failed: file not found -> {target}")
+            return False
+
+        try:
+            url = f"{self.base_url}/sendDocument"
+            payload = {"chat_id": self.chat_id}
+            if caption:
+                payload["caption"] = caption
+
+            with target.open("rb") as fp:
+                res = requests.post(url, data=payload, files={"document": fp}, timeout=60)
+
+            if res.ok:
+                logger.info(f"Telegram document sent: {target.name}")
+                return True
+
+            logger.error(f"Telegram document send failed: status={res.status_code} file={target.name}")
+            return False
+        except Exception as e:
+            logger.error(f"Telegram document send error: {e}")
+            return False
 
     def _polling_loop(self):
         """텔레그램 서버에서 메시지 수신 (Long Polling)"""
