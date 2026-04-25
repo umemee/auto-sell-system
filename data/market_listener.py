@@ -30,6 +30,7 @@ class MarketListener:
         # ✅ [NEW] 중복 알림 방지용 메모리
         self.notified_stocks = set()
         self.last_scan_date = None
+        self.detected_candidate_meta = {}
 
     def scan_markets(self, ban_list=None, active_candidates=None):
         """
@@ -44,6 +45,7 @@ class MarketListener:
         today_str = datetime.datetime.now().strftime('%Y-%m-%d')
         if self.last_scan_date != today_str:
             self.notified_stocks.clear()
+            self.detected_candidate_meta.clear()
             self.last_scan_date = today_str
 
         detected_stocks = []
@@ -121,6 +123,12 @@ class MarketListener:
                 # ✅ 최종 선정 (All Pass)
                 # =========================================================
                 if rate >= THRESHOLD:
+                    self.detected_candidate_meta[sym] = {
+                        'exchange': item.get('_excd', ''),
+                        'name': name,
+                        'rate': rate,
+                        'detected_at': datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                    }
                     # ✅ [FIX] 오늘 이미 알림을 보낸 종목은 콘솔 로그 출력 생략
                     if sym not in active_candidates and sym not in self.notified_stocks:
                         self.logger.info(
@@ -136,3 +144,7 @@ class MarketListener:
             self.logger.debug(f"Scanner Loop Warning: {e}")
 
         return list(set(detected_stocks))
+
+    def get_candidate_exchange(self, ticker):
+        meta = self.detected_candidate_meta.get(ticker, {})
+        return meta.get("exchange")
