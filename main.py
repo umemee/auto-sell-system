@@ -13,6 +13,7 @@ from infra.kis_auth import KisAuth
 from infra.telegram_bot import TelegramBot
 from infra.real_portfolio import RealPortfolio
 from infra.real_order_manager import RealOrderManager
+from infra.live_candle_exporter import LiveCandleExporter
 from data.market_listener import MarketListener
 from strategy import get_strategy
 
@@ -147,6 +148,7 @@ def main():
         kis = KisApi(token_manager)
         bot = TelegramBot()
         listener = MarketListener(kis)
+        candle_exporter = LiveCandleExporter(kis, bot, base_dir=os.getcwd())
         
         # 2. 포트폴리오 및 주문 관리자
         portfolio = RealPortfolio(kis)
@@ -168,6 +170,9 @@ def main():
              active_candidates = {sym: datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S") for sym in loaded_candidates}
         else:
              active_candidates = loaded_candidates
+
+        for sym in active_candidates:
+            candle_exporter.register_candidate(sym)
         
         logger.info(f"💾 [Memory] 복구 완료 | 🚫Ban: {len(portfolio.ban_list)}개, 👁️Watch: {len(active_candidates)}개")
         
@@ -191,6 +196,28 @@ def main():
                 'loss_limit': getattr(Config, 'MAX_DAILY_LOSS_PCT', 0.0)
             }
         bot.set_status_provider(get_status_data)
+
+        def run_live_candle_export(export_date=None, reason="manual"):
+            try:
+                result = candle_exporter.export_zip_and_send(export_date)
+                manifest_rows = result.get("manifest_rows", [])
+                saved_count = sum(1 for row in manifest_rows if row.get("status") == "saved")
+                zip_path = result.get("zip_path", "")
+                telegram_sent = result.get("telegram_sent", False)
+
+                if zip_path:
+                    delivery = "Telegram sent" if telegram_sent else "Local only"
+                    logger.info(f"?? [Live Export] {reason} | files={saved_count} | zip={zip_path} | {delivery}")
+                    bot.send_message(
+                        f"?? [Live Candle Export]\nReason: {reason}\nFiles: {saved_count}\nZip: {zip_path}\nDelivery: {delivery}"
+                    )
+                else:
+                    logger.warning(f"?? [Live Export] {reason} | no files exported")
+
+                return result
+            except Exception as export_error:
+                logger.error(f"? [Live Export] {reason} failed: {export_error}")
+                return {"date": export_date or current_date_str, "files": [], "zip_path": "", "telegram_sent": False, "manifest_rows": []}
         
         # 텔레그램 봇 스레드 실행
         def run_bot_thread():
@@ -308,6 +335,7 @@ def main():
                 
                 # 상태 저장 후 루프 종료 (다음 날 재실행 필요)
                 save_state(portfolio.ban_list, active_candidates)
+                run_live_candle_export(current_date_str, reason="eod")
                 logger.info("👋 [System] 장 마감으로 시스템을 종료합니다.")
                 
                 eod_processed = True # 오늘 처리가 끝났음을 표시
@@ -354,6 +382,7 @@ def main():
                 portfolio.ban_list.clear()
                 active_candidates.clear()
                 candle_cache.clear() # 👈 [신규] 다음 날을 위해 캐시 비우기
+                candle_exporter.reset_session()
                 save_state(portfolio.ban_list, active_candidates)
                 logger.info("✨ 데이터 초기화 완료")
                 current_date_str = new_date_str
@@ -449,6 +478,7 @@ def main():
             
             if fresh_targets:
                 for sym in fresh_targets:
+                    candle_exporter.register_candidate(sym, exchange=listener.get_candidate_exchange(sym))
                     if sym not in active_candidates:
                         # 현재 시간을 문자열로 저장 (JSON 저장 호환성 위함)
                         active_candidates[sym] = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -493,6 +523,7 @@ def main():
                     # =========================================================
                     import pandas as pd
                     df = None
+                    selected_exchange = None
                     
                     if sym not in candle_cache:
                         # [CASE A: 처음 보는 종목] 800봉 전체 다운로드 및 거래소 탐색 (약 9초 소요)
@@ -500,6 +531,7 @@ def main():
                             temp_df = kis.get_minute_candles(exch, sym, limit=1200)
                             if not temp_df.empty and len(temp_df) >= 26:
                                 df = temp_df
+                                selected_exchange = exch
                                 # 성공한 거래소와 데이터를 메모리에 캐싱
                                 candle_cache[sym] = {'df': df, 'exch': exch}
                                 break
@@ -508,6 +540,7 @@ def main():
                         cached_data = candle_cache[sym]
                         old_df = cached_data['df']
                         exch = cached_data['exch']
+                        selected_exchange = exch
                         
                         new_df = kis.get_minute_candles(exch, sym, limit=120)
                         
@@ -531,6 +564,8 @@ def main():
                         # 탐색 실패 시 캐시가 꼬이는 것 방지
                         candle_cache.pop(sym, None)
                         continue
+
+                    candle_exporter.update_runtime_candles(sym, df, exchange=selected_exchange)
 
                     # =========================================================
                     # 🧠 [Strategy] 전략 엔진 호출
@@ -655,6 +690,7 @@ def main():
             logger.info("🛑 관리자에 의한 수동 종료")
             bot.send_message("🛑 시스템을 종료합니다.")
             save_state(portfolio.ban_list, active_candidates)
+            run_live_candle_export(current_date_str, reason="manual_shutdown")
             break
             
         except Exception as e:
