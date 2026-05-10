@@ -133,5 +133,10 @@ class Config:
     TARGET_PROFIT_PCT = 0.07  # +12% 목표 수익률 (TP)
     TP_PCT = TARGET_PROFIT_PCT # (호환성 유지)
 
-
+# ==========================================
+    # 🛡️ [안전장치] Upper Wick Filter (윗꼬리 필터)
+    # ==========================================
+    UPPER_WICK_FILTER_ENABLED = True
+    UPPER_WICK_FILTER_THRESHOLD_PCT = 17.708333333333176
+    UPPER_WICK_FILTER_USE_CLOSED_CANDLE_ONLY = True
 

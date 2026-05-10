@@ -5,6 +5,8 @@ import pytz
 import logging
 import time
 import os
+import csv
+from pathlib import Path
 from config import Config
 from infra.utils import get_logger
 
@@ -54,9 +56,54 @@ class EmaStrategy:
         self.gap_limit_global = getattr(Config, 'GAP_LIMIT_GLOBAL', 0.30)
         self.gap_limit_late = getattr(Config, 'GAP_LIMIT_LATE', 0.10)
         self.late_hour_start = getattr(Config, 'LATE_HOUR_START', 9)
+
+        # 🛡️ [NEW] Upper Wick Filter 설정 로드
+        self.upper_wick_filter_enabled = getattr(Config, 'UPPER_WICK_FILTER_ENABLED', False)
+        self.upper_wick_filter_threshold_pct = getattr(Config, 'UPPER_WICK_FILTER_THRESHOLD_PCT', 17.708)
+        self.upper_wick_filter_use_closed_candle_only = getattr(Config, 'UPPER_WICK_FILTER_USE_CLOSED_CANDLE_ONLY', True)
+        
+        # 윗꼬리 필터 전용 로그 폴더 생성
+        self.upper_wick_skip_log_dir = Path(os.getcwd()) / "logs" / "live"
+        self.upper_wick_skip_log_dir.mkdir(parents=True, exist_ok=True)
+
         # 상태 관리
         self.processed_candles = {}
         self.log_throttle_map = {} # 스로틀링 맵
+    
+    @staticmethod
+    def calculate_upper_wick_pct(open_price, high_price, low_price, close_price):
+        """윗꼬리 비율을 계산하는 함수"""
+        candle_range = float(high_price) - float(low_price)
+        if candle_range <= 0:
+            return 0.0
+        upper_wick = float(high_price) - max(float(open_price), float(close_price))
+        if upper_wick <= 0:
+            return 0.0
+        return float(upper_wick / candle_range * 100.0)
+
+    def _write_upper_wick_skip_log(self, decision_time, ticker, candle_time, candle_open, candle_high, candle_low, candle_close, upper_wick_pct, threshold_pct, action, reason):
+        """윗꼬리 탈락 기록을 CSV 파일에 저장하는 함수"""
+        log_date = decision_time.strftime("%Y%m%d")
+        output_path = self.upper_wick_skip_log_dir / f"upper_wick_filter_skips_{log_date}.csv"
+        file_exists = output_path.exists()
+        
+        fieldnames = ["date", "ticker", "decision_time_kst", "candle_time", "candle_open", "candle_high", "candle_low", "candle_close", "upper_wick_pct", "threshold_pct", "action", "reason", "strategy", "filter_name", "candle_role"]
+        
+        row = {
+            "date": log_date, "ticker": ticker, "decision_time_kst": str(decision_time), "candle_time": str(candle_time),
+            "candle_open": round(float(candle_open), 6), "candle_high": round(float(candle_high), 6), "candle_low": round(float(candle_low), 6), "candle_close": round(float(candle_close), 6),
+            "upper_wick_pct": round(float(upper_wick_pct), 6), "threshold_pct": round(float(threshold_pct), 6),
+            "action": action, "reason": reason, "strategy": "200EMA_baseline", "filter_name": "entry_candle_upper_wick_pct_high", "candle_role": "previous_closed_candle"
+        }
+        
+        try:
+            with output_path.open("a", newline="", encoding="utf-8-sig") as f:
+                writer = csv.DictWriter(f, fieldnames=fieldnames)
+                if not file_exists:
+                    writer.writeheader()
+                writer.writerow(row)
+        except Exception as e:
+            self.logger.error(f"윗꼬리 로그 기록 중 오류: {e}")
 
     def _log_rejection(self, ticker, reason, price=0):
         """[내부 함수] 거절 사유를 1분에 한 번만 기록"""
@@ -177,10 +224,38 @@ class EmaStrategy:
         # 3. 지표 계산 (EMA)
         df['ema'] = df['close'].ewm(span=self.ma_length, adjust=False).mean()
 
-        # 4. 데이터 격리 (T-1 시점 기준)
-        prev_close = df['close'].iloc[-2]
+        # 4. 데이터 격리 (T-1 시점 기준: 직전 완성 캔들)
+        prev_open = df['open'].iloc[-2]
+        prev_high = df['high'].iloc[-2]
         prev_low = df['low'].iloc[-2]
+        prev_close = df['close'].iloc[-2]
         prev_ema = df['ema'].iloc[-2]
+        
+        # =========================================================
+        # 🛡️ [Step 4.1] Upper Wick Filter (윗꼬리 검사소)
+        # =========================================================
+        if self.upper_wick_filter_enabled:
+            upper_wick_pct = self.calculate_upper_wick_pct(
+                prev_open, prev_high, prev_low, prev_close
+            )
+            
+            if upper_wick_pct >= self.upper_wick_filter_threshold_pct:
+                candle_time = df.index[-2]
+                self._write_upper_wick_skip_log(
+                    decision_time=current_time,
+                    ticker=ticker,
+                    candle_time=candle_time,
+                    candle_open=prev_open,
+                    candle_high=prev_high,
+                    candle_low=prev_low,
+                    candle_close=prev_close,
+                    upper_wick_pct=upper_wick_pct,
+                    threshold_pct=self.upper_wick_filter_threshold_pct,
+                    action="SKIP",
+                    reason="SKIP_UPPER_WICK_FILTER"
+                )
+                self._log_rejection(ticker, f"🚫 [UPPER_WICK] 윗꼬리 과다 차단 ({upper_wick_pct:.2f}% >= {self.upper_wick_filter_threshold_pct:.2f}%)", current_price)
+                return None
         
         # =========================================================
         # 🛑 [Step 4.5] 추격 매수 방지 (Anti-Chasing Logic)
