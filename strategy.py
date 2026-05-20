@@ -212,7 +212,12 @@ class EmaStrategy:
         # (2) 진입 마감 시간 체크
         if current_time.hour >= self.entry_end_hour:
             self._log_rejection(ticker, f"시간 초과 ({current_time.strftime('%H:%M')} >= {self.entry_end_hour}:00)", current_price)
-            return None 
+            return None
+
+        # 🛑 [추가] 5시 ~ 10시 프리마켓 및 장 초반 특정 구간 매매 정지 (05:00:00 ~ 09:59:59)
+        if 5 <= current_time.hour < 10:
+            self._log_rejection(ticker, f"🚫 5~10시 가동 중지 구간 ({current_time.strftime('%H:%M')})", current_price)
+            return None
 
         # 🛡️ [New Rule] 장 시작 후 5분간 진입 금지 (Market Open Filter)
         # 미국 시간 09:30 ~ 09:35 (한국 23:30 ~ 23:35) 노이즈 및 API 오류 회피
@@ -222,7 +227,27 @@ class EmaStrategy:
              return None
 
         # 3. 지표 계산 (EMA)
-        df['ema'] = df['close'].ewm(span=self.ma_length, adjust=False).mean()
+        # ✅ [수정] 백테스트 강령과 100% 일치하는 미국 시간대별 동적 이평선 실전 필터 이식
+        use_dynamic_ema = getattr(Config, 'USE_DYNAMIC_EMA', False)
+        hour = current_time.hour
+        
+        if use_dynamic_ema:
+            if hour == 4:
+                current_ma_length = 400
+            elif 5 <= hour < 9:
+                current_ma_length = 100
+            elif hour == 9:
+                current_ma_length = 50
+            elif 10 <= hour < 12:
+                current_ma_length = 200
+            elif 12 <= hour < 14:
+                current_ma_length = 50
+            else:
+                current_ma_length = self.ma_length
+            
+            df['ema'] = df['close'].ewm(span=current_ma_length, adjust=False).mean()
+        else:
+            df['ema'] = df['close'].ewm(span=self.ma_length, adjust=False).mean()
 
         # 4. 데이터 격리 (T-1 시점 기준: 직전 완성 캔들)
         prev_open = df['open'].iloc[-2]
