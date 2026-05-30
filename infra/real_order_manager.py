@@ -21,6 +21,52 @@ class RealOrderManager:
         self.log_throttle_map = {} 
         self.apbk2623_cancel_guard = {}
 
+    def _log_signal_spread(self, ticker, signal_price, ask, bid, ask_vol, bid_vol):
+        """
+        [Data Enhancement] 시그널 발생 찰나의 호가창 스냅샷을 CSV로 기록
+        """
+        import csv
+        import pytz
+        from pathlib import Path
+        import datetime
+        
+        try:
+            # 로그 저장 폴더 생성 (logs/spread_analysis)
+            log_dir = Path("logs/spread_analysis")
+            log_dir.mkdir(parents=True, exist_ok=True)
+            
+            # 날짜별로 파일 분리 (미국 시간 기준)
+            now_et = datetime.datetime.now(pytz.timezone('US/Eastern'))
+            date_str = now_et.strftime("%Y%m%d")
+            file_path = log_dir / f"signal_spreads_{date_str}.csv"
+            
+            file_exists = file_path.exists()
+            
+            # 스프레드 퍼센트 계산
+            spread_pct = ((ask - bid) / bid * 100) if bid > 0 else 0
+            
+            # 기록할 데이터 한 줄 조립
+            row = {
+                "timestamp_et": now_et.strftime("%Y-%m-%d %H:%M:%S"),
+                "ticker": ticker,
+                "signal_price": round(signal_price, 4) if signal_price else 0,
+                "ask_price": ask,
+                "bid_price": bid,
+                "ask_vol": ask_vol,
+                "bid_vol": bid_vol,
+                "spread_pct": round(spread_pct, 3)
+            }
+            
+            # CSV 파일에 한 줄 이어쓰기 (Append)
+            with open(file_path, 'a', newline='', encoding='utf-8') as f:
+                writer = csv.DictWriter(f, fieldnames=row.keys())
+                if not file_exists:
+                    writer.writeheader()
+                writer.writerow(row)
+                
+        except Exception as e:
+            self.logger.error(f"⚠️ 스프레드 데이터 수집 실패: {e}")
+
     def execute_buy(self, portfolio, signal):
         """
         [매수 집행] 시장가 진입 + 스프레드 방어 로직
@@ -35,6 +81,9 @@ class RealOrderManager:
             # API를 통해 4가지 데이터 모두 수신
             ask, bid, ask_vol, bid_vol = self.kis.get_market_spread(ticker)
             
+            # 💡 [Data Enhancement] 시그널 발생 찰나의 호가창 스냅샷 영구 기록
+            self._log_signal_spread(ticker, price, ask, bid, ask_vol, bid_vol)
+
             # [방어] 매수 호가(Bid)가 0이면(살 사람이 아예 없으면) 계산 불가 -> 즉시 포기
             if bid <= 0:
                 # 호가가 없더라도, 전략이 넘겨준 '현재가(price)'가 있다면 그걸 믿고 진행
