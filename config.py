@@ -25,7 +25,7 @@ class Config:
     # ==========================================
     # [1] 진입 제한 (Entry Limit)
     USE_DYNAMIC_EMA = True      # ✅ [추가] 시간대별 동적 이평선 스위칭 전략 활성화
-    ENTRY_DEADLINE_HOUR_ET = 11 # ✅ [수정] 동적 이평선 가동 스케줄(~13:59)에 맞춰 마감 시간을 9에서 14로 연장합니다.
+    ENTRY_DEADLINE_HOUR_ET = 10 # ✅ [수정] 동적 이평선 가동 스케줄(~13:59)에 맞춰 마감 시간을 9에서 14로 연장합니다.
     ENTRY_START_TIME = "04:10"  # 04:10 이전 진입 금지 (노이즈 회피)
     UPPER_BUFFER = 0.02         # 이평선 위 2% 이내까지만 눌림 인정 (천장 확인)
     ACTIVATION_THRESHOLD = 0.40 # 당일 40% 이상 상승 이력 필요
