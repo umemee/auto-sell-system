@@ -215,7 +215,7 @@ class EmaStrategy:
             return None
 
         # 🛑 [추가] 5시 ~ 10시 프리마켓 및 장 초반 특정 구간 매매 정지 (05:00:00 ~ 09:59:59)
-        if 4 <= current_time.hour < 8:
+        if 4 <= current_time.hour < 9:
             self._log_rejection(ticker, f"🚫 5~10시 가동 중지 구간 ({current_time.strftime('%H:%M')})", current_price)
             return None
 
