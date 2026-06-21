@@ -134,7 +134,7 @@ def main():
     logger.info(f"⚙️ [Config] 활동 시간: NY {ACTIVE_START_HOUR}:00 ~ {ACTIVE_END_HOUR}:00")
 
     last_heartbeat_time = time.time()
-    HEARTBEAT_INTERVAL = getattr(Config, 'HEARTBEAT_INTERVAL_SEC', 1800)
+    HEARTBEAT_INTERVAL = getattr(Config, 'HEARTBEAT_INTERVAL_SEC', 18000)
     was_sleeping = False
     
     # [수정] 중복 실행 방지를 위한 변수 추가
