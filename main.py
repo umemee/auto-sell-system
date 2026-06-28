@@ -276,6 +276,15 @@ def main():
             # =========================================================
             # 🕒 [Time Sync] 캔들 완성형 (00초~05초 진입) - 신규 매수 전용
             # =========================================================
+            # 🛡️ [AWS 스케줄러 연동 비상 브레이크] 한국 시간 17시 ~ 새벽 5시 외에는 가동 중지
+            current_kst = datetime.datetime.now(pytz.timezone('Asia/Seoul'))
+            if not (current_kst.hour >= 17 or current_kst.hour < 5):
+                if not was_sleeping:
+                    logger.warning(f"💤 [AWS 정시 대기] 현재 한국 시간 {current_kst.strftime('%H:%M')}. 17시 정각까지 대기 루프 가동.")
+                    was_sleeping = True
+                time.sleep(10)
+                continue
+
             # [핵심 수정] 0초~5초 사이(매분 시작)에만 로직 실행 (캔들 마감 확인용)
             if now.second > 5:
                 # CPU 낭비 방지를 위해 적당히 쉽니다 (0.5초)
