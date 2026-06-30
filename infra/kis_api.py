@@ -198,7 +198,7 @@ class KisApi:
         path = "/uapi/overseas-stock/v1/ranking/updown-rate"
         all_results = []
 
-        for excd in ["NAS", "AMS", "NYS"]:
+        for excd in ["NAS"]:
             params = {
                 "AUTH": "", "EXCD": excd, "GUBN": "1",
                 "NDAY": "0", "VOL_RANG": "0", "KEYB": ""
@@ -222,7 +222,7 @@ class KisApi:
         path = "/uapi/overseas-stock/v1/ranking/trade-vol"
         all_results = []
 
-        for excd in ["NAS", "AMS", "NYS"]:
+        for excd in ["NAS"]:
             params = {
                 "AUTH": "", "EXCD": excd, "GUBN": "0", "VOL_RANG": "0", "KEYB": ""
             }
