@@ -325,7 +325,7 @@ def main():
             # ---------------------------------------------------------
             # 🛑 [EOD] 장 마감 강제 청산 (안전장치 강화판)
             # ---------------------------------------------------------
-            cutoff_time_str = getattr(Config, 'TIME_HARD_CUTOFF', "15:55")
+            cutoff_time_str = getattr(Config, 'TIME_HARD_CUTOFF', "15:54")
             cutoff_h, cutoff_m = map(int, cutoff_time_str.split(':'))
             
             # 현재 시각이 설정된 컷오프 시간 '이후'인지 확인 (== 대신 >= 사용)
