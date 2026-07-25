@@ -383,18 +383,33 @@ def main():
                 last_heartbeat_time = time.time()
 
             # =========================================================
-            # 📅 [Daily Reset] 날짜 변경 체크
+            # 📅 [Daily Reset] 날짜 변경 체크 (Sleep Mode 체크 전으로 이동)
             # =========================================================
             new_date_str = now.strftime("%Y-%m-%d")
             if new_date_str != current_date_str:
-                logger.info(f"📅 [New Day] {current_date_str} -> {new_date_str}")
+                logger.info(f"📅 [New Day] 날짜 변경 감지: {current_date_str} -> {new_date_str}")
                 portfolio.ban_list.clear()
                 active_candidates.clear()
-                candle_cache.clear() # 👈 [신규] 다음 날을 위해 캐시 비우기
+                candle_cache.clear()
                 candle_exporter.reset_session()
                 save_state(portfolio.ban_list, active_candidates)
-                logger.info("✨ 데이터 초기화 완료")
+                logger.info("✨ [Reset] 금일 감시 종목 및 밴 리스트 초기화 완료 (0개 시작)")
                 current_date_str = new_date_str
+
+            # =========================================================
+            # 💤 [Sleep Mode] 활동 시간 체크
+            # =========================================================
+            is_active, reason = is_active_market_time()
+            
+            if not is_active:
+                if not was_sleeping:
+                    logger.warning(f"💤 Sleep Mode: {reason}")
+                    bot.send_message(f"💤 [대기] {reason}")
+                    was_sleeping = True
+                    save_state(portfolio.ban_list, active_candidates)
+                
+                time.sleep(30)
+                continue
 
             # =========================================================
             # 🧠 [Logic] 매매 로직 시작 (매 분 1회 실행)
