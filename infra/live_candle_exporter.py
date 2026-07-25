@@ -193,6 +193,8 @@ class LiveCandleExporter:
         }
 
     def _get_export_dataframe(self, ticker):
+        import time  # 👈 추가
+        
         runtime_entry = self.runtime_candle_cache.get(ticker, {})
         runtime_df = runtime_entry.get("df")
         runtime_exchange = runtime_entry.get("exchange") or self.registered_candidates.get(ticker, {}).get("exchange")
@@ -208,6 +210,7 @@ class LiveCandleExporter:
         refetch_exchange = None
         for exchange in exchange_candidates:
             try:
+                time.sleep(0.2)  # 👈 [핀셋 추가] KIS API 초당 제한 방지용 0.2초 대기
                 df = self.kis.get_minute_candles(exchange, ticker, limit=1200)
             except Exception as e:
                 self.logger.warning(f"[Live Export] Fetch failed {ticker} {exchange}: {e}")
