@@ -113,7 +113,7 @@ class Config:
     ENABLE_DETAILED_LOGGING = True    
     LOG_PRICE_CHECKS = True           
     LOG_BALANCE_CHECKS = True         
-    HEARTBEAT_INTERVAL_SEC = 7100     # 30분마다 생존 신고
+    HEARTBEAT_INTERVAL_SEC = 41000     # 11시간마다 생존 신고
 
     # ==========================================
     # ⚙️ [전략 파라미터] (Double Engine)
@@ -129,8 +129,8 @@ class Config:
     HOVER_TOLERANCE = 0.002  # 반등 인정 오차 (0.2%)
 
     # [청산 설정]
-    STOP_LOSS_PCT = 0.095      # -40% 손절
-    TARGET_PROFIT_PCT = 0.07  # +12% 목표 수익률 (TP)
+    STOP_LOSS_PCT = 0.095      # -9.5% 손절
+    TARGET_PROFIT_PCT = 0.07  # +7% 목표 수익률 (TP)
     TP_PCT = TARGET_PROFIT_PCT # (호환성 유지)
 
 # ==========================================
