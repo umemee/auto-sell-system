@@ -372,12 +372,13 @@ class KisApi:
     def buy_market(self, symbol, current_price, qty):
         """
         [신규] 시장가 매수 (사실상 시장가)
-        - 급등주 00초 진입 시 주문 거부를 막기 위해 '현재가 + 5%' 지정가로 주문합니다.
+        - 급등주 00초 진입 시 주문 거부를 막기 위해 '현재가 + 2%' 지정가로 주문합니다.
         - 이는 가장 확실하게 즉시 체결시키는 방법입니다.
         """
-        # 현재가보다 5% 비싸게 주문 -> 매도 호가 전량을 긁으며 즉시 체결됨
-        agressive_price = current_price * 1.05 
+        # 현재가보다 2% 비싸게 주문 -> 매도 호가 전량을 긁으며 즉시 체결됨
+        agressive_price = current_price * 1.02 
         return self.place_order_final("NASD", symbol, "BUY", qty, agressive_price, ord_dvsn="00")
+        
 
     @log_api_call("주문 전송")
     def place_order_final(self, exchange, symbol, side, qty, price, ord_dvsn="00"):
@@ -441,7 +442,7 @@ class KisApi:
         return None
 
     def sell_market(self, symbol, qty, price_hint=None, exchange="NAS"):
-        """시장가(현재가 -5% 지정가) 매도
+        """시장가(현재가 -3% 지정가) 매도
         - exchange: "NAS"(기본값), "AMS"(AMEX), "NYS"(NYSE)
         """
         # [수정] exchange 파라미터를 받아 AMS/NYS 종목도 현재가 조회 가능하게 수정
@@ -449,10 +450,10 @@ class KisApi:
         
         final_price = 0.0
         if current_price and current_price > 0:
-            final_price = current_price * 0.95 
+            final_price = current_price * 0.97 
         elif price_hint and price_hint > 0:
-            self.logger.warning(f"⚠️ 시세 조회 실패 -> 장부가(${price_hint}) 기준 -5% 주문")
-            final_price = price_hint * 0.95
+            self.logger.warning(f"⚠️ 시세 조회 실패 -> 장부가(${price_hint}) 기준 -3% 주문")
+            final_price = price_hint * 0.97
         else:
             self.logger.error(f"🚨 [매도 불가] 가격 정보 없음")
             return None 
