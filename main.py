@@ -218,7 +218,29 @@ def main():
             except Exception as export_error:
                 logger.error(f"? [Live Export] {reason} failed: {export_error}")
                 return {"date": export_date or current_date_str, "files": [], "zip_path": "", "telegram_sent": False, "manifest_rows": []}
-        
+        # [신규 추가] 호가 스냅샷(Ask/Bid/Vol) CSV 파일 텔레그램 자동 전송 함수
+        def send_spread_analysis_log(export_date=None):
+            try:
+                date_target = export_date or current_date_str
+                date_clean = date_target.replace("-", "")
+                
+                # real_order_manager.py가 생성하는 호가 스냅샷 파일 경로
+                spread_file = Path(f"logs/spread_analysis/signal_spreads_{date_clean}.csv")
+                
+                if spread_file.exists():
+                    sent = bot.send_document(
+                        str(spread_file), 
+                        caption=f"📊 [Spread Analysis] {date_target} 호가 스냅샷 로그 (Ask/Bid/Volume)"
+                    )
+                    if sent:
+                        logger.info(f"📤 [Spread Log] 텔레그램 전송 성공: {spread_file.name}")
+                    else:
+                        logger.warning(f"⚠️ [Spread Log] 텔레그램 전송 실패: {spread_file.name}")
+                else:
+                    logger.info(f"ℹ️ [Spread Log] {date_target} 당일 생성된 호가 스냅샷 파일이 없습니다.")
+            except Exception as e:
+                logger.error(f"❌ [Spread Log] 텔레그램 전송 중 에러: {e}")
+                
         # 텔레그램 봇 스레드 실행
         def run_bot_thread():
             bot.start()
@@ -345,6 +367,7 @@ def main():
                 # 상태 저장 후 루프 종료 (다음 날 재실행 필요)
                 save_state(portfolio.ban_list, active_candidates)
                 run_live_candle_export(current_date_str, reason="eod")
+                send_spread_analysis_log(current_date_str)
                 logger.info("👋 [System] 장 마감으로 시스템을 종료합니다.")
                 
                 eod_processed = True # 오늘 처리가 끝났음을 표시
@@ -715,6 +738,7 @@ def main():
             bot.send_message("🛑 시스템을 종료합니다.")
             save_state(portfolio.ban_list, active_candidates)
             run_live_candle_export(current_date_str, reason="manual_shutdown")
+            send_spread_analysis_log(current_date_str)
             break
             
         except Exception as e:
