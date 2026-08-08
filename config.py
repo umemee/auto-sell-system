@@ -131,7 +131,7 @@ class Config:
     # [청산 설정]
     TIME_HARD_CUTOFF = "15:45"
     STOP_LOSS_PCT = 0.095      # -9.5% 손절
-    TARGET_PROFIT_PCT = 0.07  # +7% 목표 수익률 (TP)
+    TARGET_PROFIT_PCT = 0.065  # +6.5% 목표 수익률 (TP)
     TP_PCT = TARGET_PROFIT_PCT # (호환성 유지)
 
 # ==========================================
