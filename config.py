@@ -27,7 +27,13 @@ class Config:
     
     # 3. 손절 종목 재진입 차단 활성화
     BLOCK_PREVIOUS_LOSS_TICKERS = True
-
+    # 💡 2026-06~08 실전 매매 기록 기반 추출된 29개 손절 종목 초기 리스트
+    INITIAL_LOSS_TICKERS = [
+        'AQB', 'BEEM', 'BGMS', 'BNRG', 'CAPR', 'CGTL', 'CIIT', 'CRE', 
+        'CYCU', 'DSY', 'DXST', 'FCUV', 'HIHO', 'ILLR', 'JLHL', 'KUST', 
+        'LNAI', 'LRHC', 'MASK', 'MGRX', 'NCRA', 'NIVF', 'RUBI', 'STKH', 
+        'SVRE', 'TDTH', 'UPC', 'VIVS', 'YXT'
+    ]
     # ==========================================
     # ⚙️ [전략 파라미터 고도화] (v6.0 Update)
     # ==========================================
