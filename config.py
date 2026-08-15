@@ -10,34 +10,38 @@ class Config:
     # ==========================================
     # 🕒 [시간 설정] (중요!)
     # ==========================================
-    # 서버가 한국 시간이든 미국 시간이든 상관없이, 
-    # 아래 설정은 무조건 '미국 현지 시간(EST/EDT)' 기준입니다.
-    
-    # [활동 시간 설정]
-    # 4  = 프리마켓 시작 (한국 시간 18:00 겨울 / 17:00 여름)
-    # 9  = 정규장 시작 1시간 전
-    # 16 = 정규장 종료 (한국 시간 06:00 겨울 / 05:00 여름)
     ACTIVE_START_HOUR = 4  
     ACTIVE_END_HOUR = 16   
     
     # ==========================================
+    # 🛡️ [3중 리스크 차단 필터] (PRD-202608-TRADING-01)
+    # ==========================================
+    USE_RISK_FILTER = True
+    # 1. 시간대 필터 (미국 현지시간 ET 기준 09:15 ~ 09:30 / KST 22:15 ~ 22:30)
+    RISK_TIME_BLOCK_START_ET = "09:15"
+    RISK_TIME_BLOCK_END_ET = "09:30"
+    
+    # 2. 주가대 필터 ($5.00 <= price < $10.00)
+    RISK_PRICE_BAND_MIN = 5.0
+    RISK_PRICE_BAND_MAX = 10.0
+    
+    # 3. 손절 종목 재진입 차단 활성화
+    BLOCK_PREVIOUS_LOSS_TICKERS = True
+
+    # ==========================================
     # ⚙️ [전략 파라미터 고도화] (v6.0 Update)
     # ==========================================
-    # [1] 진입 제한 (Entry Limit)
-    USE_DYNAMIC_EMA = True      # ✅ [추가] 시간대별 동적 이평선 스위칭 전략 활성화
-    ENTRY_DEADLINE_HOUR_ET = 10 # ✅ [수정] 동적 이평선 가동 스케줄(~13:59)에 맞춰 마감 시간을 9에서 14로 연장합니다.
-    ENTRY_START_TIME = "04:10"  # 04:10 이전 진입 금지 (노이즈 회피)
-    UPPER_BUFFER = 0.02         # 이평선 위 2% 이내까지만 눌림 인정 (천장 확인)
-    ACTIVATION_THRESHOLD = 0.40 # 당일 40% 이상 상승 이력 필요
-    MAX_DAILY_CHANGE = 5.0     # 당일 150% 이상 폭등 시 진입 금지 (과열 필터)
+    USE_DYNAMIC_EMA = True      
+    ENTRY_DEADLINE_HOUR_ET = 10 
+    ENTRY_START_TIME = "04:10"  
+    UPPER_BUFFER = 0.02         
+    ACTIVATION_THRESHOLD = 0.40 
+    MAX_DAILY_CHANGE = 5.0     
     
-    # ✅ [NEW] 하이브리드 필터 설정 (수익 방어용)
-    GAP_LIMIT_GLOBAL = 0.40    # [전역] 시가 대비 30% 이상 상승 시 진입 금지
-    GAP_LIMIT_LATE = 0.10      # [오전] 9시 이후에는 10% 이상 상승 시 진입 금지
-    LATE_HOUR_START = 9        # [기준] 늦은 오전 기준 시간 (09:00 ET)
+    GAP_LIMIT_GLOBAL = 0.40    
+    GAP_LIMIT_LATE = 0.10      
+    LATE_HOUR_START = 9        
    
-    # [2] 타임 컷 (Time Cut)
-    # 진입 후 00분 무제한
     MAX_HOLDING_MINUTES = 0
 
     # ==========================================
@@ -63,81 +67,53 @@ class Config:
     # ==========================================
     # 🔍 [스캐닝 설정]
     # ==========================================
-    MIN_CHANGE_PCT = 42.0           # 급등주 필터 (42% 이상)
-    MAX_CHANGE_PCT = 500.0          # [추가] 150% 이상 폭등주는 위험하므로 제외
+    MIN_CHANGE_PCT = 42.0           
+    MAX_CHANGE_PCT = 500.0          
     
-    # [실전 필터링 기준]
-    FILTER_MIN_PRICE = 0.4          # 최소 주가 $0.5 (동전주 제외)
-    FILTER_MAX_PRICE = 50.0         # 최대 주가 $50.0 (너무 비싼 주식 제외)
-    # 💡 새벽 4시(프리마켓 초기)에는 거래량이 적으므로, 이 기준에 못 미쳐 종목이 안 잡힐 수 있습니다.
-    FILTER_MIN_TX_VALUE = 50000   # 최소 거래대금 $50,000 (약 7천만원)
+    FILTER_MIN_PRICE = 0.4          
+    FILTER_MAX_PRICE = 50.0         
+    FILTER_MIN_TX_VALUE = 50000   
     
-    # [SPAC 및 악성 종목 필터링 키워드 DB]
-    # ASPC 등 "ACQUISITION"이 들어간 종목을 원천 차단합니다.
     BLACKLIST_KEYWORDS = [
-        # 1. SPAC (기업인수목적회사) 관련 강력 키워드
         'SPAC', 'ACQUISITION', 'ACQ', 'MERGER', 'BLANK CHECK', 
         'CAPITAL CORP', 'INVESTMENT CORP',
-        
-        # 2. 파생상품 및 채권
-        'WARRANT', 'WAR', 'WS',        # 워런트
-        'UNIT', 'UN', 'U',             # 유닛 (보통주+워런트)
-        'RIGHTS', 'RT',                # 신주인수권
-        'NOTE', 'DEBENTURE', 'PFD',    # 채권/우선주
-        'FUND', 'TRUST', 'ETF', 'ETN',  # 펀드류
-
-        # 3. [긴급 추가] 한글 키워드 (API 응답 대응)
-        '스팩',          # 가장 중요 (ASPC 방어)
-        '기업인수목적',   # SPAC의 정식 명칭
-        '애퀴지션',       # Acquisition의 한글 발음
-        '머저',          # Merger의 한글 발음
-        '캐피탈',        # Capital
-        '워런트',        # Warrant (파생상품)
-        '유닛',          # Unit (스팩+워런트)
-        '권리',          # Rights (신주인수권 등)
-        '펀드',          # Fund
-        '트러스트'       # Trust
+        'WARRANT', 'WAR', 'WS', 'UNIT', 'UN', 'U', 'RIGHTS', 'RT',                
+        'NOTE', 'DEBENTURE', 'PFD', 'FUND', 'TRUST', 'ETF', 'ETN',
+        '스팩', '기업인수목적', '애퀴지션', '머저', '캐피탈',        
+        '워런트', '유닛', '권리', '펀드', '트러스트'       
     ]
 
     # === [리스크 관리] ===
-    MAX_DAILY_LOSS_PCT = 6.0          # 일일 허용 손실 (-6%)
-    MARKET_SELL_BUFFER_PCT = 0.95     # 시장가 매도 버퍼
+    MAX_DAILY_LOSS_PCT = 6.0          
+    MARKET_SELL_BUFFER_PCT = 0.95     
     
-    # === [안전장치 설정] ===
     PRICE_RECHECK_ENABLED = True      
     MAX_PRICE_DEVIATION_PCT = 2.0     
     BALANCE_RECHECK_ENABLED = True    
     TOKEN_AUTO_REFRESH = True         
     
-    # === [모니터링 설정] ===
     ENABLE_DETAILED_LOGGING = True    
     LOG_PRICE_CHECKS = True           
     LOG_BALANCE_CHECKS = True         
-    HEARTBEAT_INTERVAL_SEC = 41000     # 11시간마다 생존 신고
+    HEARTBEAT_INTERVAL_SEC = 41000     
 
     # ==========================================
     # ⚙️ [전략 파라미터] (Double Engine)
     # ==========================================
     ACTIVE_STRATEGY = "EMA_ZONE1"
-    
-    # [자금 관리]
-    MAX_SLOTS = 2             # 2종목 동시 보유
-
-    # [진입 설정]
+    MAX_SLOTS = 2             
     EMA_LENGTH = 400           
-    DIP_TOLERANCE = 0.005    # 눌림목 인정 오차 (0.5%)
-    HOVER_TOLERANCE = 0.002  # 반등 인정 오차 (0.2%)
+    DIP_TOLERANCE = 0.005    
+    HOVER_TOLERANCE = 0.002  
 
-    # [청산 설정]
     TIME_HARD_CUTOFF = "15:45"
-    STOP_LOSS_PCT = 0.095      # -9.5% 손절
-    TARGET_PROFIT_PCT = 0.065  # +6.5% 목표 수익률 (TP)
-    TP_PCT = TARGET_PROFIT_PCT # (호환성 유지)
+    STOP_LOSS_PCT = 0.095      
+    TARGET_PROFIT_PCT = 0.065  
+    TP_PCT = TARGET_PROFIT_PCT 
 
-# ==========================================
-    # 🛡️ [안전장치] Upper Wick Filter (윗꼬리 필터)
+    # ==========================================
+    # 🛡️ [안전장치] Upper Wick Filter
     # ==========================================
     UPPER_WICK_FILTER_ENABLED = False
     UPPER_WICK_FILTER_THRESHOLD_PCT = 17.708333333333176
     UPPER_WICK_FILTER_USE_CLOSED_CANDLE_ONLY = False
-

@@ -6,6 +6,7 @@ import json
 import os   
 import threading
 import random 
+from pathlib import Path
 from config import Config
 from infra.utils import get_logger
 from infra.kis_api import KisApi
@@ -14,97 +15,84 @@ from infra.telegram_bot import TelegramBot
 from infra.real_portfolio import RealPortfolio
 from infra.real_order_manager import RealOrderManager
 from infra.live_candle_exporter import LiveCandleExporter
+from infra.risk_filter import TradeRiskFilter  # 👈 [추가] 3중 리스크 필터
 from data.market_listener import MarketListener
 from strategy import get_strategy
 
 logger = get_logger("Main")
 STATE_FILE = "system_state.json"
 
-# =========================================================
-# 💾 [상태 저장/로드] 시스템 재부팅 대비
-# =========================================================
-def save_state(ban_list, active_candidates):
+def save_state(ban_list, active_candidates, loss_blacklist=None):
     """
-    [설명] 밴 리스트와 감시 중인 종목(발견 시간 포함)을 파일로 저장합니다.
+    [설명] 밴 리스트, 감시 중인 종목, 손절 블랙리스트를 파일로 저장합니다.
     """
     try:
-        # active_candidates가 dict라면 그대로, set/list라면 dict로 변환하여 저장
         candidates_data = {}
         if isinstance(active_candidates, dict):
             candidates_data = active_candidates
         else:
-            # 혹시 모를 호환성 대비 (현재 시간으로 채움)
             now_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             candidates_data = {sym: now_str for sym in active_candidates}
 
         state = {
             "ban_list": list(ban_list),
-            "active_candidates": candidates_data, # 시간 정보가 포함된 딕셔너리 저장
+            "loss_blacklist": list(loss_blacklist) if loss_blacklist is not None else [],
+            "active_candidates": candidates_data,
             "date": datetime.datetime.now().strftime("%Y-%m-%d")
         }
         
         with open(STATE_FILE, "w") as f:
-            json.dump(state, f, indent=4) # 보기 좋게 indent 추가
+            json.dump(state, f, indent=4)
             
     except Exception as e:
         logger.error(f"⚠️ 상태 저장 실패: {e}")
 
 def load_state():
-    """[설명] 저장된 상태 파일이 있다면 불러옵니다 (재부팅 시 유용)."""
+    """[설명] 저장된 상태 파일이 있다면 불러옵니다."""
     if not os.path.exists(STATE_FILE):
-        return set(), {} # 빈 딕셔너리 반환
+        return set(), {}, set()
     
     try:
         with open(STATE_FILE, "r") as f:
             state = json.load(f)
             
-        # 날짜 변경 체크
         today = datetime.datetime.now().strftime("%Y-%m-%d")
         if state.get("date") != today:
             logger.info("📅 날짜 변경으로 저장된 상태를 초기화합니다.")
-            return set(), {} # 빈 딕셔너리 반환
+            return set(), {}, set()
             
         loaded_ban = set(state.get("ban_list", []))
+        loaded_loss = set(state.get("loss_blacklist", []))
         raw_candidates = state.get("active_candidates", {})
         
-        # [CRITICAL FIX] 어떤 형태(list, set, dict)든 무조건 dict로 변환
         loaded_candidates = {}
-        
         if isinstance(raw_candidates, dict):
             loaded_candidates = raw_candidates
-        elif isinstance(raw_candidates, (list, set)): # 리스트나 셋이면 변환
+        elif isinstance(raw_candidates, (list, set)):
             now_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             loaded_candidates = {sym: now_str for sym in raw_candidates}
         else:
-            loaded_candidates = {} # 알 수 없는 형식이면 초기화
+            loaded_candidates = {}
             
-        return loaded_ban, loaded_candidates
+        return loaded_ban, loaded_candidates, loaded_loss
     
     except Exception as e:
         logger.error(f"⚠️ 상태 로드 실패: {e}")
-        return set(), {}
+        return set(), {}, set()
 
-# =========================================================
-# 🕒 [시간 체크] 한국 시간 vs 미국 시간
-# =========================================================
 ACTIVE_START_HOUR = getattr(Config, 'ACTIVE_START_HOUR', 4) 
 ACTIVE_END_HOUR = getattr(Config, 'ACTIVE_END_HOUR', 20)    
 
 def is_active_market_time():
-    """
-    [설명] 현재 미국 시간이 매매 가능한 시간인지 확인합니다.
-    """
     tz_et = pytz.timezone('US/Eastern')
     now_et = datetime.datetime.now(tz_et)
     
     tz_kst = pytz.timezone('Asia/Seoul')
     now_kst = datetime.datetime.now(tz_kst)
 
-    # 주말 체크
     if now_et.weekday() >= 5: 
         return False, f"주말 (Weekend) - KST: {now_kst.strftime('%H:%M')}"
 
-    # 휴장일 체크 (2026년 기준)
     holidays = [
         "2026-01-01", "2026-01-19", "2026-02-16", "2026-04-03", 
         "2026-05-25", "2026-06-19", "2026-07-03", "2026-09-07", 
@@ -119,11 +107,8 @@ def is_active_market_time():
     
     return False, f"After Market / Night (NY: {now_et.strftime('%H:%M')} | KR: {now_kst.strftime('%H:%M')})"
 
-# =========================================================
-# 🚀 [메인 시스템]
-# =========================================================
 def main():
-    logger.info("🚀 GapZone System v5.3 (Final Edition) Starting...")
+    logger.info("🚀 GapZone System v5.4 (3-Tier Risk Filter Edition) Starting...")
     
     tz_kst = pytz.timezone('Asia/Seoul')
     tz_et = pytz.timezone('US/Eastern')
@@ -137,9 +122,8 @@ def main():
     HEARTBEAT_INTERVAL = getattr(Config, 'HEARTBEAT_INTERVAL_SEC', 40000)
     was_sleeping = False
     
-    # [수정] 중복 실행 방지를 위한 변수 추가
     last_processed_minute = None
-    eod_processed = False  # 👈 [추가] 장 마감 처리 완료 여부 플래그
+    eod_processed = False  
     current_date_str = now_et_start.strftime("%Y-%m-%d")
 
     try:
@@ -150,22 +134,22 @@ def main():
         listener = MarketListener(kis)
         candle_exporter = LiveCandleExporter(kis, bot, base_dir=os.getcwd())
         
+        # 🛡️ [추가] 3중 리스크 필터 초기화
+        risk_filter = TradeRiskFilter()
+
         # 2. 포트폴리오 및 주문 관리자
         portfolio = RealPortfolio(kis)
         order_manager = RealOrderManager(kis)
         strategy = get_strategy() 
-        
-        target_profit_rate = getattr(Config, 'TP_PCT', 0.10)
-        sl_rate = -abs(getattr(Config, 'SL_PCT', 0.40))
 
         # 3. 서버 동기화 및 상태 복구
         logger.info("📡 증권사 서버와 동기화 중...")
         portfolio.sync_with_kis()
         
-        loaded_ban, loaded_candidates = load_state()
+        loaded_ban, loaded_candidates, loaded_loss = load_state()
         portfolio.ban_list.update(loaded_ban)
+        risk_filter.loss_blacklist.update(loaded_loss)
         
-        # [안전장치] 혹시라도 set으로 왔다면 다시 dict로 변환
         if isinstance(loaded_candidates, (set, list)):
              active_candidates = {sym: datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S") for sym in loaded_candidates}
         else:
@@ -174,17 +158,17 @@ def main():
         for sym in active_candidates:
             candle_exporter.register_candidate(sym)
         
-        logger.info(f"💾 [Memory] 복구 완료 | 🚫Ban: {len(portfolio.ban_list)}개, 👁️Watch: {len(active_candidates)}개")
+        logger.info(f"💾 [Memory] 복구 완료 | 🚫Ban: {len(portfolio.ban_list)}개, 🛑Loss-Blacklist: {len(risk_filter.loss_blacklist)}개, 👁️Watch: {len(active_candidates)}개")
         
         start_msg = (
-            f"⚔️ [시스템 가동 v5.3]\n"
+            f"⚔️ [시스템 가동 v5.4 - 3중 리스크 필터 탑재]\n"
             f"⏰ 시간: KR {now_kst_start.strftime('%H:%M')} / NY {now_et_start.strftime('%H:%M')}\n"
             f"💰 자산: ${portfolio.total_equity:,.0f}\n"
-            f"🎰 슬롯: {len(portfolio.positions)} / {portfolio.MAX_SLOTS}"
+            f"🎰 슬롯: {len(portfolio.positions)} / {portfolio.MAX_SLOTS}\n"
+            f"🛡️ 손절 차단 종목 수: {len(risk_filter.loss_blacklist)}개"
         )
         bot.send_message(start_msg)
         
-        # 상태 조회 함수 (Telegram 연동)
         def get_status_data():
             return {
                 'cash': portfolio.balance,
@@ -192,6 +176,7 @@ def main():
                 'positions': portfolio.positions,
                 'targets': getattr(listener, 'current_watchlist', []),
                 'ban_list': list(portfolio.ban_list),
+                'loss_blacklist': list(risk_filter.loss_blacklist),
                 'loss': 0.0,
                 'loss_limit': getattr(Config, 'MAX_DAILY_LOSS_PCT', 0.0)
             }
@@ -207,24 +192,19 @@ def main():
 
                 if zip_path:
                     delivery = "Telegram sent" if telegram_sent else "Local only"
-                    logger.info(f"?? [Live Export] {reason} | files={saved_count} | zip={zip_path} | {delivery}")
+                    logger.info(f"📦 [Live Export] {reason} | files={saved_count} | zip={zip_path} | {delivery}")
                     bot.send_message(
-                        f"?? [Live Candle Export]\nReason: {reason}\nFiles: {saved_count}\nZip: {zip_path}\nDelivery: {delivery}"
+                        f"📦 [Live Candle Export]\nReason: {reason}\nFiles: {saved_count}\nZip: {zip_path}\nDelivery: {delivery}"
                     )
-                else:
-                    logger.warning(f"?? [Live Export] {reason} | no files exported")
-
                 return result
             except Exception as export_error:
-                logger.error(f"? [Live Export] {reason} failed: {export_error}")
+                logger.error(f"❌ [Live Export] {reason} failed: {export_error}")
                 return {"date": export_date or current_date_str, "files": [], "zip_path": "", "telegram_sent": False, "manifest_rows": []}
-        # [신규 추가] 호가 스냅샷(Ask/Bid/Vol) CSV 파일 텔레그램 자동 전송 함수
+
         def send_spread_analysis_log(export_date=None):
             try:
                 date_target = export_date or current_date_str
                 date_clean = date_target.replace("-", "")
-                
-                # real_order_manager.py가 생성하는 호가 스냅샷 파일 경로
                 spread_file = Path(f"logs/spread_analysis/signal_spreads_{date_clean}.csv")
                 
                 if spread_file.exists():
@@ -234,14 +214,9 @@ def main():
                     )
                     if sent:
                         logger.info(f"📤 [Spread Log] 텔레그램 전송 성공: {spread_file.name}")
-                    else:
-                        logger.warning(f"⚠️ [Spread Log] 텔레그램 전송 실패: {spread_file.name}")
-                else:
-                    logger.info(f"ℹ️ [Spread Log] {date_target} 당일 생성된 호가 스냅샷 파일이 없습니다.")
             except Exception as e:
                 logger.error(f"❌ [Spread Log] 텔레그램 전송 중 에러: {e}")
                 
-        # 텔레그램 봇 스레드 실행
         def run_bot_thread():
             bot.start()
             
@@ -254,25 +229,19 @@ def main():
         logger.critical(f"❌ 초기화 실패: {e}")
         return
 
-    # =========================================================
-    # 🧠 [메모리 캐싱 엔진] 800봉 데이터 임시 저장소
-    # =========================================================
     candle_cache = {}
 
     # ---------------------------------------------------------
-    # [메인 루프] 무한 반복 (Final Optimized Version)
+    # [메인 루프]
     # ---------------------------------------------------------
     while True:
         try:
-            # 미국 현지 시간 기준
             now = datetime.datetime.now(pytz.timezone('America/New_York'))
             current_minute_str = now.strftime("%H:%M")
 
             # =========================================================
-            # 🚀 [초고속 매도 전용 차선] 보유 종목 실시간 1초 감시 (트레일링 스탑용)
+            # 🚀 [초고속 매도 전용 차선] 보유 종목 실시간 1초 감시
             # =========================================================
-            # 신규 매수를 위한 분봉 완성 대기(55초 수면)와 무관하게, 보유 종목은 매 초마다 
-            # 가장 가벼운 현재가 API 1번만 호출하여 손절선을 터치하는 즉시 탈출합니다.
             if portfolio.positions:
                 for ticker in list(portfolio.positions.keys()):
                     real_time_price = kis.get_current_price(ticker, exchange="NAS")
@@ -286,19 +255,23 @@ def main():
                         
                         if exit_signal:
                             reason = exit_signal['reason']
-                            if reason != 'TAKE_PROFIT': # 익절은 이미 지정가 주문 대기 중이므로 무시
+                            if reason != 'TAKE_PROFIT':
+                                entry_p = pos.get('entry_price', real_time_price)
+                                trade_pnl = (real_time_price - entry_p) / entry_p if entry_p > 0 else -0.01
+
                                 result = order_manager.execute_sell(portfolio, ticker, reason, price=real_time_price)
                                 if result:
                                     bot.send_message(result['msg'])
-                                    save_state(portfolio.ban_list, active_candidates)
+            
+                                    # 🛑 손절 발생 즉시 3중 필터 블랙리스트에 추가
+                                    risk_filter.register_trade_result(ticker, trade_pnl, reason=reason)
+                                    save_state(portfolio.ban_list, active_candidates, risk_filter.loss_blacklist)
                     
-                    # API 초당 2건 제한 준수 (종목당 0.5초 대기)
                     time.sleep(0.5)
 
             # =========================================================
-            # 🕒 [Time Sync] 캔들 완성형 (00초~05초 진입) - 신규 매수 전용
+            # 🕒 [Time Sync] 캔들 완성형 (00초~05초 진입)
             # =========================================================
-            # 🛡️ [AWS 스케줄러 연동 비상 브레이크] 한국 시간 17시 ~ 새벽 5시 외에는 가동 중지
             current_kst = datetime.datetime.now(pytz.timezone('Asia/Seoul'))
             if not (current_kst.hour >= 17 or current_kst.hour < 5):
                 if not was_sleeping:
@@ -307,118 +280,16 @@ def main():
                 time.sleep(10)
                 continue
 
-            # [핵심 수정] 0초~5초 사이(매분 시작)에만 로직 실행 (캔들 마감 확인용)
             if now.second > 5:
-                # CPU 낭비 방지를 위해 적당히 쉽니다 (0.5초)
                 time.sleep(0.5)
                 continue
             
-            # [핵심 수정] 이번 분에 이미 실행했다면 건너뜀 (중복 실행 방지)
             if last_processed_minute == current_minute_str:
                 time.sleep(0.5)
                 continue
                 
-            # --- 여기서부터는 매 분의 00초~05초 사이에 "딱 한 번"만 실행됩니다 ---
             last_processed_minute = current_minute_str
             
-            # =========================================================
-            # 💤 [Sleep Mode] 활동 시간 체크 (위치 이동: 주말 오작동 방지)
-            # =========================================================
-            # [수정] EOD 체크보다 먼저 수행하여 주말에 강제 청산 로직이 도는 것을 막습니다.
-            is_active, reason = is_active_market_time()
-            
-            if not is_active:
-                if not was_sleeping:
-                    logger.warning(f"💤 Sleep Mode: {reason}")
-                    bot.send_message(f"💤 [대기] {reason}")
-                    was_sleeping = True
-                    save_state(portfolio.ban_list, active_candidates) # 자기 전 상태 저장
-                
-                # 활동 시간이 아니면 1분 통째로 대기
-                time.sleep(30)
-                continue
-            
-            # [기상] 잠에서 깨어난 경우
-            if was_sleeping:
-                bot.send_message(f"🌅 [기상] 시장 감시 시작 ({reason})")
-                was_sleeping = False
-                portfolio.sync_with_kis() # 자고 일어나면 잔고 동기화
-
-            # ---------------------------------------------------------
-            # 🛑 [EOD] 장 마감 강제 청산 (안전장치 강화판)
-            # ---------------------------------------------------------
-            cutoff_time_str = getattr(Config, 'TIME_HARD_CUTOFF', "15:54")
-            cutoff_h, cutoff_m = map(int, cutoff_time_str.split(':'))
-            
-            # 현재 시각이 설정된 컷오프 시간 '이후'인지 확인 (== 대신 >= 사용)
-            is_after_cutoff = (now.hour > cutoff_h) or (now.hour == cutoff_h and now.minute >= cutoff_m)
-            
-            if is_after_cutoff and not eod_processed:
-                logger.warning(f"⏰ [장 마감] 강제 청산 실행 (Current: {now.strftime('%H:%M')} >= Cutoff: {cutoff_time_str})")
-                bot.send_message(f"🚨 [장 마감] 강제 청산 실행")
-                
-                # [수정] positions 딕셔너리 직접 확인
-                if portfolio.positions:
-                    for ticker in list(portfolio.positions.keys()):
-                        # 강제 청산 시에도 '시장가'로 확실하게 탈출
-                        order_manager.execute_sell(portfolio, ticker, "FORCE_EOD_EXIT", price=0)
-                        time.sleep(0.2) # 주문 간격
-                
-                # 상태 저장 후 루프 종료 (다음 날 재실행 필요)
-                save_state(portfolio.ban_list, active_candidates)
-                run_live_candle_export(current_date_str, reason="eod")
-                send_spread_analysis_log(current_date_str)
-                logger.info("👋 [System] 장 마감으로 시스템을 종료합니다.")
-                
-                eod_processed = True # 오늘 처리가 끝났음을 표시
-                time.sleep(300) 
-                continue
-            
-            # 날짜가 바뀌거나 장 시간이 지나지 않았으면 플래그 초기화
-            if not is_after_cutoff:
-                eod_processed = False
-
-            # =========================================================
-            # 💓 [Heartbeat] 생존 신고 (상세 정보 추가)
-            # =========================================================
-            if time.time() - last_heartbeat_time > HEARTBEAT_INTERVAL:
-                eq = portfolio.total_equity
-                pos_cnt = len(portfolio.positions)
-                cur_k = datetime.datetime.now(tz_kst).strftime("%H:%M")
-                cur_n = datetime.datetime.now(tz_et).strftime("%H:%M")
-                
-                # [NEW] 감시 및 밴 리스트 현황 파악
-                watching_list = list(active_candidates)
-                banned_list = list(portfolio.ban_list)
-                
-                # 메시지가 너무 길어지는 것 방지
-                watch_str = ", ".join(watching_list[:5]) + ("..." if len(watching_list) > 5 else "")
-                ban_str = ", ".join(banned_list[:5]) + ("..." if len(banned_list) > 5 else "")
-                
-                msg = (
-                    f"💓 [생존] KR {cur_k} / NY {cur_n}\n"
-                    f"💰 자산 ${eq:,.0f} | 보유 {pos_cnt}개\n"
-                    f"👁️ 감시({len(watching_list)}): {watch_str}\n"
-                    f"🚫 제외({len(banned_list)}): {ban_str}"
-                )
-                
-                bot.send_message(msg)
-                last_heartbeat_time = time.time()
-
-            # =========================================================
-            # 📅 [Daily Reset] 날짜 변경 체크 (Sleep Mode 체크 전으로 이동)
-            # =========================================================
-            new_date_str = now.strftime("%Y-%m-%d")
-            if new_date_str != current_date_str:
-                logger.info(f"📅 [New Day] 날짜 변경 감지: {current_date_str} -> {new_date_str}")
-                portfolio.ban_list.clear()
-                active_candidates.clear()
-                candle_cache.clear()
-                candle_exporter.reset_session()
-                save_state(portfolio.ban_list, active_candidates)
-                logger.info("✨ [Reset] 금일 감시 종목 및 밴 리스트 초기화 완료 (0개 시작)")
-                current_date_str = new_date_str
-
             # =========================================================
             # 💤 [Sleep Mode] 활동 시간 체크
             # =========================================================
@@ -429,92 +300,115 @@ def main():
                     logger.warning(f"💤 Sleep Mode: {reason}")
                     bot.send_message(f"💤 [대기] {reason}")
                     was_sleeping = True
-                    save_state(portfolio.ban_list, active_candidates)
+                    save_state(portfolio.ban_list, active_candidates, risk_filter.loss_blacklist)
                 
                 time.sleep(30)
                 continue
+            
+            if was_sleeping:
+                bot.send_message(f"🌅 [기상] 시장 감시 시작 ({reason})")
+                was_sleeping = False
+                portfolio.sync_with_kis()
+
+            # ---------------------------------------------------------
+            # 🛑 [EOD] 장 마감 강제 청산
+            # ---------------------------------------------------------
+            cutoff_time_str = getattr(Config, 'TIME_HARD_CUTOFF', "15:54")
+            cutoff_h, cutoff_m = map(int, cutoff_time_str.split(':'))
+            
+            is_after_cutoff = (now.hour > cutoff_h) or (now.hour == cutoff_h and now.minute >= cutoff_m)
+            
+            if is_after_cutoff and not eod_processed:
+                logger.warning(f"⏰ [장 마감] 강제 청산 실행 (Current: {now.strftime('%H:%M')} >= Cutoff: {cutoff_time_str})")
+                bot.send_message(f"🚨 [장 마감] 강제 청산 실행")
+                
+                if portfolio.positions:
+                    for ticker in list(portfolio.positions.keys()):
+                        order_manager.execute_sell(portfolio, ticker, "FORCE_EOD_EXIT", price=0)
+                        time.sleep(0.2)
+                
+                save_state(portfolio.ban_list, active_candidates, risk_filter.loss_blacklist)
+                run_live_candle_export(current_date_str, reason="eod")
+                send_spread_analysis_log(current_date_str)
+                logger.info("👋 [System] 장 마감으로 시스템을 종료합니다.")
+                
+                eod_processed = True
+                time.sleep(300) 
+                continue
+            
+            if not is_after_cutoff:
+                eod_processed = False
+
+            # =========================================================
+            # 💓 [Heartbeat] 생존 신고
+            # =========================================================
+            if time.time() - last_heartbeat_time > HEARTBEAT_INTERVAL:
+                eq = portfolio.total_equity
+                pos_cnt = len(portfolio.positions)
+                cur_k = datetime.datetime.now(tz_kst).strftime("%H:%M")
+                cur_n = datetime.datetime.now(tz_et).strftime("%H:%M")
+                
+                watching_list = list(active_candidates)
+                banned_list = list(portfolio.ban_list)
+                loss_list = list(risk_filter.loss_blacklist)
+                
+                watch_str = ", ".join(watching_list[:5]) + ("..." if len(watching_list) > 5 else "")
+                ban_str = ", ".join(banned_list[:5]) + ("..." if len(banned_list) > 5 else "")
+                loss_str = ", ".join(loss_list[:5]) + ("..." if len(loss_list) > 5 else "")
+                
+                msg = (
+                    f"💓 [생존] KR {cur_k} / NY {cur_n}\n"
+                    f"💰 자산 ${eq:,.0f} | 보유 {pos_cnt}개\n"
+                    f"👁️ 감시({len(watching_list)}): {watch_str}\n"
+                    f"🚫 Ban({len(banned_list)}): {ban_str}\n"
+                    f"🛑 손절차단({len(loss_list)}): {loss_str}"
+                )
+                
+                bot.send_message(msg)
+                last_heartbeat_time = time.time()
+
+            # =========================================================
+            # 📅 [Daily Reset] 날짜 변경 체크
+            # =========================================================
+            new_date_str = now.strftime("%Y-%m-%d")
+            if new_date_str != current_date_str:
+                logger.info(f"📅 [New Day] 날짜 변경 감지: {current_date_str} -> {new_date_str}")
+                portfolio.ban_list.clear()
+                risk_filter.reset_daily()  # 👈 [추가] 일일 리스크 필터 리셋
+                active_candidates.clear()
+                candle_cache.clear()
+                candle_exporter.reset_session()
+                save_state(portfolio.ban_list, active_candidates, risk_filter.loss_blacklist)
+                logger.info("✨ [Reset] 금일 감시 종목 및 밴 리스트 초기화 완료")
+                current_date_str = new_date_str
 
             # =========================================================
             # 🧠 [Logic] 매매 로직 시작 (매 분 1회 실행)
             # =========================================================
-            
-            # 1. 동기화 전, 현재 보유 종목 명단 기억
             prev_holdings = set(portfolio.positions.keys())
-            
-            # 2. 증권사 서버와 싱크 (여기서 익절된 종목은 positions에서 사라짐)
             portfolio.sync_with_kis()
-            
-            # 3. 동기화 후, 명단 확인
             current_holdings = set(portfolio.positions.keys())
             
-            # 4. [핵심] 사라진 종목 찾기 (내가 판 게 아닌데 사라졌으면 -> 익절 체결임)
             sold_tickers = prev_holdings - current_holdings
-            
             for ticker in sold_tickers:
-                # 이미 밴 리스트에 있다면(손절/타임컷 등) 중복 알림 방지
                 if ticker in portfolio.ban_list:
                     continue
                     
-                # 익절 알림 전송
                 logger.info(f"🎉 [익절 감지] {ticker} 목표가 도달 확인!")
                 msg = (
                     f"🎉 <b>[익절 체결 확인]</b>\n"
                     f"📦 종목: {ticker}\n"
-                    f"💰 결과: 목표가(+10%) 달성 추정\n"
+                    f"💰 결과: 목표가 달성 추정\n"
                     f"✅ 잔고에서 자동으로 청산되었습니다."
                 )
                 bot.send_message(msg)
-                
-                # 익절한 종목도 오늘 재진입 금지 (Ban)
                 portfolio.ban_list.add(ticker)
                 
-                # [Fix] 이미 졸업한 종목이니 감시 목록에서도 삭제 (로그 정리)
                 if ticker in active_candidates:
                     del active_candidates[ticker]
                     
-                save_state(portfolio.ban_list, active_candidates)
+                save_state(portfolio.ban_list, active_candidates, risk_filter.loss_blacklist)
 
-            # ---------------------------------------------------------
-            # B. [매도] 보유 종목 관리 (Check Exit)# (기존 B. 매도 관리 블록은 최상단 초고속 차선으로 이동되었으므로 이 자리는 완벽히 비워둡니다)
-            # ---------------------------------------------------------
-            #for ticker in list(portfolio.positions.keys()):
-                
-                # [수정] 단순 현재가 ❌ -> 분봉 데이터 ✅
-                #df = kis.get_minute_candles("NAS", ticker, limit=60)
-
-                #if df.empty or len(df) < 1: 
-                    #continue
-                
-                # [전략] 현재가(Tick)보다는 '방금 확정된 종가' 혹은 '현재 시가'를 기준으로 판단
-                #real_time_price = df.iloc[-1]['close'] # 현재 진행중인 봉의 현재가
-                
-                #pos = portfolio.positions[ticker]
-                #entry_price = pos['entry_price']
-                #entry_time = pos.get('entry_time')
-
-                # 전략에 매도 문의
-                #exit_signal = strategy.check_exit(
-                    #ticker=ticker,
-                    #position=pos,
-                    #current_price=real_time_price, 
-                    #now_time=datetime.datetime.now(pytz.timezone('US/Eastern'))
-                #)
-                
-                #if exit_signal:
-                    #reason = exit_signal['reason']
-                    
-                    # 🛑 [핵심 수정] 익절(TAKE_PROFIT)은 이미 진입 시점에 지정가 주문을 걸어두었으므로 무시
-                    #if reason == 'TAKE_PROFIT':
-                        #continue
-                        
-                    # 🚨 손절(STOP_LOSS) 또는 타임컷(TIME_CUT)일 때만 비상 탈출
-                    # real_order_manager가 기존 익절 대기 주문을 알아서 취소하고 95% 시장가로 던짐
-                    # [중요] price=real_time_price 필수 (0원이면 주문 거부됨)
-                    #result = order_manager.execute_sell(portfolio, ticker, reason, price=real_time_price)
-                    #if result:
-                        #bot.send_message(result['msg'])
-                        #save_state(portfolio.ban_list, active_candidates)
-            
             # ---------------------------------------------------------
             # C. [스캔] 신규 급등주 포착
             # ---------------------------------------------------------
@@ -527,115 +421,98 @@ def main():
                 for sym in fresh_targets:
                     candle_exporter.register_candidate(sym, exchange=listener.get_candidate_exchange(sym))
                     if sym not in active_candidates:
-                        # 현재 시간을 문자열로 저장 (JSON 저장 호환성 위함)
                         active_candidates[sym] = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                save_state(portfolio.ban_list, active_candidates)
+                save_state(portfolio.ban_list, active_candidates, risk_filter.loss_blacklist)
+
             # ---------------------------------------------------------
-            # D. [매수] 진입 타점 확인 (핵심 수정: 히스토리 로딩)
+            # D. [매수] 진입 타점 확인 (3중 리스크 필터 적용)
             # ---------------------------------------------------------
             buy_candidates = [
                 sym for sym in list(active_candidates)
                 if not portfolio.is_holding(sym) and not portfolio.is_banned(sym)
             ]
 
-            # [Random Shuffle] 좀비 리스트 방지
             random.shuffle(buy_candidates)
-            
-            # API 제한 고려 상위 15개만 체크
             targets_to_check = buy_candidates[:15]
             listener.current_watchlist = targets_to_check 
 
             for sym in targets_to_check:
-                # -----------------------------------------------------
-                # 🕒 [Time Cut] 60분 경과 시 감시 해제 (좀비 방지)
-                # -----------------------------------------------------
-                #try:
-                    #found_time_str = active_candidates.get(sym)
-                    #if found_time_str:
-                        # 문자열 -> datetime 변환
-                        #found_time = datetime.datetime.strptime(found_time_str, "%Y-%m-%d %H:%M:%S")
-                        #elapsed_minutes = (datetime.datetime.now() - found_time).total_seconds() / 60
-                        
-                        #if elapsed_minutes > 120: # 120분 초과
-                            #logger.info(f"🗑️ [Timeout] {sym} {int(elapsed_minutes)}분 경과 -> 감시 해제")
-                            #if sym in active_candidates:
-                                #del active_candidates[sym]
-                            #continue # 다음 종목으로 넘어감
-                #except Exception:
-                    #pass # 시간 포맷 에러 시엔 일단 패스
-
                 try:
-                    # =========================================================
-                    # 🚀 [메가 패치] 메모리 캐싱 + 거래소 자동 탐색 엔진
-                    # =========================================================
                     import pandas as pd
                     df = None
                     selected_exchange = None
                     
                     if sym not in candle_cache:
-                        # [CASE A: 처음 보는 종목] 800봉 전체 다운로드 및 거래소 탐색 (약 9초 소요)
                         for exch in ["NAS", "NYS", "AMS"]:
                             temp_df = kis.get_minute_candles(exch, sym, limit=1200)
                             if not temp_df.empty and len(temp_df) >= 26:
                                 df = temp_df
                                 selected_exchange = exch
-                                # 성공한 거래소와 데이터를 메모리에 캐싱
                                 candle_cache[sym] = {'df': df, 'exch': exch}
                                 break
                     else:
-                        # [CASE B: 아는 종목] 해당 거래소에서 최신 120봉만 초고속 다운로드 (약 0.6초)
                         cached_data = candle_cache[sym]
                         old_df = cached_data['df']
                         exch = cached_data['exch']
                         selected_exchange = exch
                         
                         new_df = kis.get_minute_candles(exch, sym, limit=120)
-                        
                         if not new_df.empty:
-                            # 파이썬 메모리에서 0.01초 만에 위아래로 병합
                             combined_df = pd.concat([old_df, new_df])
                             combined_df = combined_df.drop_duplicates(subset=['date', 'time'], keep='last')
                             combined_df = combined_df.sort_values(['date', 'time']).reset_index(drop=True)
                             
-                            # 최신 1200개만 유지
                             if len(combined_df) > 1200:
                                 combined_df = combined_df.iloc[-1200:].reset_index(drop=True)
                                 
                             candle_cache[sym]['df'] = combined_df
                             df = combined_df
                         else:
-                            df = old_df # 통신 지연 시 기존 데이터 안전하게 재활용
+                            df = old_df
 
                     if df is None or df.empty or len(df) < 26:
                         strategy._log_rejection(sym, "데이터 부족 (NAS/NYS/AMS 전체 탐색 실패)")
-                        # 탐색 실패 시 캐시가 꼬이는 것 방지
                         candle_cache.pop(sym, None)
                         continue
 
                     candle_exporter.update_runtime_candles(sym, df, exchange=selected_exchange)
 
                     # =========================================================
-                    # 🧠 [Strategy] 전략 엔진 호출
+                    # 🧠 [Strategy] 전략 엔진 신호 확인
                     # =========================================================
                     signal = strategy.check_entry(sym, df)
 
+                    if signal and signal['type'] == 'BUY':
+                        entry_price = ask if ask > 0 else signal['price']
+    
+                        # 🛡️ [Pre-Trade Validation] 3중 리스크 필터 검사
+                        is_blocked, block_reason = risk_filter.is_order_blocked(
+                            ticker=sym, price=entry_price, current_time_et=now
+                        )
+    
+                        if is_blocked:
+                            # 조건에 걸리면 주문을 내지 않고 다음 종목으로 넘어감 (Pass)
+                            continue
+
+                        # 검증을 통과한 종목만 실제 매수 집행
+                        result = order_manager.execute_buy(portfolio, signal)
+
                     if signal:
-                        # [CASE 1] 매수 신호 (BUY)
                         if signal['type'] == 'BUY':
                             
                             # -----------------------------------------------------
-                            # 🚌 [Missed Bus] 자리 없으면 -> 영구 제외 (Ban)
+                            # 🚌 [Missed Bus] 슬롯 여유 확인
                             # -----------------------------------------------------
                             if not portfolio.has_open_slot():
                                 logger.warning(f"🚌 [Missed Bus] {sym} 진입 신호 왔으나 자리 없음 -> 영구 제외")
                                 portfolio.ban_list.add(sym)      
                                 if sym in active_candidates:
                                     del active_candidates[sym]
-                                candle_cache.pop(sym, None) # 👈 신규 추가
-                                save_state(portfolio.ban_list, active_candidates)
+                                candle_cache.pop(sym, None)
+                                save_state(portfolio.ban_list, active_candidates, risk_filter.loss_blacklist)
                                 continue
                             
-                            # [Double Check] 호가 확인
+                            # 호가 조회
                             ask, bid, ask_vol, bid_vol = kis.get_market_spread(sym)
                             
                             if ask > 0 and bid > 0:
@@ -644,11 +521,24 @@ def main():
                                     logger.warning(f"⚠️ [Spread] {sym}: 괴리율 과다 ({spread:.2f}%). 진입 보류.")
                                     continue
                             
-                            signal['price'] = ask if ask > 0 else signal['price']
+                            entry_price = ask if ask > 0 else signal['price']
+                            signal['price'] = entry_price
                             signal['ticker'] = sym
 
                             # =========================================================
-                            # ⚡ [Execution] 주문 집행
+                            # 🛡️ [Pre-Trade Validation] 3중 리스크 차단 필터 검사
+                            # (시간대, 주가대, 과거 손절 종목 재진입)
+                            # =========================================================
+                            is_blocked, block_reason = risk_filter.is_order_blocked(
+                                ticker=sym, price=entry_price, current_time_et=now
+                            )
+                            
+                            if is_blocked:
+                                # 차단된 경우 주문 실행하지 않고 다음 종목으로 패스
+                                continue
+
+                            # =========================================================
+                            # ⚡ [Execution] 정상 주문 집행
                             # =========================================================
                             if portfolio.has_open_slot():
                                 result = order_manager.execute_buy(portfolio, signal)
@@ -659,29 +549,19 @@ def main():
                                     
                                     if result['status'] == 'success':
                                         candle_cache.pop(sym, None)
-                                        save_state(portfolio.ban_list, active_candidates)
+                                        save_state(portfolio.ban_list, active_candidates, risk_filter.loss_blacklist)
                                         
-                                        # ==========================================
-                                        # 💡 [핵심 수정] 실제 체결가 확인 후 익절 주문
-                                        # ==========================================
-                                        
-                                        # 1. 증권사 서버에 체결 내역이 반영될 때까지 1.5초 대기
                                         time.sleep(1.5) 
-                                        
-                                        # 2. 잔고를 동기화하여 '진짜 체결 평단가'를 가져옴
                                         portfolio.sync_with_kis() 
                                         
                                         try:
-                                            # 3. 동기화된 포트폴리오에서 실제 평단가 추출
                                             actual_pos = portfolio.get_position(sym)
                                             if actual_pos and actual_pos.get('entry_price', 0) > 0:
                                                 buy_price = actual_pos['entry_price']
                                             else:
-                                                # 혹시 동기화가 지연되면 기존 방식 사용 (백업)
                                                 buy_price = result.get('avg_price', signal['price']) 
                                             
                                             if buy_price > 0:
-                                                # 4. '진짜 평단가' 기반으로 7% 익절가 계산
                                                 target_profit_pct = getattr(Config, 'TARGET_PROFIT_PCT', 0.07)
                                                 target_price = buy_price * (1.0 + target_profit_pct)
                                                 target_price = round(target_price, 2)
@@ -700,20 +580,18 @@ def main():
                                     else:
                                         logger.warning(f"🚌 [실패] {sym} 매수 실패. 금일 제외.")
                                         portfolio.ban_list.add(sym)
-                                        candle_cache.pop(sym, None) # 👈 신규 추가 (실패하면 더 이상 분봉 감시 안함)
-                                        save_state(portfolio.ban_list, active_candidates)
+                                        candle_cache.pop(sym, None)
+                                        save_state(portfolio.ban_list, active_candidates, risk_filter.loss_blacklist)
 
-                        # [CASE 2] 추세 붕괴 (DROP) - 👈 [신규] 좀비 종목 제거 로직
                         elif signal['type'] == 'DROP':
                             logger.info(f"🗑️ [DROP] {sym} 추세 붕괴 확인 -> 감시 해제")
                             try:
                                 del active_candidates[sym]
                             except KeyError:
                                 pass
-                            candle_cache.pop(sym, None) # 👈 신규 추가 (추세 붕괴하면 더 이상 분봉 감시 안함)
-                            save_state(portfolio.ban_list, active_candidates)
+                            candle_cache.pop(sym, None)
+                            save_state(portfolio.ban_list, active_candidates, risk_filter.loss_blacklist)
 
-                    # [Rate Limit] API 호출 간격 조절 (초당 2건 제한 준수)
                     time.sleep(0.55)
 
                 except Exception as e:
@@ -721,22 +599,16 @@ def main():
                     bot.send_message(f"⚠️ [System Error] 매수 로직 중 오류 발생\n종목: {sym}\n내용: {str(e)}")
                     continue
             
-            # =========================================================
-            # 💰 [Sync] 매도 후 잔고 최신화
-            # =========================================================
             if not portfolio.positions and portfolio.balance < 10:
                 logger.info("🔄 [Sync] 매도 후 잔고 재동기화 수행...")
                 portfolio.sync_balance() 
 
-            # ---------------------------------------------------------
-            # 루프 종료 후 대기
-            # ---------------------------------------------------------
             time.sleep(0.1)
 
         except KeyboardInterrupt:
             logger.info("🛑 관리자에 의한 수동 종료")
             bot.send_message("🛑 시스템을 종료합니다.")
-            save_state(portfolio.ban_list, active_candidates)
+            save_state(portfolio.ban_list, active_candidates, risk_filter.loss_blacklist)
             run_live_candle_export(current_date_str, reason="manual_shutdown")
             send_spread_analysis_log(current_date_str)
             break
@@ -747,7 +619,4 @@ def main():
             time.sleep(10)
 
 if __name__ == "__main__":
-
     main()
-
-
