@@ -69,99 +69,92 @@ class RealOrderManager:
 
     def execute_buy(self, portfolio, signal):
         """
-        [매수 집행] 시장가 진입 + 스프레드 방어 로직
+        [매수 집행] 나스닥 전용 시장가 진입 + 호가 스냅샷 CSV 기록
         """
         ticker = signal['ticker']
         price = signal.get('price', 0) 
 
         # ============================================================
-        # 🛡️ [Safety Protocol] 1. 스프레드 및 호가 잔량 체크
+        # 🛡️ [Safety Protocol] 1. 스프레드 및 호가 잔량 체크 (나스닥 NAS 기준)
         # ============================================================
         try:
-            # API를 통해 4가지 데이터 모두 수신
-            ask, bid, ask_vol, bid_vol = self.kis.get_market_spread(ticker)
+            ask, bid, ask_vol, bid_vol = self.kis.get_market_spread(ticker, exchange="NAS")
             
-            # 💡 [Data Enhancement] 시그널 발생 찰나의 호가창 스냅샷 영구 기록
+            # 💡 시그널 발생 찰나의 호가창 스냅샷 기록
             self._log_signal_spread(ticker, price, ask, bid, ask_vol, bid_vol)
 
-            # [방어] 매수 호가(Bid)가 0이면(살 사람이 아예 없으면) 계산 불가 -> 즉시 포기
             if bid <= 0:
-                # 호가가 없더라도, 전략이 넘겨준 '현재가(price)'가 있다면 그걸 믿고 진행
                 if price > 0:
-                    self.logger.warning(f"⚠️ [Liquidity] {ticker} 호가(Bid) 0 발견 -> 전략가({price})로 대체하여 강제 진입")
+                    self.logger.warning(f"⚠️ [Liquidity] {ticker} 호가(Bid) 0 발견 -> 전략가(${price})로 대체하여 강제 진입")
                     bid = price
-                    ask = price # 스프레드를 0으로 가정하여 통과시킴
+                    ask = price
                 else:
-                    # 현재가조차 없으면 진짜 위험한 상태이므로 차단
                     self.logger.warning(f"📉 [MISS] {ticker} 매수 잔량 없음 (Bid:0, Last:0) -> 진입 불가")
                     return None
 
-            # 스프레드 계산
-            spread = (ask - bid) / bid
+            spread = (ask - bid) / bid if bid > 0 else 0
             
-            # [설정] 허용 스프레드 1.5% (0.015)
-            if spread > 0.015:
-                # 🛡️ [Smart Logging] 1분 쿨타임 적용
+            # 허용 스프레드 3.0%
+            if spread > 0.03:
                 last_log = self.log_throttle_map.get(ticker, 0)
                 now = time.time()
-                
-                # 60초가 지났을 때만 로그 기록
                 if now - last_log > 60:
                     self.logger.warning(
                         f"📉 [MISS] {ticker} 스프레드({spread*100:.2f}%) 과다로 매수 포기 "
                         f"| Price: {bid}(Bid) vs {ask}(Ask) "
-                        f"| Vol: {bid_vol} vs {ask_vol}"  # ✅ 핵심 증거 추가
+                        f"| Vol: {bid_vol} vs {ask_vol}"
                     )
-                    # 기록 시간 갱신
                     self.log_throttle_map[ticker] = now
-                    
-                return None # 주문 안 함
+                return None
 
         except Exception as e:
             self.logger.error(f"⚠️ 스프레드 체크 중 오류({ticker}): {e}")
-            # 안전을 위해 에러 발생 시 매수 포기 (보수적 접근)
             return None
 
         # ============================================================
-        # 1. 쿨다운 체크
+        # 2. 쿨다운 체크
         # ============================================================
         if portfolio.is_banned(ticker):
             self.logger.warning(f"🚫 [Buy Reject] 금일 매매 금지 종목 ({ticker})")
             return None
 
-        # 2. 수량 계산
+        # ============================================================
+        # 3. 수량 계산
+        # ============================================================
         qty = portfolio.calculate_qty(price)
         if qty <= 0:
             return {'status': 'failed', 'msg': f"❌ 잔고 부족 또는 수량 계산 실패 ({ticker})"}
 
-        # 3. 주문 전송 (시장가)
+        # ============================================================
+        # 4. 주문 전송 (나스닥 전용)
+        # ============================================================
         resp = self.kis.send_order(
             ticker=ticker,
             side="BUY",
             qty=qty,
             price=price,        
-            order_type="MARKET" 
+            order_type="MARKET",
+            exchange="NAS"
         )
         
-        # 4. 결과 처리 (수정된 부분)
+        # ============================================================
+        # 5. 결과 처리
+        # ============================================================
         if resp and resp.get('rt_cd') == '0':
-            # [수정] ODNO(주문번호)를 가격으로 변환하던 버그 제거
-            # 시장가 주문 직후에는 정확한 체결가를 알 수 없으므로,
-            # 일단 진입 시도한 가격(price)을 평단가로 가정합니다.
             entry_guess = price 
-            odno = resp['output'].get('ODNO', 'Unknown')
+            output_dict = resp.get('output', {}) if isinstance(resp.get('output'), dict) else {}
+            odno = output_dict.get('ODNO', 'Unknown')
 
             try:
                 portfolio.update_position({
                     'ticker': ticker,
                     'qty': qty,
-                    'price': entry_guess,  # <--- ✨ 여기가 핵심 수정입니다 ('price'로 통일)
+                    'price': entry_guess,
                     'type': 'BUY',
-                    'time': datetime.datetime.now() # 시간 정보도 명시적으로 전달
+                    'time': datetime.datetime.now()
                 })
             except Exception as e:
                 self.logger.error(f"❌ 포트폴리오 업데이트 실패: {e}")
-                # 포트폴리오 업데이트 실패해도 메시지는 보내야 함
             
             msg = (
                 f"⚡ <b>매수 주문 완료</b>\n"

@@ -187,53 +187,39 @@ class KisApi:
     # 🔍 [시장 데이터] 랭킹 및 시세 조회
     # =================================================================
 
-    @log_api_call("랭킹 조회(통합)")
+    @log_api_call("랭킹 조회(나스닥)")
     def get_ranking(self):
         """
-        급등주 랭킹 조회 (등락률 상위) — NAS + AMS + NYS 전 거래소 통합
-        [수정] EXCD: "NAS" 단일 조회 → 3개 거래소 순차 조회로 변경
-        - 배경: AMEX(AMS) 상장 종목(BATL 등)이 NAS 조회에서 누락되는 버그 수정
-        - 실전 포착 종목 30개 중 5개(16.7%)가 AMS 종목으로 확인됨 (2026-03-04 검증)
+        급등주 랭킹 조회 (등락률 상위) — 나스닥(NAS) 단일 조회
         """
         path = "/uapi/overseas-stock/v1/ranking/updown-rate"
-        all_results = []
+        params = {
+            "AUTH": "", "EXCD": "NAS", "GUBN": "1",
+            "NDAY": "0", "VOL_RANG": "0", "KEYB": ""
+        }
+        data = self._fetch_with_retry(path, params, "HHDFS76290000", timeout=10)
+        if data and data.get('output2'):
+            results = data['output2']
+            for item in results:
+                item['_excd'] = "NAS"
+            self.logger.info(f"[Ranking] 나스닥 등락률 랭킹 수신: {len(results)}개")
+            return results
 
-        for excd in ["NAS"]:
-            params = {
-                "AUTH": "", "EXCD": excd, "GUBN": "1",
-                "NDAY": "0", "VOL_RANG": "0", "KEYB": ""
-            }
-            data = self._fetch_with_retry(path, params, "HHDFS76290000", timeout=10)
-            if data and data.get('output2'):
-                for item in data['output2']:
-                    item['_excd'] = excd  # 디버깅용 거래소 태그
-                all_results.extend(data['output2'])
-                self.logger.debug(f"[Ranking] {excd}: {len(data['output2'])}개 수신")
-
-        if all_results:
-            self.logger.info(f"[Ranking] 전체 수신: {len(all_results)}개 (NAS+AMS+NYS 통합)")
-            return all_results
-
-        self.logger.warning("⚠️ 전 거래소 등락률 랭킹 실패 -> 거래량 순위로 우회 시도")
+        self.logger.warning("⚠️ 나스닥 등락률 랭킹 실패 -> 거래량 순위로 우회 시도")
         return self._get_volume_ranking()
 
     def _get_volume_ranking(self):
-        """[Fallback] 거래량 상위 종목 조회 — NAS + AMS + NYS 통합"""
+        """[Fallback] 거래량 상위 종목 조회 — 나스닥(NAS) 단일 조회"""
         path = "/uapi/overseas-stock/v1/ranking/trade-vol"
-        all_results = []
-
-        for excd in ["NAS"]:
-            params = {
-                "AUTH": "", "EXCD": excd, "GUBN": "0", "VOL_RANG": "0", "KEYB": ""
-            }
-            data = self._fetch_with_retry(path, params, "HHDFS76310010", timeout=5)
-            if data and data.get('output'):
-                for item in data['output']:
-                    item['_excd'] = excd
-                all_results.extend(data['output'])
-
-        if all_results:
-            return all_results
+        params = {
+            "AUTH": "", "EXCD": "NAS", "GUBN": "0", "VOL_RANG": "0", "KEYB": ""
+        }
+        data = self._fetch_with_retry(path, params, "HHDFS76310010", timeout=5)
+        if data and data.get('output'):
+            results = data['output']
+            for item in results:
+                item['_excd'] = "NAS"
+            return results
 
         self.logger.error("❌ 랭킹 조회 최종 실패 (등락률 & 거래량 모두 응답 없음)")
         return []
@@ -528,27 +514,36 @@ class KisApi:
 
     def get_market_spread(self, symbol, exchange="NAS"):
         """
-        [Spread Check] 현재 매수/매도 호가 및 '잔량' 조회
+        [Spread Check] 현재 매수/매도 호가 및 '잔량' 조회 (공식 문서 규격 output2 적용)
         TR_ID: HHDFS76200100
         - exchange: "NAS"(기본값), "AMS"(AMEX), "NYS"(NYSE)
         """
         path = "/uapi/overseas-price/v1/quotations/inquire-asking-price"
-        lookup_excd = self._get_lookup_excd(exchange)  # [수정] 동적 처리
+        lookup_excd = self._get_lookup_excd(exchange)
         params = {
             "AUTH": "", 
-            "EXCD": lookup_excd,  # [수정] 하드코딩 "NAS" → 동적 처리
+            "EXCD": lookup_excd,
             "SYMB": symbol
         }
         
         data = self._fetch_with_retry(path, params, "HHDFS76200100", timeout=3)
         
-        if data and data.get('output1'):
-            # pbid1: 매수 1호가, pask1: 매도 1호가
-            ask = self._safe_float(data['output1'].get('pask1')) 
-            bid = self._safe_float(data['output1'].get('pbid1')) 
-            # [수정] 잔량(Volume)까지 반환해야 main.py의 필터가 작동함
-            ask_vol = self._safe_float(data['output1'].get('vask1'))
-            bid_vol = self._safe_float(data['output1'].get('vbid1'))
+        if data:
+            # 규격서상 1~10호가 데이터는 output2에 위치함
+            output2 = data.get('output2')
+            hoga_data = {}
+            if isinstance(output2, list) and len(output2) > 0:
+                hoga_data = output2[0]
+            elif isinstance(output2, dict):
+                hoga_data = output2
+            elif isinstance(data.get('output1'), dict):
+                hoga_data = data.get('output1')
+
+            # pask1: 매도1호가, pbid1: 매수1호가, vask1: 매도1잔량, vbid1: 매수1잔량
+            ask = self._safe_float(hoga_data.get('pask1')) 
+            bid = self._safe_float(hoga_data.get('pbid1')) 
+            ask_vol = self._safe_float(hoga_data.get('vask1'))
+            bid_vol = self._safe_float(hoga_data.get('vbid1'))
             
             return ask, bid, ask_vol, bid_vol
             
