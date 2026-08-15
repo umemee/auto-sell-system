@@ -113,7 +113,7 @@ class Config:
     HOVER_TOLERANCE = 0.002  
 
     TIME_HARD_CUTOFF = "15:45"
-    STOP_LOSS_PCT = 0.095      
+    STOP_LOSS_PCT = 0.011      
     TARGET_PROFIT_PCT = 0.065  
     TP_PCT = TARGET_PROFIT_PCT 
 
