@@ -477,29 +477,13 @@ def main():
 
                     candle_exporter.update_runtime_candles(sym, df, exchange=selected_exchange)
 
-                    # =========================================================
+                   # =========================================================
                     # 🧠 [Strategy] 전략 엔진 신호 확인
                     # =========================================================
                     signal = strategy.check_entry(sym, df)
 
-                    if signal and signal['type'] == 'BUY':
-                        entry_price = ask if ask > 0 else signal['price']
-    
-                        # 🛡️ [Pre-Trade Validation] 3중 리스크 필터 검사
-                        is_blocked, block_reason = risk_filter.is_order_blocked(
-                            ticker=sym, price=entry_price, current_time_et=now
-                        )
-    
-                        if is_blocked:
-                            # 조건에 걸리면 주문을 내지 않고 다음 종목으로 넘어감 (Pass)
-                            continue
-
-                        # 검증을 통과한 종목만 실제 매수 집행
-                        result = order_manager.execute_buy(portfolio, signal)
-
                     if signal:
                         if signal['type'] == 'BUY':
-                            
                             # -----------------------------------------------------
                             # 🚌 [Missed Bus] 슬롯 여유 확인
                             # -----------------------------------------------------
@@ -512,8 +496,8 @@ def main():
                                 save_state(portfolio.ban_list, active_candidates, risk_filter.loss_blacklist)
                                 continue
                             
-                            # 호가 조회
-                            ask, bid, ask_vol, bid_vol = kis.get_market_spread(sym)
+                            # 호가 조회 (선택된 거래소 코드 반영)
+                            ask, bid, ask_vol, bid_vol = kis.get_market_spread(sym, exchange=selected_exchange or "NAS")
                             
                             if ask > 0 and bid > 0:
                                 spread = (ask - bid) / ask * 100
@@ -527,14 +511,13 @@ def main():
 
                             # =========================================================
                             # 🛡️ [Pre-Trade Validation] 3중 리스크 차단 필터 검사
-                            # (시간대, 주가대, 과거 손절 종목 재진입)
                             # =========================================================
                             is_blocked, block_reason = risk_filter.is_order_blocked(
                                 ticker=sym, price=entry_price, current_time_et=now
                             )
                             
                             if is_blocked:
-                                # 차단된 경우 주문 실행하지 않고 다음 종목으로 패스
+                                logger.warning(f"🛑 [Risk Filter Blocked] {sym}: {block_reason}")
                                 continue
 
                             # =========================================================
@@ -570,7 +553,7 @@ def main():
                                                 
                                                 if qty > 0:
                                                     logger.info(f"⚡ [Pre-Order] {sym} 실제 평단가(${buy_price}) 기반 익절 주문 전송: ${target_price}")
-                                                    kis.send_order(sym, "SELL", qty, target_price, "00")
+                                                    kis.send_order(sym, "SELL", qty, target_price, "00", exchange=selected_exchange or "NAS")
                                                     bot.send_message(f"🔒 [잠금] {sym} 익절 주문 완료 (평단가: ${buy_price:.3f} -> 목표가: ${target_price})")
                                         except Exception as e:
                                             logger.error(f"❌ 익절 주문 중 에러: {e}")
