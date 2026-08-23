@@ -112,6 +112,19 @@ class RealOrderManager:
             return None
 
         # ============================================================
+        # 🛡️ [Anti-FOMO Buffer 0.5%] 시그널 가격 대비 +0.5% 초과 추격 매수 원천 차단
+        # ============================================================
+        buy_slippage_buffer = getattr(Config, 'BUY_SLIPPAGE_BUFFER', 0.005)
+        if price > 0:
+            max_allowed_buy_price = price * (1.0 + buy_slippage_buffer)
+            if ask > max_allowed_buy_price:
+                self.logger.warning(
+                    f"🚫 [Anti-FOMO Reject] {ticker} 매수 호가 과열 이탈 "
+                    f"(Ask ${ask:.2f} > 허용상한 ${max_allowed_buy_price:.2f}, +{buy_slippage_buffer*100:.1f}% 초과) -> 매수 차단"
+                )
+                return None
+
+        # ============================================================
         # 2. 쿨다운 체크
         # ============================================================
         if portfolio.is_banned(ticker):
