@@ -35,15 +35,20 @@ class Config:
         'SVRE', 'TDTH', 'UPC', 'VIVS', 'YXT'
     ]
     # ==========================================
-    # ⚙️ [전략 파라미터 고도화] (v6.0 Update)
+    # ⚙️ [전략 파라미터 고도화] (2026 프로덕션 골든스팟 동결)
     # ==========================================
-    USE_DYNAMIC_EMA = True      
+    USE_DYNAMIC_EMA = False     # 400 EMA 단일 고정
     ENTRY_DEADLINE_HOUR_ET = 10 
     ENTRY_START_TIME = "04:10"  
-    UPPER_BUFFER = 0.02         
+    UPPER_BUFFER = 0.01        # 🛡️ [Anti-FOMO] 매수 상한 버퍼 0.5% (과거 2.0% 결함 차단)
+    BUY_SLIPPAGE_BUFFER = 0.01 # 매수 슬리피지 버퍼 0.5%
     ACTIVATION_THRESHOLD = 0.40 
     MAX_DAILY_CHANGE = 5.0     
     
+    # 🛡️ [F1 5분 급락 방어 필터]
+    CHG_5M_CRASH_FILTER_ENABLED = True
+    CHG_5M_CRASH_THRESHOLD = -0.04  # -4.0% 이하 급락 시 진입 차단
+
     GAP_LIMIT_GLOBAL = 0.40    
     GAP_LIMIT_LATE = 0.10      
     LATE_HOUR_START = 9        
@@ -94,7 +99,7 @@ class Config:
     MARKET_SELL_BUFFER_PCT = 0.95     
     
     PRICE_RECHECK_ENABLED = True      
-    MAX_PRICE_DEVIATION_PCT = 2.0     
+    MAX_PRICE_DEVIATION_PCT = 0.5     # 호가 이탈 허용치 0.5% (Anti-FOMO)
     BALANCE_RECHECK_ENABLED = True    
     TOKEN_AUTO_REFRESH = True         
     
@@ -113,8 +118,8 @@ class Config:
     HOVER_TOLERANCE = 0.002  
 
     TIME_HARD_CUTOFF = "15:45"
-    STOP_LOSS_PCT = 0.095      
-    TARGET_PROFIT_PCT = 0.065  
+    STOP_LOSS_PCT = 0.10       # 10% 기본 손절선 (백테스트 동기화)
+    TARGET_PROFIT_PCT = 0.07   # 7% 고정 익절선 (백테스트 동기화)
     TP_PCT = TARGET_PROFIT_PCT 
 
     # ==========================================

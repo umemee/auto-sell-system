@@ -36,31 +36,34 @@ class EmaStrategy:
         # ------------------------------------------------------------------
         # 기존 설정값 로드
         # ------------------------------------------------------------------
-        self.ma_length = getattr(Config, 'EMA_LENGTH', 200) 
-        self.tp_pct = getattr(Config, 'TARGET_PROFIT_PCT', 0.12)
-        self.sl_pct = getattr(Config, 'STOP_LOSS_PCT', 0.40)
+        self.ma_length = getattr(Config, 'EMA_LENGTH', 400) 
+        self.tp_pct = getattr(Config, 'TARGET_PROFIT_PCT', 0.07)
+        self.sl_pct = getattr(Config, 'STOP_LOSS_PCT', 0.10)
         self.dip_tolerance = getattr(Config, 'DIP_TOLERANCE', 0.005)
         self.max_holding_minutes = getattr(Config, 'MAX_HOLDING_MINUTES', 0) # 0=무제한
         
         # [GapZone V3.0 New Configs]
         self.entry_end_hour = getattr(Config, 'ENTRY_DEADLINE_HOUR_ET', 10)
         self.entry_start_time_str = getattr(Config, 'ENTRY_START_TIME', "04:10")
-        self.upper_buffer = getattr(Config, 'UPPER_BUFFER', 0.02)
+        self.upper_buffer = getattr(Config, 'UPPER_BUFFER', 0.005)
         self.activation_threshold = getattr(Config, 'ACTIVATION_THRESHOLD', 0.40)
         
         # [Emergency Fix] 과열 기준 (기본 150% = 1.5, OBAI 방어용)
-        # Config에 없으면 3.0(300%)을 기본값으로 하여 안전장치 마련
-        self.max_daily_change = getattr(Config, 'MAX_DAILY_CHANGE', 3.0)
+        self.max_daily_change = getattr(Config, 'MAX_DAILY_CHANGE', 5.0)
+
+        # 🛡️ [F1 Crash Filter] 5분 급락 방어 필터 설정 로드
+        self.chg_5m_crash_filter_enabled = getattr(Config, 'CHG_5M_CRASH_FILTER_ENABLED', True)
+        self.chg_5m_crash_threshold = getattr(Config, 'CHG_5M_CRASH_THRESHOLD', -0.04)
 
         # ✅ [NEW] 하이브리드 필터 설정 로드
-        self.gap_limit_global = getattr(Config, 'GAP_LIMIT_GLOBAL', 0.30)
+        self.gap_limit_global = getattr(Config, 'GAP_LIMIT_GLOBAL', 0.40)
         self.gap_limit_late = getattr(Config, 'GAP_LIMIT_LATE', 0.10)
         self.late_hour_start = getattr(Config, 'LATE_HOUR_START', 9)
 
         # 🛡️ [NEW] Upper Wick Filter 설정 로드
         self.upper_wick_filter_enabled = getattr(Config, 'UPPER_WICK_FILTER_ENABLED', False)
         self.upper_wick_filter_threshold_pct = getattr(Config, 'UPPER_WICK_FILTER_THRESHOLD_PCT', 17.708)
-        self.upper_wick_filter_use_closed_candle_only = getattr(Config, 'UPPER_WICK_FILTER_USE_CLOSED_CANDLE_ONLY', True)
+        self.upper_wick_filter_use_closed_candle_only = getattr(Config, 'UPPER_WICK_FILTER_USE_CLOSED_CANDLE_ONLY', False)
         
         # 윗꼬리 필터 전용 로그 폴더 생성
         self.upper_wick_skip_log_dir = Path(os.getcwd()) / "logs" / "live"
@@ -219,10 +222,20 @@ class EmaStrategy:
             self._log_rejection(ticker, f"🚫 5~10시 가동 중지 구간 ({current_time.strftime('%H:%M')})", current_price)
             return None
 
+        # [실전 리스크 1] ⏰ ET 09:15 ~ 09:30 (KST 22:15 ~ 22:30) 진입 금지
+        cur_min_et = current_time.hour * 60 + current_time.minute
+        if 555 <= cur_min_et <= 570:
+            self._log_rejection(ticker, f"🚫 [TIME_WINDOW] 개장 직전 대기 (ET 09:15~09:30, 현재 {current_time.strftime('%H:%M')})", current_price)
+            return None
+
+        # [실전 리스크 2] 🚫 주가 $5.00 <= price < $10.00 진입 금지 (Price Band Filter)
+        if 5.0 <= current_price < 10.0:
+            self._log_rejection(ticker, f"🚫 [PRICE_BAND] 고위험 주가대 차단 (${current_price:.2f} in [$5.00, $10.00))", current_price)
+            return None
+
         # 🛡️ [New Rule] 장 시작 후 5분간 진입 금지 (Market Open Filter)
         # 미국 시간 09:30 ~ 09:35 (한국 23:30 ~ 23:35) 노이즈 및 API 오류 회피
         if current_time.hour == 9 and 30 <= current_time.minute < 35:
-             # 로그를 남기고 싶으면 주석 해제
              self._log_rejection(ticker, "장 초반 대기 (Market Open Wait)", current_price)
              return None
 
@@ -380,6 +393,22 @@ class EmaStrategy:
                 self._log_rejection(ticker, f"모멘텀 부족 (최고점 {recent_peak:.2f} < EMA 3% {prev_ema*1.03:.2f})", current_price)
                 return None
             
+        # =========================================================
+        # 🛡️ [F1 Crash Filter] 5분 급락 방어 필터 (-4.0% 이하 차단)
+        # =========================================================
+        if self.chg_5m_crash_filter_enabled:
+            if len(df) >= 6:
+                price_5m_ago = df['close'].iloc[-6]
+                if price_5m_ago > 0:
+                    chg_5m = (current_price - price_5m_ago) / price_5m_ago
+                    if chg_5m <= self.chg_5m_crash_threshold:
+                        self._log_rejection(
+                            ticker,
+                            f"🚫 [F1-CRASH] 5분 급락 차단 (chg_5m={chg_5m*100:.2f}% <= {self.chg_5m_crash_threshold*100:.1f}%)",
+                            current_price
+                        )
+                        return None
+
         # 5. 진입 조건 검사
         lower_bound = prev_ema * (1 - self.dip_tolerance)
         upper_bound = prev_ema * (1 + self.upper_buffer) 
