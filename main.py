@@ -375,6 +375,7 @@ def main():
             if new_date_str != current_date_str:
                 logger.info(f"📅 [New Day] 날짜 변경 감지: {current_date_str} -> {new_date_str}")
                 portfolio.ban_list.clear()
+                strategy.daily_reset()     # 👈 [추가] 일별 세션 상태(banned_tickers 등) 초기화
                 risk_filter.reset_daily()  # 👈 [추가] 일일 리스크 필터 리셋
                 active_candidates.clear()
                 candle_cache.clear()
