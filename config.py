@@ -123,8 +123,11 @@ class Config:
     TP_PCT = TARGET_PROFIT_PCT 
 
     # ==========================================
-    # 🛡️ [안전장치] Upper Wick Filter
+    # 🛡️ [2026 Golden Spot] 직전봉 윗꼬리 및 고점 눌림목 복합 진입 필터 (B4 최적 룰)
     # ==========================================
-    UPPER_WICK_FILTER_ENABLED = False
-    UPPER_WICK_FILTER_THRESHOLD_PCT = 17.708333333333176
-    UPPER_WICK_FILTER_USE_CLOSED_CANDLE_ONLY = False
+    UPPER_WICK_FILTER_ENABLED = True
+    UPPER_WICK_FILTER_THRESHOLD_PCT = 65.0
+    UPPER_WICK_FILTER_USE_CLOSED_CANDLE_ONLY = True
+
+    ENABLE_MIN_PEAK_DRAWDOWN_FILTER = True
+    MIN_PEAK_DRAWDOWN_PCT = 10.0

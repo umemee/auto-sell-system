@@ -60,11 +60,15 @@ class EmaStrategy:
         self.gap_limit_late = getattr(Config, 'GAP_LIMIT_LATE', 0.10)
         self.late_hour_start = getattr(Config, 'LATE_HOUR_START', 9)
 
-        # 🛡️ [NEW] Upper Wick Filter 설정 로드
-        self.upper_wick_filter_enabled = getattr(Config, 'UPPER_WICK_FILTER_ENABLED', False)
-        self.upper_wick_filter_threshold_pct = getattr(Config, 'UPPER_WICK_FILTER_THRESHOLD_PCT', 17.708)
-        self.upper_wick_filter_use_closed_candle_only = getattr(Config, 'UPPER_WICK_FILTER_USE_CLOSED_CANDLE_ONLY', False)
+        # 🛡️ [2026 Golden Spot] Upper Wick Filter 설정 로드
+        self.upper_wick_filter_enabled = getattr(Config, 'UPPER_WICK_FILTER_ENABLED', True)
+        self.upper_wick_filter_threshold_pct = getattr(Config, 'UPPER_WICK_FILTER_THRESHOLD_PCT', 65.0)
+        self.upper_wick_filter_use_closed_candle_only = getattr(Config, 'UPPER_WICK_FILTER_USE_CLOSED_CANDLE_ONLY', True)
         
+        # 🛡️ [2026 Golden Spot] 고점 대비 최소 눌림폭 필터 (Peak Drawdown Filter) 설정 로드
+        self.enable_min_peak_drawdown_filter = getattr(Config, 'ENABLE_MIN_PEAK_DRAWDOWN_FILTER', True)
+        self.min_peak_drawdown_pct = getattr(Config, 'MIN_PEAK_DRAWDOWN_PCT', 10.0)
+
         # 윗꼬리 필터 전용 로그 폴더 생성
         self.upper_wick_skip_log_dir = Path(os.getcwd()) / "logs" / "live"
         self.upper_wick_skip_log_dir.mkdir(parents=True, exist_ok=True)
@@ -349,6 +353,17 @@ class EmaStrategy:
                             current_price
                         )
                         return None
+
+                    # 🛡️ 1.1 [B4 Peak Drawdown] 당일 고점 대비 최소 10% 이상 정상 눌림목 확인
+                    if self.enable_min_peak_drawdown_filter and max_price_so_far > 0:
+                        peak_dd_pct = (max_price_so_far - current_price) / max_price_so_far * 100.0
+                        if peak_dd_pct < self.min_peak_drawdown_pct:
+                            self._log_rejection(
+                                ticker,
+                                f"🚫 [PEAK-DD] 고점 눌림 부족 ({peak_dd_pct:.1f}% < {self.min_peak_drawdown_pct:.1f}%)",
+                                current_price
+                            )
+                            return None
                     
                     # 🛡️ 2. [Global Safety] "독이 든 성배" 필터 (전일 종가 기준 300% 이상)
                     if max_change_ratio >= self.max_daily_change:
