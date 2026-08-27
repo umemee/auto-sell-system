@@ -148,6 +148,7 @@ def main():
         
         loaded_ban, loaded_candidates, loaded_loss = load_state()
         portfolio.ban_list.update(loaded_ban)
+        strategy.banned_tickers.update(loaded_ban)
         risk_filter.loss_blacklist.update(loaded_loss)
         
         if isinstance(loaded_candidates, (set, list)):
@@ -567,7 +568,9 @@ def main():
                                         save_state(portfolio.ban_list, active_candidates, risk_filter.loss_blacklist)
 
                         elif signal['type'] == 'DROP':
-                            logger.info(f"🗑️ [DROP] {sym} 추세 붕괴 확인 -> 감시 해제")
+                            logger.info(f"🗑️ [DROP] {sym} 추세 붕괴 확인 -> 감시 해제 및 당일 영구 밴 등록")
+                            portfolio.ban_list.add(sym)
+                            strategy.banned_tickers.add(sym)
                             try:
                                 del active_candidates[sym]
                             except KeyError:

@@ -115,7 +115,9 @@ class Config:
     MAX_SLOTS = 2             
     EMA_LENGTH = 400           
     DIP_TOLERANCE = 0.005    
+    SUPPORT_DROP_SLACK_PCT = 0.003  # ⚡ 지지선 이탈(DROP) 0.3% 미세 완충 버퍼 (백테스트 동기화)
     HOVER_TOLERANCE = 0.002  
+
 
     TIME_HARD_CUTOFF = "15:45"
     STOP_LOSS_PCT = 0.10       # 10% 기본 손절선 (백테스트 동기화)
