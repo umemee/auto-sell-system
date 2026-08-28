@@ -473,7 +473,7 @@ def main():
                             df = old_df
 
                     if df is None or df.empty or len(df) < 26:
-                        strategy._log_rejection(sym, "데이터 부족 (NAS/NYS/AMS 전체 탐색 실패)")
+                        strategy._log_rejection(sym, "데이터 부족 (NAS/NYS/AMS 전체 탐색 실패)", 0.0)
                         candle_cache.pop(sym, None)
                         continue
 
