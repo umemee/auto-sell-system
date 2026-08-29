@@ -114,7 +114,7 @@ class Config:
     ACTIVE_STRATEGY = "EMA_ZONE1"
     MAX_SLOTS = 2             
     EMA_LENGTH = 400           
-    DIP_TOLERANCE = 0.005    
+    DIP_TOLERANCE = 0.010      # 지지선 허용오차 1.0% (백테스트 ENTRY_PRICE_BUFFER 동기화)
     SUPPORT_DROP_SLACK_PCT = 0.003  # ⚡ 지지선 이탈(DROP) 0.3% 미세 완충 버퍼 (백테스트 동기화)
     HOVER_TOLERANCE = 0.002  
 
