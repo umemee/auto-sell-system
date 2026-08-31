@@ -108,7 +108,21 @@ def is_active_market_time():
     return False, f"After Market / Night (NY: {now_et.strftime('%H:%M')} | KR: {now_kst.strftime('%H:%M')})"
 
 def main():
-    logger.info("🚀 GapZone System v5.4 (3-Tier Risk Filter Edition) Starting...")
+    # =========================================================================
+    # 🚨 [CRITICAL SAFETY] 실행 모드 경고 배너 출력
+    # =========================================================================
+    is_paper_mode = (getattr(Config, 'EXECUTION_MODE', 'REAL') == 'PAPER_TRADING_ONLY' or getattr(Config, 'IS_PAPER_TRADING', False))
+    if is_paper_mode:
+        print("\n" + "=" * 85)
+        print("🚨 [MODE: PAPER TRADING / REAL ORDERS DISABLED]")
+        print("🚨 실제 브로커 주문 API 전면 차단됨! 가상 체결 엔진(Virtual Simulator)으로 동작합니다.")
+        print("=" * 85 + "\n")
+        logger.critical("================================================================================")
+        logger.critical("🚨 [MODE: PAPER TRADING / REAL ORDERS DISABLED]")
+        logger.critical("🚨 실제 브로커 주문 API 전면 차단됨! 가상 체결 엔진(Virtual Simulator)으로 가동됩니다.")
+        logger.critical("================================================================================")
+
+    logger.info("🚀 GapZone System v5.5 (Paper Trading Simulator Edition) Starting...")
     
     tz_kst = pytz.timezone('Asia/Seoul')
     tz_et = pytz.timezone('US/Eastern')
@@ -116,7 +130,7 @@ def main():
     now_et_start = datetime.datetime.now(tz_et)
     
     logger.info(f"⏰ [Time Check] Korea: {now_kst_start.strftime('%Y-%m-%d %H:%M:%S')} | NY: {now_et_start.strftime('%Y-%m-%d %H:%M:%S')}")
-    logger.info(f"⚙️ [Config] 활동 시간: NY {ACTIVE_START_HOUR}:00 ~ {ACTIVE_END_HOUR}:00")
+    logger.info(f"⚙️ [Config] 활동 시간: NY {ACTIVE_START_HOUR}:00 ~ {ACTIVE_END_HOUR}:00 | 모드: {'PAPER TRADING' if is_paper_mode else 'REAL'}")
 
     last_heartbeat_time = time.time()
     HEARTBEAT_INTERVAL = getattr(Config, 'HEARTBEAT_INTERVAL_SEC', 40000)
@@ -256,7 +270,8 @@ def main():
                         
                         if exit_signal:
                             reason = exit_signal['reason']
-                            if reason != 'TAKE_PROFIT':
+                            # 페이퍼 모드이거나 실전 비상 매도(손절/타임컷)일 때 매도 집행
+                            if is_paper_mode or reason != 'TAKE_PROFIT':
                                 entry_p = pos.get('entry_price', real_time_price)
                                 trade_pnl = (real_time_price - entry_p) / entry_p if entry_p > 0 else -0.01
 
@@ -264,8 +279,13 @@ def main():
                                 if result:
                                     bot.send_message(result['msg'])
             
-                                    # 🛑 손절 발생 즉시 3중 필터 블랙리스트에 추가
-                                    risk_filter.register_trade_result(ticker, trade_pnl, reason=reason)
+                                    # 🛑 손절 발생 즉시 3중 필터 블랙리스트에 추가 (손절일 경우만)
+                                    if trade_pnl < 0:
+                                        risk_filter.register_trade_result(ticker, trade_pnl, reason=reason)
+                                    
+                                    if ticker in active_candidates:
+                                        del active_candidates[ticker]
+                                        
                                     save_state(portfolio.ban_list, active_candidates, risk_filter.loss_blacklist)
                     
                     time.sleep(0.5)
@@ -554,9 +574,13 @@ def main():
                                                 qty = result.get('qty', 0)
                                                 
                                                 if qty > 0:
-                                                    logger.info(f"⚡ [Pre-Order] {sym} 실제 평단가(${buy_price}) 기반 익절 주문 전송: ${target_price}")
-                                                    kis.send_order(sym, "SELL", qty, target_price, "00", exchange=selected_exchange or "NAS")
-                                                    bot.send_message(f"🔒 [잠금] {sym} 익절 주문 완료 (평단가: ${buy_price:.3f} -> 목표가: ${target_price})")
+                                                    if is_paper_mode:
+                                                        logger.info(f"🔒 [PAPER Pre-Order] {sym} 가상 익절 목표가(${target_price}) 감시 등록 완료 (평단가: ${buy_price:.3f})")
+                                                        bot.send_message(f"🔒 [가상 익절 잠금/PAPER] {sym} 익절 감시 등록 (평단가: ${buy_price:.3f} -> 목표가: ${target_price:.2f})")
+                                                    else:
+                                                        logger.info(f"⚡ [Pre-Order] {sym} 실제 평단가(${buy_price}) 기반 익절 주문 전송: ${target_price}")
+                                                        kis.send_order(sym, "SELL", qty, target_price, "00", exchange=selected_exchange or "NAS")
+                                                        bot.send_message(f"🔒 [잠금] {sym} 익절 주문 완료 (평단가: ${buy_price:.3f} -> 목표가: ${target_price})")
                                         except Exception as e:
                                             logger.error(f"❌ 익절 주문 중 에러: {e}")
 

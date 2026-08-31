@@ -8,6 +8,15 @@ load_dotenv()
 
 class Config:
     # ==========================================
+    # 🚨 [CRITICAL SAFETY] 실행 모드 고정 (실매매 전면 차단)
+    # ==========================================
+    EXECUTION_MODE = "PAPER_TRADING_ONLY"  # 🔒 실계좌 주문 전송 100% 차단 및 페이퍼 트레이딩 모드
+    IS_PAPER_TRADING = True
+    VIRTUAL_INITIAL_BALANCE = 10000.0      # 가상 시작 예수금 ($10,000)
+    VIRTUAL_LATENCY_MS = 100               # 네트워크 지연 모사 (100ms)
+    VIRTUAL_SLIPPAGE_PCT = 0.0003          # 시장가 슬리피지 페널티 (0.03%)
+
+    # ==========================================
     # 🕒 [시간 설정] (중요!)
     # ==========================================
     ACTIVE_START_HOUR = 4  
