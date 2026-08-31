@@ -45,10 +45,12 @@ def log_api_call(api_name):
         @functools.wraps(func)
         def wrapper(*args, **kwargs):
             logger = get_logger()
-            # logger.debug(f"📤 API Request: {api_name}") # 너무 시끄러우면 주석 처리
             try:
                 result = func(*args, **kwargs)
                 return result
+            except AssertionError:
+                # 🚨 Fail-safe assertion은 삼키지 않고 즉시 프로세스 중단으로 전파
+                raise
             except Exception as e:
                 logger.error(f"❌ API Fail [{api_name}]: {e}")
                 return None
@@ -112,3 +114,13 @@ def get_next_market_open():
 
     return target
 
+def round_price(price: float) -> float:
+    """
+    SEC Rule 612 Sub-Penny Rule 규격 가격 보정:
+    - $1.00 이상: 2자리 ($0.01)
+    - $1.00 미만: 4자리 ($0.0001)
+    """
+    if price >= 1.0:
+        return round(float(price), 2)
+    else:
+        return round(float(price), 4)

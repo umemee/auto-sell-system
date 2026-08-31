@@ -371,6 +371,13 @@ class KisApi:
         """
         [수정] ord_dvsn 파라미터 추가 (기본값 "00": 지정가)
         """
+        # =========================================================================
+        # 🚨 [CRITICAL FAIL-SAFE] 실매매 전면 차단 (Paper Trading Only Mode)
+        # =========================================================================
+        if getattr(Config, 'EXECUTION_MODE', 'REAL') == 'PAPER_TRADING_ONLY' or getattr(Config, 'IS_PAPER_TRADING', False):
+            self.logger.critical("🚨 [FATAL ERROR] Real trading is strictly disabled! Attempted to call actual broker order API.")
+            raise AssertionError("🚨 [FATAL ERROR] Real trading is strictly disabled! Attempted to call actual broker order API (place_order_final).")
+
         path = "/uapi/overseas-stock/v1/trading/order"
         is_buy = (side == "BUY")
         tr_id = "TTTT1002U" if is_buy else "TTTT1006U"
@@ -705,6 +712,13 @@ class KisApi:
         """
         [주문 취소] 거래소 정보를 인자로 받아 유동적으로 처리
         """
+        # =========================================================================
+        # 🚨 [CRITICAL FAIL-SAFE] 실매매 전면 차단 (Paper Trading Only Mode)
+        # =========================================================================
+        if getattr(Config, 'EXECUTION_MODE', 'REAL') == 'PAPER_TRADING_ONLY' or getattr(Config, 'IS_PAPER_TRADING', False):
+            self.logger.critical("🚨 [FATAL ERROR] Real trading is strictly disabled! Attempted to call actual broker order API.")
+            raise AssertionError("🚨 [FATAL ERROR] Real trading is strictly disabled! Attempted to call actual broker order API (cancel_order).")
+
         path = "/uapi/overseas-stock/v1/trading/order-rvsecncl"
         tr_id = "TTTT1004U" 
 

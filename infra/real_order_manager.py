@@ -3,19 +3,23 @@ import time
 import datetime
 from config import Config
 from infra.utils import get_logger
+from infra.paper_execution_engine import VirtualExecutionEngine
 
 class RealOrderManager:
     """
-    [Real Order Manager V3.1 - Smart Logging Edition]
-    - 스프레드 과다 시 1분 간격으로만 로그 기록 (I/O 부하 방지)
-    - 호가 잔량(Volume) 정보를 함께 기록하여 원인 분석 강화
-    - Bid가 0일 경우(매수세 실종) 0으로 나누기 에러 방지
+    [Real Order Manager V3.2 - Paper Trading & Virtual Execution Integrated]
+    - EXECUTION_MODE == 'PAPER_TRADING_ONLY' 시 가상 체결 엔진(VirtualExecutionEngine) 자동 위임
+    - 실계좌 주문 API 호출 100% 원천 차단
     """
     APBK2623_CANCEL_GUARD_SECONDS = 60
 
     def __init__(self, kis_api):
         self.kis = kis_api
         self.logger = get_logger("OrderManager")
+        
+        # 🚨 페이퍼 트레이딩 모드 여부 및 가상 체결 엔진 초기화
+        self.is_paper = (getattr(Config, 'EXECUTION_MODE', 'REAL') == 'PAPER_TRADING_ONLY' or getattr(Config, 'IS_PAPER_TRADING', False))
+        self.virtual_engine = VirtualExecutionEngine(kis_api)
         
         # 🛡️ [로그 폭탄 방지] 종목별 마지막 로그 시간 기록부
         self.log_throttle_map = {} 
@@ -139,23 +143,31 @@ class RealOrderManager:
             return {'status': 'failed', 'msg': f"❌ 잔고 부족 또는 수량 계산 실패 ({ticker})"}
 
         # ============================================================
-        # 4. 주문 전송 (나스닥 전용)
+        # 4. 주문 전송 (페이퍼 모드 분기)
         # ============================================================
-        resp = self.kis.send_order(
-            ticker=ticker,
-            side="BUY",
-            qty=qty,
-            price=price,        
-            order_type="MARKET",
-            exchange="NAS"
-        )
+        if self.is_paper:
+            resp = self.virtual_engine.execute_paper_buy(
+                ticker=ticker,
+                qty=qty,
+                signal_price=price,
+                exchange="NAS"
+            )
+        else:
+            resp = self.kis.send_order(
+                ticker=ticker,
+                side="BUY",
+                qty=qty,
+                price=price,        
+                order_type="MARKET",
+                exchange="NAS"
+            )
         
         # ============================================================
         # 5. 결과 처리
         # ============================================================
         if resp and resp.get('rt_cd') == '0':
-            entry_guess = price 
             output_dict = resp.get('output', {}) if isinstance(resp.get('output'), dict) else {}
+            entry_guess = output_dict.get('fill_price', price)
             odno = output_dict.get('ODNO', 'Unknown')
 
             try:
@@ -163,20 +175,22 @@ class RealOrderManager:
                     'ticker': ticker,
                     'qty': qty,
                     'price': entry_guess,
+                    'entry_price': entry_guess,
                     'type': 'BUY',
                     'time': datetime.datetime.now()
                 })
             except Exception as e:
                 self.logger.error(f"❌ 포트폴리오 업데이트 실패: {e}")
             
+            mode_tag = " [PAPER]" if self.is_paper else ""
             msg = (
-                f"⚡ <b>매수 주문 완료</b>\n"
+                f"⚡ <b>가상 매수 체결 완료{mode_tag}</b>\n"
                 f"📦 종목: {ticker}\n"
                 f"🔢 수량: {qty}주\n"
-                f"💵 기준가: ${price}\n"
+                f"💵 체결가: ${entry_guess:.4f} (시그널: ${price:.4f})\n"
                 f"📝 주문번호: {odno}"
             )
-            return {'status': 'success', 'msg': msg, 'qty': qty, 'avg_price': price}
+            return {'status': 'success', 'msg': msg, 'qty': qty, 'avg_price': entry_guess}
         else:
             fail_msg = resp.get('msg1', '알 수 없는 오류') if resp else '응답 없음'
             return {'status': 'failed', 'msg': f"❌ 매수 실패 ({ticker}): {fail_msg}"}
@@ -193,54 +207,83 @@ class RealOrderManager:
             return None
 
         qty = position['qty']
+        entry_price = position.get('entry_price', price)
         
         # ============================================================
         # 🛡️ [Safety Protocol] 기존 주문 취소 (선주문 해결)
         # ============================================================
         # 익절/손절/타임컷 상관없이, 매도를 하려면 기존 주문(익절 대기 등)을 치워야 합니다.
-        self._clear_pending_orders(ticker)
+        if not self.is_paper:
+            self._clear_pending_orders(ticker)
 
         # ============================================================
-        # 🔫 [Execution] 매도 주문 실행
+        # 🔫 [Execution] 매도 주문 실행 (페이퍼 모드 분기)
         # ============================================================
-        order_type = "00" # 지정가 기본
-        order_price = price
-
-        # [조건별 주문 유형 설정]
-        if reason == "TAKE_PROFIT":
-            # 익절 대기는 전략이 지정한 가격 그대로
-            order_type = "00" 
-        elif reason == "TRAILING_STOP":
-            # 🚀 트레일링 스탑: 수익 보존이 목적이므로 너무 후려치지 않고 -1% 하단으로 시장가 체결 유도
-            order_type = "00"
-            if price > 0:
-                order_price = price * 0.99
+        if self.is_paper:
+            resp = self.virtual_engine.execute_paper_sell(
+                ticker=ticker,
+                qty=qty,
+                entry_price=entry_price,
+                signal_price=price,
+                reason=reason,
+                exchange="NAS"
+            )
+            order_price = resp.get('output', {}).get('fill_price', price) if resp else price
         else:
-            # 🚨 비상 상황 (STOP_LOSS, TIME_CUT, EOD)
-            # 무조건 팔려야 하므로 현재가 대비 -5% 하한가로 강하게 집어 던짐
-            order_price = 0 
-            order_type = "00" 
-            if price > 0:
-                order_price = price * 0.95
+            order_type = "00" # 지정가 기본
+            order_price = price
 
-        # 주문 전송
-        self.logger.info(f"📉 [{reason}] 매도 시도: {ticker} (가격: {order_price}, 수량: {qty})")
-        
-        resp = self.kis.send_order(
-            ticker=ticker,
-            side="SELL",
-            qty=qty,
-            price=order_price,
-            order_type=order_type 
-        )
+            # [조건별 주문 유형 설정]
+            if reason == "TAKE_PROFIT":
+                order_type = "00" 
+            elif reason == "TRAILING_STOP":
+                order_type = "00"
+                if price > 0:
+                    order_price = price * 0.99
+            else:
+                order_price = 0 
+                order_type = "00" 
+                if price > 0:
+                    order_price = price * 0.95
+
+            # 주문 전송
+            self.logger.info(f"📉 [{reason}] 매도 시도: {ticker} (가격: {order_price}, 수량: {qty})")
+            
+            resp = self.kis.send_order(
+                ticker=ticker,
+                side="SELL",
+                qty=qty,
+                price=order_price,
+                order_type=order_type 
+            )
 
         if resp and resp.get('rt_cd') == '0':
-            # 포트폴리오에서 즉시 제거 (재진입 방지 쿨다운은 main.py에서 처리)
-            portfolio.close_position(ticker)
+            output_dict = resp.get('output', {}) if isinstance(resp.get('output'), dict) else {}
+            realized_pnl = output_dict.get('realized_pnl', (order_price - entry_price) * qty)
+            return_pct = output_dict.get('return_pct', ((order_price - entry_price) / entry_price * 100.0 if entry_price > 0 else 0.0))
             
+            if self.is_paper:
+                # 🛡️ 페이퍼 모드: 매도 대금 및 실현 손익 가상 잔고에 반영
+                portfolio.update_position({
+                    'ticker': ticker,
+                    'qty': qty,
+                    'price': order_price,
+                    'type': 'SELL',
+                    'time': datetime.datetime.now()
+                })
+            else:
+                # 포트폴리오에서 즉시 제거 (재진입 방지 쿨다운은 main.py에서 처리)
+                portfolio.close_position(ticker)
+            
+            mode_tag = " [PAPER]" if self.is_paper else ""
             return {
                 'status': 'success',
-                'msg': f"🔴 [매도] {ticker} ({reason})\n수량: {qty}주 | 가격: ${order_price:.2f}"
+                'msg': (
+                    f"🔴 <b>[가상 매도 체결{mode_tag}] {ticker}</b>\n"
+                    f"사유: {reason}\n"
+                    f"수량: {qty}주 | 체결가: ${order_price:.4f}\n"
+                    f"손익: ${realized_pnl:+.2f} ({return_pct:+.2f}%)"
+                )
             }
         else:
             self.logger.error(f"❌ 매도 실패 ({ticker}): {resp}")

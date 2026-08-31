@@ -2,31 +2,28 @@
 import logging
 from config import Config
 import datetime
-import pytz # 시간 기록을 위해 필수
+import pytz
 
 class RealPortfolio:
     """
-    [RealPortfolio V2.1 - Memory Enhanced & Integrity Protected]
-
-    업그레이드 사항:
-      1. State Preservation (기억 보존): 
-         - API Sync 시 기존의 'highest_price'(고점) 정보를 덮어쓰지 않고 유지합니다.
-         - 트레일링 스탑(Trailing Stop)이 정상 작동하기 위한 필수 조치입니다.
-      2. Cool-down (재진입 금지): 
-         - 'ban_list'를 도입하여 당일 매도한 종목은 장 마감 전까지 재매수를 차단합니다.
-      3. Data Integrity (데이터 무결성):
-         - API 잔고와 로컬 상태를 지능적으로 병합(Merge)합니다.
+    [RealPortfolio V2.2 - Paper Trading & Virtual Portfolio Integrated]
+    - EXECUTION_MODE == 'PAPER_TRADING_ONLY' 시 가상 예수금($10,000) 및 가상 포지션 관리
+    - 실제 증권사 계좌 및 자금 영향 0% 보장
     """
 
     def __init__(self, kis_api):
         self.logger = logging.getLogger("RealPortfolio")
         self.kis = kis_api
 
+        # 🚨 페이퍼 트레이딩 모드 여부
+        self.is_paper = (getattr(Config, 'EXECUTION_MODE', 'REAL') == 'PAPER_TRADING_ONLY' or getattr(Config, 'IS_PAPER_TRADING', False))
+
         # ----------------------------------------------------
         # 📊 Dynamic State (변동 데이터)
         # ----------------------------------------------------
-        self.balance = 0.0          # 실제 주문 가능 금액 (Buying Power)
-        self.total_equity = 0.0     # 총 자산 (현금 + 주식 평가액)
+        # 페이퍼 모드 시 가상 시작 예수금($10,000) 할당
+        self.balance = getattr(Config, 'VIRTUAL_INITIAL_BALANCE', 10000.0) if self.is_paper else 0.0
+        self.total_equity = self.balance
         
         # Positions Dictionary
         # { 'TICKER': { 'qty': 10, 'entry_price': 100, 'highest_price': 120, ... } }
@@ -46,7 +43,27 @@ class RealPortfolio:
         """
         [Smart Sync Logic] 
         API 잔고를 가져오되, 로컬의 중요 정보(highest_price)는 보존하는 병합 로직
+        - 페이퍼 모드 시 실제 증권사 계좌를 건드리지 않고 로컬 가상 포지션 시세만 갱신
         """
+        if self.is_paper:
+            # 🛡️ 페이퍼 모드: 가상 포지션 현재가 및 평가액 갱신
+            current_stock_value = 0.0
+            for ticker, pos in list(self.positions.items()):
+                try:
+                    cur_price = self.kis.get_current_price(ticker)
+                    if cur_price and cur_price > 0:
+                        pos['current_price'] = cur_price
+                        pos['eval_value'] = cur_price * pos['qty']
+                        pos['pnl_pct'] = ((cur_price - pos['entry_price']) / pos['entry_price'] * 100.0) if pos['entry_price'] > 0 else 0.0
+                        if cur_price > pos.get('highest_price', 0):
+                            pos['highest_price'] = cur_price
+                    current_stock_value += pos.get('eval_value', pos['qty'] * pos['entry_price'])
+                except Exception as e:
+                    self.logger.warning(f"⚠️ [Paper Sync] {ticker} 시세 갱신 실패: {e}")
+                    current_stock_value += pos.get('eval_value', pos['qty'] * pos['entry_price'])
+            self.total_equity = self.balance + current_stock_value
+            return
+
         try:
             # 1. 자산(예수금) 조회
             # TTTS3007R (주문 가능 금액) 사용 -> 미수 발생 방지
@@ -312,6 +329,8 @@ class RealPortfolio:
     # [신규 추가] 외부(main.py)에서 호출할 잔고 강제 동기화 함수
     def sync_balance(self):
         """API를 통해 예수금만 강제 동기화 (매도 직후 사용)"""
+        if self.is_paper:
+            return
         try:
             # get_buyable_cash는 kis_api에 구현되어 있어야 함
             cash = self.kis.get_buyable_cash() 
