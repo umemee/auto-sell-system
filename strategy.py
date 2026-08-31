@@ -45,7 +45,10 @@ class EmaStrategy:
         # [GapZone V3.0 New Configs]
         self.entry_end_hour = getattr(Config, 'ENTRY_DEADLINE_HOUR_ET', 10)
         self.entry_start_time_str = getattr(Config, 'ENTRY_START_TIME', "04:10")
-        self.upper_buffer = getattr(Config, 'UPPER_BUFFER', 0.005)
+        self.use_pause_window = getattr(Config, 'USE_PAUSE_WINDOW', True)
+        self.pause_start_hour = getattr(Config, 'PAUSE_START_HOUR', 4)
+        self.pause_end_hour = getattr(Config, 'PAUSE_END_HOUR', 9)
+        self.upper_buffer = getattr(Config, 'UPPER_BUFFER', 0.015)
         self.activation_threshold = getattr(Config, 'ACTIVATION_THRESHOLD', 0.40)
         
         # [Emergency Fix] 과열 기준 (기본 500% = 5.0)
@@ -216,6 +219,11 @@ class EmaStrategy:
         if (hour < entry_start_h) or (hour == entry_start_h and minute < entry_start_m):
             return None
 
+        # 🛑 [Pause Window] 특정 프리마켓 구간 진입 일시정지 (04:00:00 ~ 08:59:59 차단 - 백테스트 100% 동기화)
+        if self.use_pause_window and (self.pause_start_hour <= hour < self.pause_end_hour):
+            self._log_rejection(ticker, f"프리마켓 일시정지 대기 ({self.pause_start_hour}시~{self.pause_end_hour}시, 현재 {hour}:{minute:02d})", df.iloc[-1]['close'])
+            return None
+
         if hour >= self.entry_end_hour:
             self._log_rejection(ticker, f"진입 마감 시간 초과 ({hour}시 >= {self.entry_end_hour}시)", df.iloc[-1]['close'])
             return None
@@ -294,41 +302,45 @@ class EmaStrategy:
 
             if ref_price > 0:
                 today_candles = df[df.index >= today_date]
-                today_so_far = today_candles[today_candles.index <= df.index[-1]]
+                today_so_far = today_candles[today_candles.index < df.index[-1]]
                 
                 if not today_so_far.empty:
                     max_price_so_far = today_so_far['close'].max()
-                    max_change_ratio = (max_price_so_far - ref_price) / ref_price
-                    
-                    # 🛡️ 1. [Activation] 40% 이상 상승 이력 없으면 진입 금지
-                    if max_change_ratio < self.activation_threshold:
+                else:
+                    max_price_so_far = ref_price
+
+                max_change_ratio = (max_price_so_far - ref_price) / ref_price
+                
+                # 🛡️ 1. [Activation] 40% 이상 상승 이력 없으면 진입 금지
+                if max_change_ratio < self.activation_threshold:
+                    self._log_rejection(
+                        ticker,
+                        f"🛡️ [ACTIVATION] 상승 이력 부족 ({max_change_ratio*100:.1f}% < {self.activation_threshold*100:.0f}%)",
+                        current_price
+                    )
+                    return None
+
+                # 🛡️ 1.1 [B4 Peak Drawdown] 당일 고점 대비 최소 10% 이상 정상 눌림목 확인
+                if self.enable_min_peak_drawdown_filter and max_price_so_far > 0:
+                    entry_price_for_filter = df['open'].iloc[-1]
+                    peak_dd_pct = (max_price_so_far - entry_price_for_filter) / max_price_so_far * 100.0
+                    if peak_dd_pct < self.min_peak_drawdown_pct:
                         self._log_rejection(
                             ticker,
-                            f"🛡️ [ACTIVATION] 상승 이력 부족 ({max_change_ratio*100:.1f}% < {self.activation_threshold*100:.0f}%)",
+                            f"🚫 [PEAK-DD] 고점 눌림 부족 ({peak_dd_pct:.1f}% < {self.min_peak_drawdown_pct:.1f}%)",
                             current_price
                         )
                         return None
-
-                    # 🛡️ 1.1 [B4 Peak Drawdown] 당일 고점 대비 최소 10% 이상 정상 눌림목 확인
-                    if self.enable_min_peak_drawdown_filter and max_price_so_far > 0:
-                        peak_dd_pct = (max_price_so_far - current_price) / max_price_so_far * 100.0
-                        if peak_dd_pct < self.min_peak_drawdown_pct:
-                            self._log_rejection(
-                                ticker,
-                                f"🚫 [PEAK-DD] 고점 눌림 부족 ({peak_dd_pct:.1f}% < {self.min_peak_drawdown_pct:.1f}%)",
-                                current_price
-                            )
-                            return None
-                    
-                    # 🛡️ 2. [Global Safety] 당일 과열 폭등 (500% 이상 시 영구 밴 등록)
-                    if max_change_ratio >= self.max_daily_change:
-                        self.banned_tickers.add(ticker)
-                        self._log_rejection(
-                            ticker,
-                            f"🛡️ [GAP_GLOBAL] 과열 폭등 ({max_change_ratio*100:.1f}% >= {self.max_daily_change*100:.0f}%)",
-                            current_price
-                        )
-                        return {'type': 'DROP', 'reason': 'Overheated'}
+                
+                # 🛡️ 2. [Global Safety] 당일 과열 폭등 (500% 이상 시 영구 밴 등록)
+                if max_change_ratio >= self.max_daily_change:
+                    self.banned_tickers.add(ticker)
+                    self._log_rejection(
+                        ticker,
+                        f"🛡️ [GAP_GLOBAL] 과열 폭등 ({max_change_ratio*100:.1f}% >= {self.max_daily_change*100:.0f}%)",
+                        current_price
+                    )
+                    return {'type': 'DROP', 'reason': 'Overheated'}
 
         except Exception as e:
             self.logger.error(f"⚠️ [Check Entry] 과열/눌림목 체크 중 오류: {e}")

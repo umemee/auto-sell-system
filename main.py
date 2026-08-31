@@ -8,7 +8,7 @@ import threading
 import random 
 from pathlib import Path
 from config import Config
-from infra.utils import get_logger
+from infra.utils import get_logger, round_price
 from infra.kis_api import KisApi
 from infra.kis_auth import KisAuth
 from infra.telegram_bot import TelegramBot
@@ -569,7 +569,7 @@ def main():
                                             if buy_price > 0:
                                                 target_profit_pct = getattr(Config, 'TARGET_PROFIT_PCT', 0.07)
                                                 target_price = buy_price * (1.0 + target_profit_pct)
-                                                target_price = round(target_price, 2)
+                                                target_price = round_price(target_price)
                                                 
                                                 qty = result.get('qty', 0)
                                                 

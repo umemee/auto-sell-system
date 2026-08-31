@@ -49,7 +49,13 @@ class Config:
     USE_DYNAMIC_EMA = False     # 400 EMA 단일 고정
     ENTRY_DEADLINE_HOUR_ET = 10 
     ENTRY_START_TIME = "04:10"  
-    UPPER_BUFFER = 0.01        # 🛡️ [Anti-FOMO] 매수 상한 버퍼 0.5% (과거 2.0% 결함 차단)
+    
+    # ⏰ [신규 진입 일시정지 구간 제어 - 백테스트 100% 동기화]
+    USE_PAUSE_WINDOW = True     # True: 04:00~08:59 일시정지 활성화 (09:00~09:59 집중 매매)
+    PAUSE_START_HOUR = 4        # 일시정지 시작 시간 (ET 04:00 = KST 17:00)
+    PAUSE_END_HOUR = 9          # 일시정지 종료 시간 (ET 09:00 = KST 22:00 이전까지 차단 -> 09시부터 진입 재개)
+
+    UPPER_BUFFER = 0.015       # 🛡️ [Anti-FOMO] 매수 상한 버퍼 1.5% (백테스트 1 + 0.015 동기화)
     BUY_SLIPPAGE_BUFFER = 0.01 # 매수 슬리피지 버퍼 0.5%
     ACTIVATION_THRESHOLD = 0.40 
     MAX_DAILY_CHANGE = 5.0     
