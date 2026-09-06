@@ -248,6 +248,21 @@ class EmaStrategy:
         prev_ema = df['ema'].iloc[-2]
         
         # =========================================================
+        # 🛑 [Step 4.0] 지지선 하방 이탈 및 추세 붕괴(DROP) 최우선 검사 (Short-Circuit Bug 방지)
+        # =========================================================
+        lower_bound = prev_ema * (1.0 - self.dip_tolerance)
+        upper_bound = prev_ema * (1.0 + self.upper_buffer)
+        drop_cutoff = lower_bound * (1.0 - self.drop_slack)
+
+        # 지지선 하방 이탈 및 추세 붕괴(DROP) 확정 시 F1 급락 여부와 관계없이 즉시 영구 밴 등록
+        if prev_low < drop_cutoff or prev_close < drop_cutoff:
+            self.banned_tickers.add(ticker)
+            self._log_rejection(ticker, f"지지선 이탈 (Low {prev_low:.4f} < Bound {lower_bound:.4f})", current_price)
+            self.debug_logger.debug(f"🗑️ [DROP] {ticker} 추세 붕괴 -> 당일 영구 밴 등록")
+            self.logger.warning(f"🚫 [DROP-PERMANENT] {ticker} 지지선 붕괴(Low {prev_low:.4f} < Cutoff {drop_cutoff:.4f})로 당일 진입 영구 차단")
+            return {'type': 'DROP', 'reason': 'Trend Broken'}
+
+        # =========================================================
         # 🛡️ [Step 4.1] Upper Wick Filter (직전 완성봉 윗꼬리 검사)
         # =========================================================
         if self.upper_wick_filter_enabled:
@@ -274,14 +289,27 @@ class EmaStrategy:
                 return None
         
         # =========================================================
-        # 🛑 [Step 4.5] 추격 매수 방지 (Anti-Chasing Logic: Open > EMA + 3%)
+        # 🛑 [Step 4.5] 추격 매수 방지 (Anti-Chasing Logic: Open > EMA + 1.5% / +3%)
         # =========================================================
-        chasing_threshold = prev_ema * 1.03
         current_open = df['open'].iloc[-1]
-        
+        open_upper_threshold = prev_ema * (1.0 + self.upper_buffer)  # +1.5% 상한선
+        chasing_threshold = prev_ema * 1.03  # +3.0% 상한선
+
+        if current_open > open_upper_threshold:
+            self._log_rejection(
+                ticker, 
+                f"🚀 [Anti-Chasing] 시가 눌림목 상한 초과 (Open ${current_open:.4f} > EMA+1.5% ${open_upper_threshold:.4f})", 
+                current_price
+            )
+            return None
+
         if current_open > chasing_threshold:
-             self._log_rejection(ticker, f"🚀 [Anti-Chasing] 이평선 괴리 과다 (Open ${current_open:.4f} > EMA ${prev_ema:.4f} + 3%)", current_price)
-             return None
+            self._log_rejection(
+                ticker, 
+                f"🚀 [Anti-Chasing] 이평선 괴리 과다 (Open ${current_open:.4f} > EMA ${prev_ema:.4f} + 3%)", 
+                current_price
+            )
+            return None
 
         # =========================================================
         # 🔥 [Step 4.6] Activation & Peak-DD & 과열 종목 방지
