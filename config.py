@@ -6,12 +6,23 @@ from dotenv import load_dotenv
 load_dotenv(dotenv_path=".env.production")
 load_dotenv()
 
-class Config:
+class ConfigMeta(type):
+    @property
+    def EXECUTION_MODE(cls):
+        return "PAPER" if getattr(cls, 'IS_PAPER_TRADING', False) else "REAL"
+
+class Config(metaclass=ConfigMeta):
     # ==========================================
-    # 🚨 [CRITICAL SAFETY] 실행 모드 고정 (실매매 전면 차단)
+    # 🚨 [CRITICAL SAFETY] 실행 모드 단일 토글 설정
     # ==========================================
-    EXECUTION_MODE = "PAPER_TRADING_ONLY"  # 🔒 실계좌 주문 전송 100% 차단 및 페이퍼 트레이딩 모드
-    IS_PAPER_TRADING = False
+    # IS_PAPER_TRADING = True  -> 페이퍼 매매 (실계좌 주문 차단, VirtualExecutionEngine 동작, 가상 예수금 운용)
+    # IS_PAPER_TRADING = False -> 실전 매매 (KIS 실제 주문 전송, 실계좌 잔고 동기화, 사전 익절 주문 전송)
+    IS_PAPER_TRADING = False  # 💡 단일 스위치: True=페이퍼 매매, False=실전 매매
+
+    @property
+    def EXECUTION_MODE(self):
+        return "PAPER" if getattr(self, 'IS_PAPER_TRADING', False) else "REAL"
+
     VIRTUAL_INITIAL_BALANCE = 10000.0      # 가상 시작 예수금 ($10,000)
     VIRTUAL_LATENCY_MS = 100               # 네트워크 지연 모사 (100ms)
     VIRTUAL_SLIPPAGE_PCT = 0.0003          # 시장가 슬리피지 페널티 (0.03%)

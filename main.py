@@ -1,4 +1,5 @@
 # main.py
+import sys
 import time
 import datetime
 import pytz 
@@ -7,6 +8,14 @@ import os
 import threading
 import random 
 from pathlib import Path
+
+# Windows 콘솔 UTF-8 인코딩 보장 (이모지 및 특수문자 출력 에러 방지)
+if sys.platform == 'win32':
+    try:
+        sys.stdout.reconfigure(encoding='utf-8')
+        sys.stderr.reconfigure(encoding='utf-8')
+    except Exception:
+        pass
 from config import Config
 from infra.utils import get_logger, round_price
 from infra.kis_api import KisApi
@@ -111,18 +120,33 @@ def main():
     # =========================================================================
     # 🚨 [CRITICAL SAFETY] 실행 모드 경고 배너 출력
     # =========================================================================
-    is_paper_mode = (getattr(Config, 'EXECUTION_MODE', 'REAL') == 'PAPER_TRADING_ONLY' or getattr(Config, 'IS_PAPER_TRADING', False))
+    is_paper_mode = getattr(Config, 'IS_PAPER_TRADING', False)
+    cano_raw = str(getattr(Config, 'CANO', ''))
+    cano_masked = (cano_raw[:4] + "****") if len(cano_raw) >= 4 else "****"
+    acnt_prdt = getattr(Config, 'ACNT_PRDT_CD', '01')
+
     if is_paper_mode:
         print("\n" + "=" * 85)
         print("🚨 [MODE: PAPER TRADING / REAL ORDERS DISABLED]")
         print("🚨 실제 브로커 주문 API 전면 차단됨! 가상 체결 엔진(Virtual Simulator)으로 동작합니다.")
+        print(f"💰 가상 운용 예수금: ${getattr(Config, 'VIRTUAL_INITIAL_BALANCE', 10000.0):,.2f}")
         print("=" * 85 + "\n")
         logger.critical("================================================================================")
         logger.critical("🚨 [MODE: PAPER TRADING / REAL ORDERS DISABLED]")
         logger.critical("🚨 실제 브로커 주문 API 전면 차단됨! 가상 체결 엔진(Virtual Simulator)으로 가동됩니다.")
         logger.critical("================================================================================")
-
-    logger.info("🚀 GapZone System v5.5 (Paper Trading Simulator Edition) Starting...")
+        logger.info("🚀 GapZone System v5.5 (Paper Trading Simulator Edition) Starting...")
+    else:
+        print("\n" + "=" * 85)
+        print("⚠️ [MODE: REAL TRADING / CAUTION - REAL MONEY AT RISK]")
+        print("⚠️ 실제 증권사 실계좌 주문이 활성화되었습니다!")
+        print(f"🏦 계좌번호: {cano_masked}-{acnt_prdt}")
+        print("=" * 85 + "\n")
+        logger.critical("================================================================================")
+        logger.critical("⚠️ [MODE: REAL TRADING / CAUTION - REAL MONEY AT RISK]")
+        logger.critical(f"⚠️ 실제 증권사 실계좌 주문이 활성화되었습니다! (계좌: {cano_masked}-{acnt_prdt})")
+        logger.critical("================================================================================")
+        logger.info("🚀 GapZone System v5.5 (Live Trading Production Edition) Starting...")
     
     tz_kst = pytz.timezone('Asia/Seoul')
     tz_et = pytz.timezone('US/Eastern')
@@ -175,8 +199,10 @@ def main():
         
         logger.info(f"💾 [Memory] 복구 완료 | 🚫Ban: {len(portfolio.ban_list)}개, 🛑Loss-Blacklist: {len(risk_filter.loss_blacklist)}개, 👁️Watch: {len(active_candidates)}개")
         
+        mode_label = "가상 페이퍼 [PAPER]" if is_paper_mode else f"실계좌 실전 [REAL] ({cano_masked})"
         start_msg = (
             f"⚔️ [시스템 가동 v5.4 - 3중 리스크 필터 탑재]\n"
+            f"🕹️ 모드: {mode_label}\n"
             f"⏰ 시간: KR {now_kst_start.strftime('%H:%M')} / NY {now_et_start.strftime('%H:%M')}\n"
             f"💰 자산: ${portfolio.total_equity:,.0f}\n"
             f"🎰 슬롯: {len(portfolio.positions)} / {portfolio.MAX_SLOTS}\n"
@@ -578,9 +604,9 @@ def main():
                                                         logger.info(f"🔒 [PAPER Pre-Order] {sym} 가상 익절 목표가(${target_price}) 감시 등록 완료 (평단가: ${buy_price:.3f})")
                                                         bot.send_message(f"🔒 [가상 익절 잠금/PAPER] {sym} 익절 감시 등록 (평단가: ${buy_price:.3f} -> 목표가: ${target_price:.2f})")
                                                     else:
-                                                        logger.info(f"⚡ [Pre-Order] {sym} 실제 평단가(${buy_price}) 기반 익절 주문 전송: ${target_price}")
+                                                        logger.info(f"⚡ [REAL Pre-Order] {sym} 실제 평단가(${buy_price:.3f}) 기반 익절 주문 전송: ${target_price:.2f}")
                                                         kis.send_order(sym, "SELL", qty, target_price, "00", exchange=selected_exchange or "NAS")
-                                                        bot.send_message(f"🔒 [잠금] {sym} 익절 주문 완료 (평단가: ${buy_price:.3f} -> 목표가: ${target_price})")
+                                                        bot.send_message(f"🔒 [실전 익절 잠금/REAL] {sym} 익절 주문 전송 완료 (평단가: ${buy_price:.3f} -> 목표가: ${target_price:.2f})")
                                         except Exception as e:
                                             logger.error(f"❌ 익절 주문 중 에러: {e}")
 
