@@ -6,6 +6,16 @@ import pytz
 import functools
 from logging.handlers import RotatingFileHandler
 
+# Windows 콘솔 UTF-8 인코딩 보장 (이모지 출력 에러 방지)
+if sys.platform == 'win32':
+    try:
+        if sys.stdout and hasattr(sys.stdout, 'reconfigure'):
+            sys.stdout.reconfigure(encoding='utf-8', errors='backslashreplace')
+        if sys.stderr and hasattr(sys.stderr, 'reconfigure'):
+            sys.stderr.reconfigure(encoding='utf-8', errors='backslashreplace')
+    except Exception:
+        pass
+
 # 로거 설정 (Singleton)
 _logger = None
 

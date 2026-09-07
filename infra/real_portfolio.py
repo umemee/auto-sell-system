@@ -16,7 +16,7 @@ class RealPortfolio:
         self.kis = kis_api
 
         # 🚨 페이퍼 트레이딩 모드 여부
-        self.is_paper = (getattr(Config, 'EXECUTION_MODE', 'REAL') == 'PAPER_TRADING_ONLY' or getattr(Config, 'IS_PAPER_TRADING', False))
+        self.is_paper = getattr(Config, 'IS_PAPER_TRADING', False)
 
         # ----------------------------------------------------
         # 📊 Dynamic State (변동 데이터)

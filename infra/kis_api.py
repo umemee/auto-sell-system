@@ -372,10 +372,10 @@ class KisApi:
         [수정] ord_dvsn 파라미터 추가 (기본값 "00": 지정가)
         """
         # =========================================================================
-        # 🚨 [CRITICAL FAIL-SAFE] 실매매 전면 차단 (Paper Trading Only Mode)
+        # 🚨 [CRITICAL FAIL-SAFE] 페이퍼 모드 시 브로커 실주문 API 직접 호출 전면 차단
         # =========================================================================
-        if getattr(Config, 'EXECUTION_MODE', 'REAL') == 'PAPER_TRADING_ONLY' or getattr(Config, 'IS_PAPER_TRADING', False):
-            self.logger.critical("🚨 [FATAL ERROR] Real trading is strictly disabled! Attempted to call actual broker order API.")
+        if getattr(Config, 'IS_PAPER_TRADING', False):
+            self.logger.critical("🚨 [FATAL ERROR] Real trading is strictly disabled! (IS_PAPER_TRADING=True) Attempted to call actual broker order API.")
             raise AssertionError("🚨 [FATAL ERROR] Real trading is strictly disabled! Attempted to call actual broker order API (place_order_final).")
 
         path = "/uapi/overseas-stock/v1/trading/order"
@@ -713,11 +713,11 @@ class KisApi:
         [주문 취소] 거래소 정보를 인자로 받아 유동적으로 처리
         """
         # =========================================================================
-        # 🚨 [CRITICAL FAIL-SAFE] 실매매 전면 차단 (Paper Trading Only Mode)
+        # 🚨 [CRITICAL FAIL-SAFE] 페이퍼 모드 시 브로커 실주문 취소 API 직접 호출 차단
         # =========================================================================
-        if getattr(Config, 'EXECUTION_MODE', 'REAL') == 'PAPER_TRADING_ONLY' or getattr(Config, 'IS_PAPER_TRADING', False):
-            self.logger.critical("🚨 [FATAL ERROR] Real trading is strictly disabled! Attempted to call actual broker order API.")
-            raise AssertionError("🚨 [FATAL ERROR] Real trading is strictly disabled! Attempted to call actual broker order API (cancel_order).")
+        if getattr(Config, 'IS_PAPER_TRADING', False):
+            self.logger.critical("🚨 [FATAL ERROR] Real trading is strictly disabled! (IS_PAPER_TRADING=True) Attempted to call actual broker order API.")
+            raise AssertionError("🚨 [FATAL ERROR] Real trading is strictly disabled! (IS_PAPER_TRADING=True) Attempted to call actual broker order API (cancel_order).")
 
         path = "/uapi/overseas-stock/v1/trading/order-rvsecncl"
         tr_id = "TTTT1004U" 

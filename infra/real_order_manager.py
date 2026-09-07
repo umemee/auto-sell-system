@@ -18,7 +18,7 @@ class RealOrderManager:
         self.logger = get_logger("OrderManager")
         
         # 🚨 페이퍼 트레이딩 모드 여부 및 가상 체결 엔진 초기화
-        self.is_paper = (getattr(Config, 'EXECUTION_MODE', 'REAL') == 'PAPER_TRADING_ONLY' or getattr(Config, 'IS_PAPER_TRADING', False))
+        self.is_paper = getattr(Config, 'IS_PAPER_TRADING', False)
         self.virtual_engine = VirtualExecutionEngine(kis_api)
         
         # 🛡️ [로그 폭탄 방지] 종목별 마지막 로그 시간 기록부
@@ -186,9 +186,9 @@ class RealOrderManager:
             except Exception as e:
                 self.logger.error(f"❌ 포트폴리오 업데이트 실패: {e}")
             
-            mode_tag = " [PAPER]" if self.is_paper else ""
+            mode_title = "가상 매수 체결 완료 [PAPER]" if self.is_paper else "실전 매수 체결 완료 [REAL]"
             msg = (
-                f"⚡ <b>가상 매수 체결 완료{mode_tag}</b>\n"
+                f"⚡ <b>{mode_title}</b>\n"
                 f"📦 종목: {ticker}\n"
                 f"🔢 수량: {qty}주\n"
                 f"💵 체결가: ${entry_guess:.4f} (시그널: ${price:.4f})\n"
@@ -279,11 +279,11 @@ class RealOrderManager:
                 # 포트폴리오에서 즉시 제거 (재진입 방지 쿨다운은 main.py에서 처리)
                 portfolio.close_position(ticker)
             
-            mode_tag = " [PAPER]" if self.is_paper else ""
+            mode_title = "가상 매도 체결 [PAPER]" if self.is_paper else "실전 매도 체결 [REAL]"
             return {
                 'status': 'success',
                 'msg': (
-                    f"🔴 <b>[가상 매도 체결{mode_tag}] {ticker}</b>\n"
+                    f"🔴 <b>[{mode_title}] {ticker}</b>\n"
                     f"사유: {reason}\n"
                     f"수량: {qty}주 | 체결가: ${order_price:.4f}\n"
                     f"손익: ${realized_pnl:+.2f} ({return_pct:+.2f}%)"
