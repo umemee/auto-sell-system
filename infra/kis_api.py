@@ -70,9 +70,12 @@ class KisApi:
             return 0.0
             
     def _get_lookup_excd(self, exchange):
-        """거래소 코드 변환 (NASD -> NAS)"""
-        excd_map = {"NASD": "NAS", "NYSE": "NYS", "AMEX": "AMS"}
-        return excd_map.get(exchange, exchange)
+        """거래소 코드 변환 (NASD -> NAS, NYS -> NYS, AMS -> AMS)"""
+        excd_map = {"NASD": "NAS", "NYSE": "NYS", "AMEX": "AMS", "NAS": "NAS", "NYS": "NYS", "AMS": "AMS"}
+        if not exchange:
+            return "NAS"
+        norm = str(exchange).strip().upper()
+        return excd_map.get(norm, norm)
 
     def _get_order_exch(self, exchange):
         """조회 거래소 코드를 주문 거래소 코드로 변환 (NAS->NASD, AMS->AMS, NYS->NYSE)"""
@@ -135,7 +138,12 @@ class KisApi:
 
     @log_api_call("예수금 조회(주문가능)")
     def get_buyable_cash(self, symbol="AAPL"):
-        """예수금 조회 (재시도 로직 적용됨)"""
+        """
+        [공식 규격서: TTTS3007R 해외주식 매수가능금액조회]
+        - 1순위: ord_psbl_frcr_amt (주문가능외화금액 - 순수 외화 자체 가용 금액)
+        - 2순위 Fallback: ovrs_ord_psbl_amt (해외주문가능금액 - MTS "외화" 기준 금액)
+        - 3순위 Fallback: frcr_ord_psbl_amt1 (외화주문가능금액1 - MTS "통합증거금" 기준 금액)
+        """
         path = "/uapi/overseas-stock/v1/trading/inquire-psamount"
         params = {
             "CANO": Config.CANO,
@@ -148,17 +156,51 @@ class KisApi:
         # [Smart Retry] 적용
         data = self._fetch_with_retry(path, params, "TTTS3007R", timeout=3)
         
-        if data:
-            return float(data['output'].get('frcr_ord_psbl_amt1', 0))
+        if not data or not isinstance(data.get('output'), dict):
+            self.logger.warning(f"⚠️ [예수금 조회] 응답 데이터 없음 또는 비정상 output: {data}")
+            return 0.0
+
+        output = data['output']
+        candidate_fields = [
+            ("ord_psbl_frcr_amt", "주문가능외화금액"),
+            ("ovrs_ord_psbl_amt", "해외주문가능금액(외화)"),
+            ("frcr_ord_psbl_amt1", "외화주문가능금액1(통합)"),
+        ]
+
+        for field_name, desc in candidate_fields:
+            raw_val = output.get(field_name)
+            val = self._safe_float(raw_val)
+            if val > 0:
+                self.logger.info(f"💵 [예수금 조회 성공] {field_name}({desc}): ${val:,.2f}")
+                return val
+
+        # 모든 후보 필드가 0 이하 또는 결측인 경우
+        self.logger.warning(
+            f"⚠️ [예수금 조회] 가용 외화 필드가 모두 0 이하입니다. "
+            f"(ord_psbl_frcr_amt={output.get('ord_psbl_frcr_amt')}, "
+            f"ovrs_ord_psbl_amt={output.get('ovrs_ord_psbl_amt')}, "
+            f"frcr_ord_psbl_amt1={output.get('frcr_ord_psbl_amt1')})"
+        )
         return 0.0
 
     @log_api_call("잔고 조회")
     def get_balance(self):
-        """실시간 잔고 조회 (재시도 로직 적용됨)"""
+        """
+        [공식 규격서: TTTS3012R 해외주식 잔고]
+        - output1: 보유 종목 리스트
+          - ovrs_pdno: 해외상품번호 (symbol)
+          - ovrs_cblc_qty: 해외잔고수량
+          - ord_psbl_qty: 주문가능수량
+          - pchs_avg_pric: 매입평균가격
+          - evlu_pfls_rt: 평가손익율 (규격서 공식 필드명)
+          - frcr_evlu_pfls_amt: 외화평가손익금액
+          - now_pric2: 현재가격2
+          - ovrs_excg_cd: 해외거래소코드
+        """
         path = "/uapi/overseas-stock/v1/trading/inquire-balance"
         params = {
             "CANO": Config.CANO, 
-            "ACNT_PRDT_CD": Config.ACNT_PRDT_CD,
+            "ACNT_PRDT_CD": Config.ACNT_PRDT_CD, 
             "OVRS_EXCG_CD": "NASD", 
             "TR_CRCY_CD": "USD", 
             "CTX_AREA_FK200": "", 
@@ -171,16 +213,28 @@ class KisApi:
         holdings = []
         if data:
             output1 = data.get('output1', [])
-            for item in output1:
-                qty = self._safe_float(item.get('ovrs_cblc_qty'))
-                if qty > 0:
-                    avg_price = self._safe_float(item.get('pchs_avg_pric'))
-                    holdings.append({
-                        "symbol": item.get('ovrs_pdno'),
-                        "qty": qty,
-                        "price": avg_price,
-                        "pnl_pct": self._safe_float(item.get('frcr_evlu_pfls_rt'))
-                    })
+            if isinstance(output1, list):
+                for item in output1:
+                    qty = self._safe_float(item.get('ovrs_cblc_qty'))
+                    if qty > 0:
+                        avg_price = self._safe_float(item.get('pchs_avg_pric'))
+                        # 공식 규격 필드명: evlu_pfls_rt, 하위 호환 Fallback: frcr_evlu_pfls_rt
+                        pnl_pct_raw = item.get('evlu_pfls_rt')
+                        if pnl_pct_raw is None or pnl_pct_raw == "":
+                            pnl_pct_raw = item.get('frcr_evlu_pfls_rt')
+                        pnl_pct = self._safe_float(pnl_pct_raw)
+
+                        holdings.append({
+                            "symbol": item.get('ovrs_pdno'),
+                            "qty": qty,
+                            "price": avg_price,
+                            "pnl_pct": pnl_pct,
+                            "ord_psbl_qty": self._safe_float(item.get('ord_psbl_qty')),
+                            "now_pric2": self._safe_float(item.get('now_pric2')),
+                            "evlu_pfls_amt": self._safe_float(item.get('frcr_evlu_pfls_amt')),
+                            "exchange": item.get('ovrs_excg_cd', ''),
+                            "name": item.get('ovrs_item_name', '')
+                        })
         return holdings
 
     # =================================================================
@@ -209,17 +263,24 @@ class KisApi:
         return self._get_volume_ranking()
 
     def _get_volume_ranking(self):
-        """[Fallback] 거래량 상위 종목 조회 — 나스닥(NAS) 단일 조회"""
+        """[Fallback] 거래량 상위 종목 조회 (공식 규격서: HHDFS76310010 해외주식 거래량순위)"""
         path = "/uapi/overseas-stock/v1/ranking/trade-vol"
         params = {
-            "AUTH": "", "EXCD": "NAS", "GUBN": "0", "VOL_RANG": "0", "KEYB": ""
+            "AUTH": "",
+            "EXCD": "NAS",
+            "NDAY": "0",
+            "PRC1": "",
+            "PRC2": "",
+            "VOL_RANG": "0",
+            "KEYB": ""
         }
         data = self._fetch_with_retry(path, params, "HHDFS76310010", timeout=5)
-        if data and data.get('output'):
-            results = data['output']
-            for item in results:
-                item['_excd'] = "NAS"
-            return results
+        if data:
+            results = data.get('output2') or data.get('output')
+            if results and isinstance(results, list):
+                for item in results:
+                    item['_excd'] = "NAS"
+                return results
 
         self.logger.error("❌ 랭킹 조회 최종 실패 (등락률 & 거래량 모두 응답 없음)")
         return []
@@ -521,8 +582,8 @@ class KisApi:
 
     def get_market_spread(self, symbol, exchange="NAS"):
         """
-        [Spread Check] 현재 매수/매도 호가 및 '잔량' 조회 (공식 문서 규격 output2 적용)
-        TR_ID: HHDFS76200100
+        [Spread Check] 현재 매수/매도 호가 및 '잔량' 조회 (공식 문서 규격: HHDFS76200100 해외주식 현재가 호가)
+        - output2: 1~10호가 데이터 (pbid1, pask1, vbid1, vask1 등)
         - exchange: "NAS"(기본값), "AMS"(AMEX), "NYS"(NYSE)
         """
         path = "/uapi/overseas-price/v1/quotations/inquire-asking-price"
@@ -539,10 +600,10 @@ class KisApi:
             # 규격서상 1~10호가 데이터는 output2에 위치함
             output2 = data.get('output2')
             hoga_data = {}
-            if isinstance(output2, list) and len(output2) > 0:
-                hoga_data = output2[0]
-            elif isinstance(output2, dict):
+            if isinstance(output2, dict):
                 hoga_data = output2
+            elif isinstance(output2, list) and len(output2) > 0:
+                hoga_data = output2[0] if isinstance(output2[0], dict) else {}
             elif isinstance(data.get('output1'), dict):
                 hoga_data = data.get('output1')
 
@@ -552,14 +613,19 @@ class KisApi:
             ask_vol = self._safe_float(hoga_data.get('vask1'))
             bid_vol = self._safe_float(hoga_data.get('vbid1'))
             
+            if ask <= 0 and bid <= 0:
+                self.logger.debug(f"⚠️ [{symbol}] 호가 데이터 0 수신 (정규장 외 시간 또는 유동성 부재)")
+
             return ask, bid, ask_vol, bid_vol
             
         return 0.0, 0.0, 0.0, 0.0
 
-    def get_pending_orders(self, symbol=None):
+    def get_pending_orders(self, symbol=None, side="SELL"):
         """
-        [신규 추가] 미체결 내역 조회 (중복 주문 방지용)
-        문서: [해외주식] 미체결내역.csv (TR_ID: TTTS3018R)
+        [공식 규격서: TTTS3018R 해외주식 미체결내역]
+        - sll_buy_dvsn_cd: "01" (매도), "02" (매수)
+        - sll_buy_dvsn_cd_name: "매도", "매수"
+        - side: "SELL"(기본값), "BUY", None(전체)
         """
         path = "/uapi/overseas-stock/v1/trading/inquire-nccs"
         pending_map = {}
@@ -569,7 +635,7 @@ class KisApi:
                 "CANO": Config.CANO,
                 "ACNT_PRDT_CD": Config.ACNT_PRDT_CD,
                 "OVRS_EXCG_CD": exchange,
-                "SORT_SQN": "DS", # 내림차순
+                "SORT_SQN": "DS", # 내림차순(DS)
                 "CTX_AREA_FK200": "",
                 "CTX_AREA_NK200": ""
             }
@@ -587,8 +653,16 @@ class KisApi:
                 except (TypeError, ValueError):
                     pending_qty = 0
 
-                # '매도' 주문이면서 '미체결 수량'이 남아있는 경우만 필터링
-                if item.get('sll_buy_dvsn_cd_name') != '매도' or pending_qty <= 0:
+                if pending_qty <= 0:
+                    continue
+
+                # 매도/매수 구분 필터링 (코드 '01'/'02' 및 한글명 병행 검증)
+                is_sell = (item.get('sll_buy_dvsn_cd') == '01' or item.get('sll_buy_dvsn_cd_name') == '매도')
+                is_buy = (item.get('sll_buy_dvsn_cd') == '02' or item.get('sll_buy_dvsn_cd_name') == '매수')
+
+                if side == "SELL" and not is_sell:
+                    continue
+                elif side == "BUY" and not is_buy:
                     continue
 
                 if symbol and symbol != item_sym:
@@ -598,10 +672,7 @@ class KisApi:
                 if not odno:
                     continue
 
-                try:
-                    order_price = float(item.get('ft_ord_unpr3', 0) or 0)
-                except (TypeError, ValueError):
-                    order_price = 0.0
+                order_price = self._safe_float(item.get('ft_ord_unpr3'))
 
                 pending_map[odno] = {
                     "odno": odno,
@@ -710,7 +781,9 @@ class KisApi:
     
     def cancel_order(self, ticker, order_id, qty=0, exchange="NASD"):
         """
-        [주문 취소] 거래소 정보를 인자로 받아 유동적으로 처리
+        [공식 규격서: TTTT1004U 해외주식 정정취소주문]
+        - 취소 주문: RVSE_CNCL_DVSN_CD="02", OVRS_ORD_UNPR="0"
+        - ORD_QTY: "0" 또는 취소 수량
         """
         # =========================================================================
         # 🚨 [CRITICAL FAIL-SAFE] 페이퍼 모드 시 브로커 실주문 취소 API 직접 호출 차단
@@ -722,23 +795,12 @@ class KisApi:
         path = "/uapi/overseas-stock/v1/trading/order-rvsecncl"
         tr_id = "TTTT1004U" 
 
-        token = self.tm.get_token()
-        if not token.startswith("Bearer"):
-            token = f"Bearer {token}"
+        self._update_headers(tr_id)
 
-        headers = {
-            "content-type": "application/json; charset=utf-8",
-            "authorization": token,
-            "appkey": Config.APP_KEY,
-            "appsecret": Config.APP_SECRET,
-            "tr_id": tr_id
-        }
-
-        # [수정] 인자로 받은 exchange 사용 (기본값 NASD)
         params = {
             "CANO": Config.CANO,
             "ACNT_PRDT_CD": Config.ACNT_PRDT_CD,
-            "OVRS_EXCG_CD": exchange, # 여기가 핵심!
+            "OVRS_EXCG_CD": exchange,
             "PDNO": ticker,
             "ORGN_ODNO": order_id, 
             "RVSE_CNCL_DVSN_CD": "02", 
@@ -750,12 +812,18 @@ class KisApi:
         try:
             res = requests.post(
                 url=f"{self.base_url}{path}",
-                headers=headers,
+                headers=self.headers,
                 data=json.dumps(params),
                 timeout=5
             )
-            return res.json()
+            data = res.json()
+            if data.get('rt_cd') == '0':
+                self.logger.info(f"✅ 주문 취소 성공 ({exchange}) [{ticker}] 원주문#{order_id}")
+            else:
+                msg = data.get('msg1')
+                code = data.get('msg_cd')
+                self.logger.warning(f"⚠️ 주문 취소 실패 ({exchange}) [{ticker}] 원주문#{order_id}: {msg} ({code})")
+            return data
         except Exception as e:
-            self.logger.error(f"주문 취소 실패: {e}")
-
+            self.logger.error(f"❌ 주문 취소 통신 실패 ({exchange}) [{ticker}] 원주문#{order_id}: {e}")
             return None
