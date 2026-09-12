@@ -89,6 +89,36 @@ def load_state():
         logger.error(f"⚠️ 상태 로드 실패: {e}")
         return set(), {}, set()
 
+def merge_candle_dfs(old_df, new_df, max_len=1200):
+    """
+    [Candle Cache Merge Utility]
+    - 새로 받아온 분봉(new_df)의 마지막 줄이 실시간 미완성봉인 경우
+    - 인덱스/컬럼 중복 제거(drop_duplicates keep='last')로 최신 틱 데이터 반영
+    - Datetime 정렬 완벽 유지 및 RangeIndex 재설정 보장
+    """
+    import pandas as pd
+    if old_df is None or old_df.empty:
+        combined = new_df.copy() if new_df is not None else pd.DataFrame()
+    elif new_df is None or new_df.empty:
+        combined = old_df.copy()
+    else:
+        combined = pd.concat([old_df, new_df], ignore_index=True)
+    
+    if not combined.empty and 'date' in combined.columns and 'time' in combined.columns:
+        combined['date'] = combined['date'].astype(str)
+        # 시간 문자열 정규화: 4자리 이하(HHMM)는 zfill(4), 5~6자리(HHMMSS)는 zfill(6)
+        time_str_series = combined['time'].astype(str).str.strip()
+        max_time_len = time_str_series.str.len().max()
+        pad_len = 6 if max_time_len > 4 else 4
+        combined['time'] = time_str_series.str.zfill(pad_len)
+        
+        combined = combined.drop_duplicates(subset=['date', 'time'], keep='last')
+        combined = combined.sort_values(by=['date', 'time']).reset_index(drop=True)
+        if len(combined) > max_len:
+            combined = combined.iloc[-max_len:].reset_index(drop=True)
+            
+    return combined
+
 ACTIVE_START_HOUR = getattr(Config, 'ACTIVE_START_HOUR', 4) 
 ACTIVE_END_HOUR = getattr(Config, 'ACTIVE_END_HOUR', 20)    
 
@@ -317,7 +347,7 @@ def main():
                     time.sleep(0.5)
 
             # =========================================================
-            # 🕒 [Time Sync] 캔들 완성형 (00초~05초 진입)
+            # 🕒 [Time Sync] 캔들 완성형 (매 분 02초~04초 진입 - 증권사 1분봉 집계 완료 대기)
             # =========================================================
             current_kst = datetime.datetime.now(pytz.timezone('Asia/Seoul'))
             if not (current_kst.hour >= 17 or current_kst.hour < 5):
@@ -325,6 +355,10 @@ def main():
                     logger.warning(f"💤 [AWS 정시 대기] 현재 한국 시간 {current_kst.strftime('%H:%M')}. 17시 정각까지 대기 루프 가동.")
                     was_sleeping = True
                 time.sleep(10)
+                continue
+
+            if now.second < 2:
+                time.sleep(0.3)
                 continue
 
             if now.second > 5:
@@ -494,7 +528,7 @@ def main():
                         for exch in ["NAS", "NYS", "AMS"]:
                             temp_df = kis.get_minute_candles(exch, sym, limit=1200)
                             if not temp_df.empty and len(temp_df) >= 26:
-                                df = temp_df
+                                df = merge_candle_dfs(None, temp_df)
                                 selected_exchange = exch
                                 candle_cache[sym] = {'df': df, 'exch': exch}
                                 break
@@ -506,13 +540,7 @@ def main():
                         
                         new_df = kis.get_minute_candles(exch, sym, limit=120)
                         if not new_df.empty:
-                            combined_df = pd.concat([old_df, new_df])
-                            combined_df = combined_df.drop_duplicates(subset=['date', 'time'], keep='last')
-                            combined_df = combined_df.sort_values(['date', 'time']).reset_index(drop=True)
-                            
-                            if len(combined_df) > 1200:
-                                combined_df = combined_df.iloc[-1200:].reset_index(drop=True)
-                                
+                            combined_df = merge_candle_dfs(old_df, new_df)
                             candle_cache[sym]['df'] = combined_df
                             df = combined_df
                         else:
@@ -525,10 +553,37 @@ def main():
 
                     candle_exporter.update_runtime_candles(sym, df, exchange=selected_exchange)
 
-                   # =========================================================
+                    # =========================================================
                     # 🧠 [Strategy] 전략 엔진 신호 확인
                     # =========================================================
-                    signal = strategy.check_entry(sym, df)
+                    signal = strategy.check_entry(sym, df, now_time=now)
+
+                    # ⏳ [New-Bar Micro-Retry] 새 캔들 미도착 시 최대 2회 미세 재시도
+                    max_retries = 2
+                    retry_count = 0
+                    while signal and isinstance(signal, dict) and signal.get('type') == 'WAIT_NEW_BAR' and retry_count < max_retries:
+                        expected = signal.get('expected')
+                        latest = signal.get('latest')
+                        logger.info(f"⏳ [New-Bar Wait] {sym}: 새 캔들({expected}) 미도착 (현재: {latest}) -> 1.0초 후 재조회")
+                        time.sleep(1.0)
+                        retry_count += 1
+
+                        exch = selected_exchange or (candle_cache.get(sym, {}).get('exch') if sym in candle_cache else "NAS")
+                        retry_df = kis.get_minute_candles(exch, sym, limit=120)
+                        if not retry_df.empty:
+                            base_df = candle_cache[sym]['df'] if sym in candle_cache else df
+                            combined_df = merge_candle_dfs(base_df, retry_df)
+                            candle_cache[sym] = {'df': combined_df, 'exch': exch}
+                            df = combined_df
+                            candle_exporter.update_runtime_candles(sym, df, exchange=exch)
+
+                        retry_now = datetime.datetime.now(pytz.timezone('America/New_York'))
+                        signal = strategy.check_entry(sym, df, now_time=retry_now)
+
+                    # 당해 분 내에 끝내 새 봉이 오지 않을 경우에만 해당 분을 안전하게 넘김
+                    if signal and isinstance(signal, dict) and signal.get('type') == 'WAIT_NEW_BAR':
+                        logger.warning(f"⚠️ [New-Bar Timeout] {sym}: 재시도 초과 후에도 새 캔들 미도착 -> 이번 분 건너뜀")
+                        continue
 
                     if signal:
                         if signal['type'] == 'BUY':
@@ -544,16 +599,31 @@ def main():
                                 save_state(portfolio.ban_list, active_candidates, risk_filter.loss_blacklist)
                                 continue
                             
-                            # 호가 조회 (선택된 거래소 코드 반영)
+                            # -----------------------------------------------------
+                            # 🛡️ [Pre-Order Execution Pipeline] 호가 조회 및 괴리율 가드
+                            # -----------------------------------------------------
+                            signal_price = float(signal['price'])
                             ask, bid, ask_vol, bid_vol = kis.get_market_spread(sym, exchange=selected_exchange or "NAS")
-                            
+
                             if ask > 0 and bid > 0:
-                                spread = (ask - bid) / ask * 100
+                                # 1. 스프레드 과다 가드 (3.0%)
+                                spread = (ask - bid) / ask * 100.0
                                 if spread > 3.0:
-                                    logger.warning(f"⚠️ [Spread] {sym}: 괴리율 과다 ({spread:.2f}%). 진입 보류.")
+                                    logger.warning(f"⚠️ [Spread Guard] {sym}: 스프레드 과다 ({spread:.2f}% > 3.0%) 로 매수 보류")
                                     continue
-                            
-                            entry_price = ask if ask > 0 else signal['price']
+
+                                # 2. Pre-Order Price Guard (+0.5% 괴리 차단)
+                                buy_buffer = float(getattr(Config, 'BUY_SLIPPAGE_BUFFER', 0.005))
+                                max_allowed_price = signal_price * (1.0 + buy_buffer)
+                                if ask > max_allowed_price:
+                                    logger.warning(
+                                        f"⚠️ [Pre-Order Price Guard] {sym}: "
+                                        f"Ask ${ask:.4f} > 허용상한 ${max_allowed_price:.4f} (시그널 ${signal_price:.4f} +{buy_buffer*100:.1f}%) -> 매수 차단"
+                                    )
+                                    continue
+
+                            # 3. 모든 가드 통과 후 진입가 갱신 및 주문 집행
+                            entry_price = ask if ask > 0 else signal_price
                             signal['price'] = entry_price
                             signal['ticker'] = sym
 

@@ -164,14 +164,18 @@ class EmaStrategy:
             self._log_rejection(ticker, f"데이터 부족 ({len(df)} < {self.ma_length + 2})", df.iloc[-1].get('close', 0.0) if len(df)>0 else 0.0)
             return None
 
+        # 호출자의 캐시 DataFrame 변형 방지를 위한 방어적 복사
+        df = df.copy()
+
         # =========================================================
         # 🛠️ [CRITICAL FIX] 인덱스 보정 (Index Correction)
         # =========================================================
-        if not isinstance(df.index, pd.DatetimeIndex):
+        if not isinstance(df.index, pd.DatetimeIndex) or (df.index.name == 'timestamp' and 'date' in df.columns and 'time' in df.columns):
             try:
                 if 'date' in df.columns and 'time' in df.columns:
+                    date_clean = df['date'].astype(str).str.replace('-', '')
                     time_str = df['time'].astype(str).str.zfill(4)
-                    datetime_str = df['date'].astype(str) + time_str
+                    datetime_str = date_clean + time_str
                     fmt = '%Y%m%d%H%M' if len(time_str.iloc[-1]) == 4 else '%Y%m%d%H%M%S'
                     df['datetime'] = pd.to_datetime(datetime_str, format=fmt, errors='coerce')
                     df.set_index('datetime', inplace=True)
@@ -204,12 +208,6 @@ class EmaStrategy:
                 current_time = current_time.astimezone(pytz.timezone('America/New_York'))
         else:
             current_time = datetime.datetime.now(pytz.timezone('America/New_York'))
-        
-        # 🛡️ [분봉 단위 1회 스냅샷 평가 강제 (Timing Sync)]
-        latest_candle_time = df.index[-1]
-        if self.processed_candles.get(ticker) == latest_candle_time:
-            return None
-        self.processed_candles[ticker] = latest_candle_time
 
         # 1. 시간 제한 체크
         hour = current_time.hour
@@ -231,6 +229,33 @@ class EmaStrategy:
         if 9 == hour and 30 <= minute <= 34:
             self._log_rejection(ticker, "장 초반 대기 (Market Open Wait)", df.iloc[-1]['close'])
             return None
+
+        # =========================================================
+        # 🛡️ [Timestamp Guard] Expected Execution Bar 검증 (Temporal Parity 동기화)
+        # =========================================================
+        expected_bar_time = current_time.replace(second=0, microsecond=0)
+        latest_candle_time = df.index[-1]
+
+        # 케이스 2 (지연 미도착): 아직 새 분봉이 생성되지 않아 이전 봉이 마지막 줄에 위치함
+        if latest_candle_time < expected_bar_time:
+            return {
+                'type': 'WAIT_NEW_BAR',
+                'expected': expected_bar_time,
+                'latest': latest_candle_time
+            }
+
+        # 케이스 3 (미래 데이터 이상치): 타임스탬프가 미래인 경우 경고 로깅 후 스킵
+        if latest_candle_time > expected_bar_time:
+            self.logger.warning(
+                f"⚠️ [Anomaly] {ticker} 비정상 미래 캔들 감지 (Expected: {expected_bar_time}, Latest: {latest_candle_time})"
+            )
+            return None
+
+        # 케이스 1 (정상 도착): latest_candle_time == expected_bar_time
+        # 🛡️ [분봉 단위 1회 스냅샷 평가 강제 (Timing Sync)]
+        if self.processed_candles.get(ticker) == expected_bar_time:
+            return None
+        self.processed_candles[ticker] = expected_bar_time
 
         # 2. 현재 가격 가져오기
         current_price = df['close'].iloc[-1]
