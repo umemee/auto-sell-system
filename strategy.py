@@ -273,19 +273,11 @@ class EmaStrategy:
         prev_ema = df['ema'].iloc[-2]
         
         # =========================================================
-        # 🛑 [Step 4.0] 지지선 하방 이탈 및 추세 붕괴(DROP) 최우선 검사 (Short-Circuit Bug 방지)
+        # 🛑 [수정] 조기 DROP 버그 제거: 
+        # 모멘텀(recent_peak >= EMA * 1.03)이 발생하지 않은 종목은 DROP 대상이 아니므로,
+        # 모멘텀 체크(Step 4.7) 이전의 조기 영구 밴(Step 4.0)을 제거함.
+        # 올바른 DROP 판정은 모멘텀 확인 후 Step 5.1에서만 수행됨.
         # =========================================================
-        lower_bound = prev_ema * (1.0 - self.dip_tolerance)
-        upper_bound = prev_ema * (1.0 + self.upper_buffer)
-        drop_cutoff = lower_bound * (1.0 - self.drop_slack)
-
-        # 지지선 하방 이탈 및 추세 붕괴(DROP) 확정 시 F1 급락 여부와 관계없이 즉시 영구 밴 등록
-        if prev_low < drop_cutoff or prev_close < drop_cutoff:
-            self.banned_tickers.add(ticker)
-            self._log_rejection(ticker, f"지지선 이탈 (Low {prev_low:.4f} < Bound {lower_bound:.4f})", current_price)
-            self.debug_logger.debug(f"🗑️ [DROP] {ticker} 추세 붕괴 -> 당일 영구 밴 등록")
-            self.logger.warning(f"🚫 [DROP-PERMANENT] {ticker} 지지선 붕괴(Low {prev_low:.4f} < Cutoff {drop_cutoff:.4f})로 당일 진입 영구 차단")
-            return {'type': 'DROP', 'reason': 'Trend Broken'}
 
         # =========================================================
         # 🛡️ [Step 4.1] Upper Wick Filter (직전 완성봉 윗꼬리 검사)
@@ -432,10 +424,12 @@ class EmaStrategy:
         drop_cutoff = lower_bound * (1.0 - self.drop_slack)
 
         # 🛑 [Step 5.1] 지지선 하방 이탈 및 추세 붕괴(DROP) 확정 시 영구 밴 등록
+        # 대전제 준수: 모멘텀(Step 4.7 recent_peak >= EMA * 1.03)을 이미 통과한 상태에서만 
+        # 지지선(DropCutoff) 이탈 시 DROP 영구 밴 등록이 성립함 (모멘텀 없는 종목은 대기 상태 유지)
         if prev_low < drop_cutoff or prev_close < drop_cutoff:
             self.banned_tickers.add(ticker)
             self._log_rejection(ticker, f"지지선 이탈 (Low {prev_low:.4f} < Bound {lower_bound:.4f})", current_price)
-            self.debug_logger.debug(f"🗑️ [DROP] {ticker} 추세 붕괴 -> 당일 영구 밴 등록")
+            self.debug_logger.debug(f"🗑️ [DROP] {ticker} 추세 붕괴 (모멘텀 발생 후 지지선 이탈) -> 당일 영구 밴 등록")
             self.logger.warning(f"🚫 [DROP-PERMANENT] {ticker} 지지선 붕괴(Low {prev_low:.4f} < Cutoff {drop_cutoff:.4f})로 당일 진입 영구 차단")
             return {'type': 'DROP', 'reason': 'Trend Broken'}
 

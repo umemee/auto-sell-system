@@ -492,19 +492,22 @@ def main():
                 save_state(portfolio.ban_list, active_candidates, risk_filter.loss_blacklist)
 
             # ---------------------------------------------------------
-            # C. [스캔] 신규 급등주 포착
+            # C. [스캔] 신규 급등주 포착 (09:00:00 정각에는 매수 타점 우선 순회를 위해 스캔을 매수 뒤로 분산)
             # ---------------------------------------------------------
-            fresh_targets = listener.scan_markets(
-                ban_list=portfolio.ban_list,
-                active_candidates=active_candidates
-            )
+            is_market_open_minute = (now.hour == 9 and now.minute == 0)
             
-            if fresh_targets:
-                for sym in fresh_targets:
-                    candle_exporter.register_candidate(sym, exchange=listener.get_candidate_exchange(sym))
-                    if sym not in active_candidates:
-                        active_candidates[sym] = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                save_state(portfolio.ban_list, active_candidates, risk_filter.loss_blacklist)
+            if not is_market_open_minute:
+                fresh_targets = listener.scan_markets(
+                    ban_list=portfolio.ban_list,
+                    active_candidates=active_candidates
+                )
+                
+                if fresh_targets:
+                    for sym in fresh_targets:
+                        candle_exporter.register_candidate(sym, exchange=listener.get_candidate_exchange(sym))
+                        if sym not in active_candidates:
+                            active_candidates[sym] = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                    save_state(portfolio.ban_list, active_candidates, risk_filter.loss_blacklist)
 
             # ---------------------------------------------------------
             # D. [매수] 진입 타점 확인 (3중 리스크 필터 적용)
@@ -514,7 +517,16 @@ def main():
                 if not portfolio.is_holding(sym) and not portfolio.is_banned(sym)
             ]
 
-            random.shuffle(buy_candidates)
+            # 🚀 [순회 지연 최적화: RETO 누락 방지]
+            # 무작위 셔플(random.shuffle) 제거 -> 당일 시초 갭/상승률 상위 종목 우선 순회 정렬
+            def get_candidate_priority(sym):
+                if sym in candle_cache and candle_cache[sym].get('df') is not None and not candle_cache[sym]['df'].empty:
+                    c_df = candle_cache[sym]['df']
+                    if len(c_df) >= 2 and c_df['open'].iloc[0] > 0:
+                        return (c_df['close'].iloc[-1] - c_df['open'].iloc[0]) / c_df['open'].iloc[0]
+                return 0.0
+
+            buy_candidates.sort(key=get_candidate_priority, reverse=True)
             targets_to_check = buy_candidates[:15]
             listener.current_watchlist = targets_to_check 
 
