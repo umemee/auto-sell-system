@@ -28,14 +28,40 @@ from infra.risk_filter import TradeRiskFilter  # 👈 [추가] 3중 리스크 �
 from data.market_listener import MarketListener
 from strategy import get_strategy
 
+BASE_DIR = Path(__file__).resolve().parent
 logger = get_logger("Main")
-STATE_FILE = "system_state.json"
+STATE_FILE = str(BASE_DIR / "system_state.json")
 
-def save_state(ban_list, active_candidates, loss_blacklist=None):
+def save_state(ban_list, active_candidates, loss_blacklist=None, daily_realized_pnl=None, unsettled_sell_amount=None, portfolio=None):
     """
-    [설명] 밴 리스트, 감시 중인 종목, 손절 블랙리스트를 파일로 저장합니다.
+    [설명] 밴 리스트, 감시 중인 종목, 손절 블랙리스트 및 체결기준 손익/미결제대금을 파일로 저장합니다.
     """
     try:
+        if portfolio is not None:
+            if daily_realized_pnl is None:
+                daily_realized_pnl = getattr(portfolio, 'daily_realized_pnl', 0.0)
+            if unsettled_sell_amount is None:
+                unsettled_sell_amount = getattr(portfolio, 'unsettled_sell_amount', 0.0)
+
+        # 손익/미결제금이 명시되지 않은 경우 기존 파일의 당일 값 보존
+        if daily_realized_pnl is None or unsettled_sell_amount is None:
+            if os.path.exists(STATE_FILE):
+                try:
+                    with open(STATE_FILE, "r") as f_prev:
+                        old_s = json.load(f_prev)
+                        today_s = datetime.datetime.now().strftime("%Y-%m-%d")
+                        if old_s.get("date") == today_s:
+                            if daily_realized_pnl is None:
+                                daily_realized_pnl = old_s.get("daily_realized_pnl", 0.0)
+                            if unsettled_sell_amount is None:
+                                unsettled_sell_amount = old_s.get("unsettled_sell_amount", 0.0)
+                except Exception:
+                    pass
+        if daily_realized_pnl is None:
+            daily_realized_pnl = 0.0
+        if unsettled_sell_amount is None:
+            unsettled_sell_amount = 0.0
+
         candidates_data = {}
         if isinstance(active_candidates, dict):
             candidates_data = active_candidates
@@ -47,6 +73,8 @@ def save_state(ban_list, active_candidates, loss_blacklist=None):
             "ban_list": list(ban_list),
             "loss_blacklist": list(loss_blacklist) if loss_blacklist is not None else [],
             "active_candidates": candidates_data,
+            "daily_realized_pnl": float(daily_realized_pnl),
+            "unsettled_sell_amount": float(unsettled_sell_amount),
             "date": datetime.datetime.now().strftime("%Y-%m-%d")
         }
         
@@ -59,7 +87,7 @@ def save_state(ban_list, active_candidates, loss_blacklist=None):
 def load_state():
     """[설명] 저장된 상태 파일이 있다면 불러옵니다."""
     if not os.path.exists(STATE_FILE):
-        return set(), {}, set()
+        return set(), {}, set(), 0.0, 0.0
     
     try:
         with open(STATE_FILE, "r") as f:
@@ -68,10 +96,12 @@ def load_state():
         today = datetime.datetime.now().strftime("%Y-%m-%d")
         if state.get("date") != today:
             logger.info("📅 날짜 변경으로 저장된 상태를 초기화합니다.")
-            return set(), {}, set()
+            return set(), {}, set(), 0.0, 0.0
             
         loaded_ban = set(state.get("ban_list", []))
         loaded_loss = set(state.get("loss_blacklist", []))
+        daily_pnl = float(state.get("daily_realized_pnl", 0.0))
+        unsettled = float(state.get("unsettled_sell_amount", 0.0))
         raw_candidates = state.get("active_candidates", {})
         
         loaded_candidates = {}
@@ -83,11 +113,11 @@ def load_state():
         else:
             loaded_candidates = {}
             
-        return loaded_ban, loaded_candidates, loaded_loss
+        return loaded_ban, loaded_candidates, loaded_loss, daily_pnl, unsettled
     
     except Exception as e:
         logger.error(f"⚠️ 상태 로드 실패: {e}")
-        return set(), {}, set()
+        return set(), {}, set(), 0.0, 0.0
 
 def merge_candle_dfs(old_df, new_df, max_len=1200):
     """
@@ -200,7 +230,7 @@ def main():
         kis = KisApi(token_manager)
         bot = TelegramBot()
         listener = MarketListener(kis)
-        candle_exporter = LiveCandleExporter(kis, bot, base_dir=os.getcwd())
+        candle_exporter = LiveCandleExporter(kis, bot, base_dir=BASE_DIR)
         
         # 🛡️ [추가] 3중 리스크 필터 초기화
         risk_filter = TradeRiskFilter()
@@ -210,14 +240,37 @@ def main():
         order_manager = RealOrderManager(kis)
         strategy = get_strategy() 
 
+        # 🧪 [VIRTUAL PAPER TRACK] 결합 전략 가상 페이퍼 엔진 인스턴스화
+        virtual_combined_engine = None
+        if getattr(Config, 'ENABLE_COMBINED_PAPER_TRACK', True):
+            try:
+                from infra.virtual_combined_engine import VirtualCombinedEngine
+                v_seed = getattr(Config, 'VIRTUAL_INITIAL_BALANCE', 2000.0)
+                virtual_combined_engine = VirtualCombinedEngine(kis_api=kis, initial_capital=v_seed)
+                logger.info(f"🧪 [VirtualTrack] 결합 전략 가상 페이퍼 엔진 탑재 완료 (EMA + Alpha + CapitalManager, Seed: ${v_seed:,.0f})")
+            except Exception as e:
+                logger.error(f"⚠️ [VirtualTrack Init Error] 가상 엔진 초기화 실패: {e}") 
+
         # 3. 서버 동기화 및 상태 복구
         logger.info("📡 증권사 서버와 동기화 중...")
         portfolio.sync_with_kis()
         
-        loaded_ban, loaded_candidates, loaded_loss = load_state()
+        loaded_ban, loaded_candidates, loaded_loss, loaded_daily_pnl, loaded_unsettled = load_state()
         portfolio.ban_list.update(loaded_ban)
         strategy.banned_tickers.update(loaded_ban)
         risk_filter.loss_blacklist.update(loaded_loss)
+        portfolio.daily_realized_pnl = loaded_daily_pnl
+        portfolio.unsettled_sell_amount = loaded_unsettled
+
+        # 2차 복구: 당일 trade.log 기반 복구
+        recovered_count = portfolio.recover_from_log()
+
+        # 체결기준 총자산 재계산
+        current_val = sum(
+            p['qty'] * p.get('current_price', p.get('entry_price', 0.0))
+            for p in portfolio.positions.values()
+        )
+        portfolio.total_equity = portfolio.balance + current_val + portfolio.unsettled_sell_amount
         
         if isinstance(loaded_candidates, (set, list)):
              active_candidates = {sym: datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S") for sym in loaded_candidates}
@@ -227,14 +280,20 @@ def main():
         for sym in active_candidates:
             candle_exporter.register_candidate(sym)
         
-        logger.info(f"💾 [Memory] 복구 완료 | 🚫Ban: {len(portfolio.ban_list)}개, 🛑Loss-Blacklist: {len(risk_filter.loss_blacklist)}개, 👁️Watch: {len(active_candidates)}개")
+        logger.info(
+            f"💾 [Memory] 복구 완료 | 🚫Ban: {len(portfolio.ban_list)}개, "
+            f"🛑Loss-Blacklist: {len(risk_filter.loss_blacklist)}개, "
+            f"👁️Watch: {len(active_candidates)}개 | "
+            f"손익: ${portfolio.daily_realized_pnl:+,.2f}, 미결제: ${portfolio.unsettled_sell_amount:,.2f}"
+        )
         
         mode_label = "가상 페이퍼 [PAPER]" if is_paper_mode else f"실계좌 실전 [REAL] ({cano_masked})"
         start_msg = (
             f"⚔️ [시스템 가동 v5.4 - 3중 리스크 필터 탑재]\n"
             f"🕹️ 모드: {mode_label}\n"
             f"⏰ 시간: KR {now_kst_start.strftime('%H:%M')} / NY {now_et_start.strftime('%H:%M')}\n"
-            f"💰 자산: ${portfolio.total_equity:,.0f}\n"
+            f"💰 체결기준 자산: ${portfolio.total_equity:,.0f} (예수금: ${portfolio.balance:,.0f}, 미결제: ${portfolio.unsettled_sell_amount:,.0f})\n"
+            f"📈 금일 누적 손익: ${portfolio.daily_realized_pnl:+,.2f}\n"
             f"🎰 슬롯: {len(portfolio.positions)} / {portfolio.MAX_SLOTS}\n"
             f"🛡️ 손절 차단 종목 수: {len(risk_filter.loss_blacklist)}개"
         )
@@ -244,6 +303,8 @@ def main():
             return {
                 'cash': portfolio.balance,
                 'total_equity': portfolio.total_equity,
+                'unsettled': getattr(portfolio, 'unsettled_sell_amount', 0.0),
+                'daily_pnl': getattr(portfolio, 'daily_realized_pnl', 0.0),
                 'positions': portfolio.positions,
                 'targets': getattr(listener, 'current_watchlist', []),
                 'ban_list': list(portfolio.ban_list),
@@ -276,7 +337,7 @@ def main():
             try:
                 date_target = export_date or current_date_str
                 date_clean = date_target.replace("-", "")
-                spread_file = Path(f"logs/spread_analysis/signal_spreads_{date_clean}.csv")
+                spread_file = BASE_DIR / "logs" / "spread_analysis" / f"signal_spreads_{date_clean}.csv"
                 
                 if spread_file.exists():
                     sent = bot.send_document(
@@ -342,7 +403,7 @@ def main():
                                     if ticker in active_candidates:
                                         del active_candidates[ticker]
                                         
-                                    save_state(portfolio.ban_list, active_candidates, risk_filter.loss_blacklist)
+                                    save_state(portfolio.ban_list, active_candidates, risk_filter.loss_blacklist, portfolio=portfolio)
                     
                     time.sleep(0.5)
 
@@ -381,7 +442,7 @@ def main():
                     logger.warning(f"💤 Sleep Mode: {reason}")
                     bot.send_message(f"💤 [대기] {reason}")
                     was_sleeping = True
-                    save_state(portfolio.ban_list, active_candidates, risk_filter.loss_blacklist)
+                    save_state(portfolio.ban_list, active_candidates, risk_filter.loss_blacklist, portfolio=portfolio)
                 
                 time.sleep(30)
                 continue
@@ -407,8 +468,11 @@ def main():
                     for ticker in list(portfolio.positions.keys()):
                         order_manager.execute_sell(portfolio, ticker, "FORCE_EOD_EXIT", price=0)
                         time.sleep(0.2)
+
+                if virtual_combined_engine:
+                    virtual_combined_engine.force_eod_exit(now)
                 
-                save_state(portfolio.ban_list, active_candidates, risk_filter.loss_blacklist)
+                save_state(portfolio.ban_list, active_candidates, risk_filter.loss_blacklist, portfolio=portfolio)
                 run_live_candle_export(current_date_str, reason="eod")
                 send_spread_analysis_log(current_date_str)
                 logger.info("👋 [System] 장 마감으로 시스템을 종료합니다.")
@@ -439,8 +503,8 @@ def main():
                 
                 msg = (
                     f"💓 [생존] KR {cur_k} / NY {cur_n}\n"
-                    f"💰 자산 ${eq:,.0f} | 보유 {pos_cnt}개\n"
-                    f"👁️ 감시({len(watching_list)}): {watch_str}\n"
+                    f"💰 체결기준 자산 ${eq:,.0f} (미결제 ${portfolio.unsettled_sell_amount:,.0f}) | 손익 ${portfolio.daily_realized_pnl:+,.2f}\n"
+                    f"🎰 보유 {pos_cnt}개 | 👁️ 감시({len(watching_list)}): {watch_str}\n"
                     f"🚫 Ban({len(banned_list)}): {ban_str}\n"
                     f"🛑 손절차단({len(loss_list)}): {loss_str}"
                 )
@@ -454,13 +518,15 @@ def main():
             new_date_str = now.strftime("%Y-%m-%d")
             if new_date_str != current_date_str:
                 logger.info(f"📅 [New Day] 날짜 변경 감지: {current_date_str} -> {new_date_str}")
-                portfolio.ban_list.clear()
+                portfolio.daily_reset()    # 👈 [추가] 일일 실현손익 및 미결제대금 리셋
                 strategy.daily_reset()     # 👈 [추가] 일별 세션 상태(banned_tickers 등) 초기화
                 risk_filter.reset_daily()  # 👈 [추가] 일일 리스크 필터 리셋
+                if virtual_combined_engine:
+                    virtual_combined_engine.daily_reset()
                 active_candidates.clear()
                 candle_cache.clear()
                 candle_exporter.reset_session()
-                save_state(portfolio.ban_list, active_candidates, risk_filter.loss_blacklist)
+                save_state(portfolio.ban_list, active_candidates, risk_filter.loss_blacklist, portfolio=portfolio)
                 logger.info("✨ [Reset] 금일 감시 종목 및 밴 리스트 초기화 완료")
                 current_date_str = new_date_str
 
@@ -471,25 +537,56 @@ def main():
             portfolio.sync_with_kis()
             current_holdings = set(portfolio.positions.keys())
             
-            sold_tickers = prev_holdings - current_holdings
+            # sync_with_kis()에서 삭제된 종목(증권사 체결) 감지 및 실현손익 등록
+            removed_positions = dict(portfolio.last_sync_removed_positions)
+            portfolio.last_sync_removed_positions.clear()
+            sold_tickers = set(removed_positions.keys()) | (prev_holdings - current_holdings)
+
             for ticker in sold_tickers:
-                if ticker in portfolio.ban_list:
-                    continue
-                    
-                logger.info(f"🎉 [익절 감지] {ticker} 목표가 도달 확인!")
-                msg = (
-                    f"🎉 <b>[익절 체결 확인]</b>\n"
-                    f"📦 종목: {ticker}\n"
-                    f"💰 결과: 목표가 달성 추정\n"
-                    f"✅ 잔고에서 자동으로 청산되었습니다."
-                )
+                pos_info = removed_positions.get(ticker, {})
+                qty = pos_info.get('qty', 0)
+                entry_p = pos_info.get('entry_price', 0.0)
+                
+                target_profit_pct = getattr(Config, 'TARGET_PROFIT_PCT', 0.07)
+                sell_p = pos_info.get('target_price', 0.0)
+                if sell_p <= 0:
+                    sell_p = round_price(entry_p * (1.0 + target_profit_pct)) if entry_p > 0 else 0.0
+                
+                if qty > 0 and entry_p > 0 and sell_p > 0:
+                    record = portfolio.register_realized_sale(
+                        ticker=ticker,
+                        qty=qty,
+                        sell_price=sell_p,
+                        entry_price=entry_p,
+                        reason='TAKE_PROFIT'
+                    )
+                    pnl = record.get('pnl', 0.0)
+                    ret_pct = record.get('return_pct', 0.0)
+                    logger.info(f"🎉 [익절 감지] {ticker} 목표가(${sell_p:.4f}) 도달 청산 완료! PnL: ${pnl:+,.2f} ({ret_pct:+.2f}%)")
+                    msg = (
+                        f"🎉 <b>[실전 익절 체결 확인 / REAL]</b>\n"
+                        f"📦 종목: {ticker}\n"
+                        f"🔢 수량: {qty}주 | 매도가: ${sell_p:.4f} (진입가: ${entry_p:.4f})\n"
+                        f"💵 실현손익: ${pnl:+,.2f} ({ret_pct:+.2f}%)\n"
+                        f"💰 금일 누적 실현손익: ${portfolio.daily_realized_pnl:+,.2f}\n"
+                        f"🏦 체결기준 총자산: ${portfolio.total_equity:,.0f} (미결제대금: ${portfolio.unsettled_sell_amount:,.2f})"
+                    )
+                else:
+                    logger.info(f"🎉 [익절 감지] {ticker} 목표가 도달 확인!")
+                    msg = (
+                        f"🎉 <b>[익절 체결 확인]</b>\n"
+                        f"📦 종목: {ticker}\n"
+                        f"💰 결과: 목표가 달성 추정\n"
+                        f"✅ 잔고에서 자동으로 청산되었습니다."
+                    )
+                
                 bot.send_message(msg)
                 portfolio.ban_list.add(ticker)
                 
                 if ticker in active_candidates:
                     del active_candidates[ticker]
                     
-                save_state(portfolio.ban_list, active_candidates, risk_filter.loss_blacklist)
+                save_state(portfolio.ban_list, active_candidates, risk_filter.loss_blacklist, portfolio=portfolio)
 
             # ---------------------------------------------------------
             # C. [스캔] 신규 급등주 포착 (09:00:00 정각에는 매수 타점 우선 순회를 위해 스캔을 매수 뒤로 분산)
@@ -507,7 +604,7 @@ def main():
                         candle_exporter.register_candidate(sym, exchange=listener.get_candidate_exchange(sym))
                         if sym not in active_candidates:
                             active_candidates[sym] = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                    save_state(portfolio.ban_list, active_candidates, risk_filter.loss_blacklist)
+                    save_state(portfolio.ban_list, active_candidates, risk_filter.loss_blacklist, portfolio=portfolio)
 
             # ---------------------------------------------------------
             # D. [매수] 진입 타점 확인 (3중 리스크 필터 적용)
@@ -608,7 +705,7 @@ def main():
                                 if sym in active_candidates:
                                     del active_candidates[sym]
                                 candle_cache.pop(sym, None)
-                                save_state(portfolio.ban_list, active_candidates, risk_filter.loss_blacklist)
+                                save_state(portfolio.ban_list, active_candidates, risk_filter.loss_blacklist, portfolio=portfolio)
                                 continue
                             
                             # -----------------------------------------------------
@@ -662,7 +759,7 @@ def main():
                                     
                                     if result['status'] == 'success':
                                         candle_cache.pop(sym, None)
-                                        save_state(portfolio.ban_list, active_candidates, risk_filter.loss_blacklist)
+                                        save_state(portfolio.ban_list, active_candidates, risk_filter.loss_blacklist, portfolio=portfolio)
                                         
                                         time.sleep(1.5) 
                                         portfolio.sync_with_kis() 
@@ -678,6 +775,8 @@ def main():
                                                 target_profit_pct = getattr(Config, 'TARGET_PROFIT_PCT', 0.07)
                                                 target_price = buy_price * (1.0 + target_profit_pct)
                                                 target_price = round_price(target_price)
+                                                if sym in portfolio.positions:
+                                                    portfolio.positions[sym]['target_price'] = target_price
                                                 
                                                 qty = result.get('qty', 0)
                                                 
@@ -698,7 +797,7 @@ def main():
                                         logger.warning(f"🚌 [실패] {sym} 매수 실패. 금일 제외.")
                                         portfolio.ban_list.add(sym)
                                         candle_cache.pop(sym, None)
-                                        save_state(portfolio.ban_list, active_candidates, risk_filter.loss_blacklist)
+                                        save_state(portfolio.ban_list, active_candidates, risk_filter.loss_blacklist, portfolio=portfolio)
 
                         elif signal['type'] == 'DROP':
                             logger.info(f"🗑️ [DROP] {sym} 추세 붕괴 확인 -> 감시 해제 및 당일 영구 밴 등록")
@@ -709,7 +808,17 @@ def main():
                             except KeyError:
                                 pass
                             candle_cache.pop(sym, None)
-                            save_state(portfolio.ban_list, active_candidates, risk_filter.loss_blacklist)
+                            save_state(portfolio.ban_list, active_candidates, risk_filter.loss_blacklist, portfolio=portfolio)
+
+                    # -----------------------------------------------------
+                    # 🧪 [VIRTUAL PAPER TRACK] 결합 전략 가상 페이퍼 엔진 훅
+                    # 실전 주문 로직이 완전히 끝난 직후 호출 (실전 체결 지연 0ms 보장)
+                    # -----------------------------------------------------
+                    if virtual_combined_engine:
+                        try:
+                            virtual_combined_engine.on_candle(sym, df, now_time=now)
+                        except Exception as ve_err:
+                            logger.error(f"⚠️ [VirtualEngine Error] {sym}: {ve_err}")
 
                     time.sleep(0.55)
 
@@ -717,6 +826,19 @@ def main():
                     logger.error(f"❌ 매수 로직 에러({sym}): {e}")
                     bot.send_message(f"⚠️ [System Error] 매수 로직 중 오류 발생\n종목: {sym}\n내용: {str(e)}")
                     continue
+
+            # ---------------------------------------------------------
+            # 🧪 [VirtualTrack] 감시 외 보유 가상 포지션 청산 조건 추적
+            # ---------------------------------------------------------
+            if virtual_combined_engine and virtual_combined_engine.positions:
+                for v_sym in list(virtual_combined_engine.positions.keys()):
+                    if v_sym not in targets_to_check and v_sym in candle_cache:
+                        v_df = candle_cache[v_sym].get('df')
+                        if v_df is not None and not v_df.empty:
+                            try:
+                                virtual_combined_engine.on_candle(v_sym, v_df, now_time=now)
+                            except Exception as ve_err:
+                                logger.error(f"⚠️ [VirtualEngine Exit Error] {v_sym}: {ve_err}")
             
             if not portfolio.positions and portfolio.balance < 10:
                 logger.info("🔄 [Sync] 매도 후 잔고 재동기화 수행...")
@@ -727,7 +849,7 @@ def main():
         except KeyboardInterrupt:
             logger.info("🛑 관리자에 의한 수동 종료")
             bot.send_message("🛑 시스템을 종료합니다.")
-            save_state(portfolio.ban_list, active_candidates, risk_filter.loss_blacklist)
+            save_state(portfolio.ban_list, active_candidates, risk_filter.loss_blacklist, portfolio=portfolio)
             run_live_candle_export(current_date_str, reason="manual_shutdown")
             send_spread_analysis_log(current_date_str)
             break
