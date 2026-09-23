@@ -2,6 +2,7 @@
 import logging
 import os
 import datetime
+from pathlib import Path
 from infra.utils import get_logger
 from config import Config
 
@@ -15,12 +16,12 @@ class MarketListener:
         self.debug_logger.setLevel(logging.DEBUG)
         
         # logs 폴더 확인 및 생성
-        log_dir = os.path.join(os.getcwd(), "logs")
-        if not os.path.exists(log_dir):
-            os.makedirs(log_dir)
+        base_dir = Path(__file__).resolve().parent.parent
+        log_dir = base_dir / "logs"
+        log_dir.mkdir(parents=True, exist_ok=True)
             
-        file_handler = logging.FileHandler(os.path.join(log_dir, "debug_scanner.log"), encoding='utf-8')
-        file_handler.setFormatter(logging.Formatter('%(asctime)s [%(levelname)s] %(message)s'))
+        file_handler = logging.FileHandler(str(log_dir / "debug_scanner.log"), encoding='utf-8')
+        file_handler.setFormatter(logging.Formatter('[LIVE] %(asctime)s [%(levelname)s] %(message)s'))
         
         # 기존 핸들러 제거 후 추가 (중복 방지)
         if self.debug_logger.hasHandlers():
