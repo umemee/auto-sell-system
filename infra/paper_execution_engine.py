@@ -33,7 +33,7 @@ class VirtualExecutionEngine:
         self.slippage_pct = getattr(Config, 'VIRTUAL_SLIPPAGE_PCT', 0.0003) # 0.03% 보수적 슬리피지
         
         # 로그 및 DB 저장 경로
-        self.log_dir = Path("logs/paper")
+        self.log_dir = Path(__file__).resolve().parent.parent / "logs" / "paper"
         self.log_dir.mkdir(parents=True, exist_ok=True)
         
         # 가상 미체결 주문 큐 (Pending Orders: {order_id: {...}})

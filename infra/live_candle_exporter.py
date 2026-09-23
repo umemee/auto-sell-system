@@ -26,7 +26,7 @@ class LiveCandleExporter:
         self.bot = telegram_bot
         self.logger = get_logger("LiveCandleExporter")
 
-        root = Path(base_dir or os.getcwd())
+        root = Path(base_dir or Path(__file__).resolve().parent.parent)
         self.live_candles_dir = root / "logs" / "live_candles"
         self.live_exports_dir = root / "logs" / "live_exports"
         self.live_candles_dir.mkdir(parents=True, exist_ok=True)

@@ -4,6 +4,7 @@ import sys
 import datetime
 import pytz
 import functools
+from pathlib import Path
 from logging.handlers import RotatingFileHandler
 
 # Windows 콘솔 UTF-8 인코딩 보장 (이모지 출력 에러 방지)
@@ -18,6 +19,9 @@ if sys.platform == 'win32':
 
 # 로거 설정 (Singleton)
 _logger = None
+BASE_DIR = Path(__file__).resolve().parent.parent
+LOG_DIR = BASE_DIR / "logs"
+LOG_DIR.mkdir(parents=True, exist_ok=True)
 
 def get_logger(name="KIS_US_Scalper"):
     global _logger
@@ -28,7 +32,7 @@ def get_logger(name="KIS_US_Scalper"):
     logger.setLevel(logging.INFO)
     
     formatter = logging.Formatter(
-        '[%(asctime)s] %(levelname)s [%(filename)s:%(lineno)d] %(message)s',
+        '[LIVE] [%(asctime)s] %(levelname)s [%(filename)s:%(lineno)d] %(message)s',
         datefmt='%Y-%m-%d %H:%M:%S'
     )
 
@@ -38,7 +42,7 @@ def get_logger(name="KIS_US_Scalper"):
         logger.addHandler(stream_handler)
 
         file_handler = RotatingFileHandler(
-            'trade.log', 
+            str(LOG_DIR / 'trade.log'), 
             maxBytes=10*1024*1024, 
             backupCount=5, 
             encoding='utf-8'

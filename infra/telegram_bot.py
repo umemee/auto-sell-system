@@ -148,11 +148,16 @@ class TelegramBot:
         ban_list = data.get('ban_list', [])
         ban_str = ", ".join(ban_list) if ban_list else "없음"
 
+        unsettled = data.get('unsettled', 0.0)
+        daily_pnl = data.get('daily_pnl', 0.0)
+
         msg = (
             f"📊 <b>[GapZone Dashboard v5]</b>\n"
             f"━━━━━━━━━━━━━━━━\n"
-            f"💰 <b>총 자산:</b> ${data['total_equity']:,.2f}\n"
-            f"💵 <b>현금:</b> ${data['cash']:,.2f}\n"
+            f"💰 <b>체결기준 총자산:</b> ${data['total_equity']:,.2f}\n"
+            f"💵 <b>예수금(Cash):</b> ${data['cash']:,.2f}\n"
+            f"⏳ <b>D+2 미결제 매도금:</b> ${unsettled:,.2f}\n"
+            f"📈 <b>금일 누적 실현손익:</b> ${daily_pnl:+,.2f}\n"
             f"━━━━━━━━━━━━━━━━\n"
             f"🔭 <b>감시 중:</b>\n"
             f"👉 {target_str}\n\n"
