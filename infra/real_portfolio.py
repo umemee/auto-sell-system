@@ -25,6 +25,12 @@ class RealPortfolio:
         self.balance = getattr(Config, 'VIRTUAL_INITIAL_BALANCE', 10000.0) if self.is_paper else 0.0
         self.total_equity = self.balance
         
+        # 💵 [Trade-Date Settlement] 체결기준 정산 및 당일 실현손익 추적
+        self.daily_realized_pnl = 0.0          # 당일 누적 실현손익 ($)
+        self.unsettled_sell_amount = 0.0       # D+2 미결제 매도대금 합계 ($)
+        self.closed_trades_today = []          # 당일 청산 거래 목록
+        self.last_sync_removed_positions = {}  # 최근 동기화 시 매도 감지된 포지션 백업
+        
         # Positions Dictionary
         # { 'TICKER': { 'qty': 10, 'entry_price': 100, 'highest_price': 120, ... } }
         self.positions = {} 
@@ -150,15 +156,17 @@ class RealPortfolio:
 
             # 3. 사라진 종목 처리 (매도 완료 감지)
             # 로컬에는 있었는데 API 목록(api_tickers)에 없다면 -> 매도된 것임
+            self.last_sync_removed_positions.clear()
             local_tickers = list(self.positions.keys())
             for ticker in local_tickers:
                 if ticker not in api_tickers:
                     self.logger.info(f"🗑️ [Sync] Position Removed detected: {ticker}")
+                    self.last_sync_removed_positions[ticker] = dict(self.positions[ticker])
                     del self.positions[ticker]
                     self.ban_list.add(ticker) # [Cool-down] 금일 재매수 금지 등록
 
-            # 4. 총 자산 가치 업데이트
-            self.total_equity = self.balance + current_stock_value
+            # 4. 체결기준 총 자산 가치 업데이트 (증권사 D+2 지연 대금 포함)
+            self.total_equity = self.balance + current_stock_value + self.unsettled_sell_amount
 
             # 로그 출력 (선택 사항)
             # self._log_status()
@@ -166,6 +174,127 @@ class RealPortfolio:
         except Exception as e:
             self.logger.error(f"❌ [Sync Fail] Portfolio Sync Failed: {e}")
             # 동기화 실패 시 로컬 상태 유지 (삭제하지 않음)
+
+    def register_realized_sale(self, ticker, qty, sell_price, entry_price, reason='SELL', fee_rate=0.001):
+        """
+        [Trade-Date Settlement]
+        매도 체결 즉시 실현손익 및 D+2 미결제 매도대금을 로컬에 반영.
+        증권사 D+2 예수금 지연 입금으로 인한 자산 증발 왜곡을 100% 방어함.
+        """
+        gross_proceeds = sell_price * qty
+        fee = gross_proceeds * fee_rate
+        net_proceeds = gross_proceeds - fee
+        total_cost = entry_price * qty
+        pnl = net_proceeds - total_cost
+        ret_pct = ((sell_price - entry_price) / entry_price * 100.0) if entry_price > 0 else 0.0
+
+        self.daily_realized_pnl += pnl
+        if not self.is_paper:
+            self.unsettled_sell_amount += net_proceeds
+
+        record = {
+            'ticker': ticker,
+            'qty': int(qty),
+            'entry_price': round(entry_price, 4),
+            'sell_price': round(sell_price, 4),
+            'pnl': round(pnl, 2),
+            'return_pct': round(ret_pct, 2),
+            'reason': reason,
+            'time': datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        }
+        self.closed_trades_today.append(record)
+        
+        # 체결기준 총자산 즉시 재계산 (매도된 종목은 평가액에서 즉시 제외)
+        current_val = sum(
+            p['qty'] * p.get('current_price', p.get('entry_price', 0.0))
+            for t, p in self.positions.items()
+            if t != ticker
+        )
+        self.total_equity = self.balance + current_val + self.unsettled_sell_amount
+
+        self.logger.info(
+            f"📈 [Trade Realized] {ticker} | PnL: ${pnl:+,.2f} ({ret_pct:+.2f}%) | "
+            f"금일 누적: ${self.daily_realized_pnl:+,.2f} | 미결제대금: ${self.unsettled_sell_amount:,.2f}"
+        )
+        return record
+
+    def daily_reset(self):
+        """[Daily Reset] 자정/세션 시작 시 당일 손익 초기화"""
+        self.daily_realized_pnl = 0.0
+        self.unsettled_sell_amount = 0.0
+        self.closed_trades_today.clear()
+        self.ban_list.clear()
+        self.logger.info("🔄 [RealPortfolio] 일일 실현손익 및 미결제대금 초기화 완료")
+
+    def recover_from_log(self, log_path=None, today_str=None):
+        """
+        [장중 재시작 복구력] trade.log를 파싱하여 당일 실현손익과 미결제대금을 복구
+        """
+        import re
+        from pathlib import Path
+        
+        if log_path is None:
+            log_path = Path(__file__).resolve().parent.parent / "logs" / "trade.log"
+        log_path = Path(log_path)
+        
+        if not log_path.exists():
+            return 0
+            
+        if today_str is None:
+            today_str = datetime.datetime.now(pytz.timezone('US/Eastern')).strftime("%Y-%m-%d")
+
+        recovered_pnl = 0.0
+        recovered_unsettled = 0.0
+        recovered_count = 0
+        last_unsettled = None
+        
+        pattern_realized = re.compile(
+            r'\[(\d{4}-\d{2}-\d{2})\s[\d:]+\].*?📈\s+\[Trade Realized\]\s+(\S+)\s+\|\s+PnL:\s+\$([+\-\d\.,]+).*?미결제대금:\s+\$([+\-\d\.,]+)'
+        )
+        pattern_sell_fill = re.compile(
+            r'\[(\d{4}-\d{2}-\d{2})\s[\d:]+\].*?🔴\s+\[.*?체결\]\s+(\S+).*?수량:\s+(\d+)주\s+\|\s+체결가:\s+\$([\d\.]+).*?손익:\s+\$([+\-\d\.,]+)'
+        )
+
+        try:
+            with open(log_path, 'r', encoding='utf-8', errors='ignore') as f:
+                for line in f:
+                    m1 = pattern_realized.search(line)
+                    if m1:
+                        log_date, sym, pnl_str, unsettled_str = m1.groups()
+                        if log_date == today_str:
+                            pnl_val = float(pnl_str.replace(',', ''))
+                            unsettled_val = float(unsettled_str.replace(',', ''))
+                            recovered_pnl += pnl_val
+                            last_unsettled = unsettled_val
+                            recovered_count += 1
+                            continue
+
+                    m2 = pattern_sell_fill.search(line)
+                    if m2 and last_unsettled is None:
+                        log_date, sym, qty_str, price_str, pnl_str = m2.groups()
+                        if log_date == today_str:
+                            pnl_val = float(pnl_str.replace(',', ''))
+                            qty_val = float(qty_str)
+                            price_val = float(price_str)
+                            recovered_pnl += pnl_val
+                            recovered_unsettled += (price_val * qty_val * 0.999)
+                            recovered_count += 1
+
+            if last_unsettled is not None:
+                recovered_unsettled = last_unsettled
+
+            if recovered_count > 0:
+                self.daily_realized_pnl = round(recovered_pnl, 2)
+                if not self.is_paper:
+                    self.unsettled_sell_amount = round(recovered_unsettled, 2)
+                self.logger.info(
+                    f"🔄 [Log Recovery] trade.log로부터 {recovered_count}건의 당일 매매 복구 완료 | "
+                    f"금일 누적 손익: ${self.daily_realized_pnl:+,.2f} | 미결제대금: ${self.unsettled_sell_amount:,.2f}"
+                )
+        except Exception as e:
+            self.logger.warning(f"⚠️ [Log Recovery] trade.log 파싱 중 오류: {e}")
+            
+        return recovered_count
 
     def has_open_slot(self):
         """빈 슬롯 확인 (Double Engine)"""
@@ -203,14 +332,14 @@ class RealPortfolio:
             p['qty'] * p.get('current_price', p.get('entry_price', 0.0))
             for p in self.positions.values()
         )
-        self.total_equity = self.balance + current_val
+        self.total_equity = self.balance + current_val + self.unsettled_sell_amount
 
         return removed
 
     def get_max_order_amount(self):
         """
-        [Double Engine 자금 관리 - Fixed for Market Order]
-        목표: 전체 자산의 50% 베팅 (단, 현금 범위 내에서)
+        [Double Engine 자금 관리 - Fixed for Market Order & Hard Cap Option A]
+        목표: 전체 자산의 50% 베팅 (단, 현금 범위 내에서 & 최대 $2,000 Hard Cap)
         수정: 시장가 주문(+5% 할증)을 고려하여 현금 버퍼를 2% -> 10%로 확대
         """
         # 1. 현재 슬롯 확인 (이미 꽉 찼으면 0 반환)
@@ -220,37 +349,91 @@ class RealPortfolio:
         # 2. 1슬롯당 목표 금액 계산 (총 자산 / 2)
         target_amount = self.total_equity / self.MAX_SLOTS
         
-        # 3. [안전 장치] 주문 가능 현금의 90% (수수료 + 시장가 할증 5% 커버)
-        # 기존 0.98은 Limit 주문용이며, Market 주문(Limit+5%) 시 자금 부족 발생함
+        # 3. [옵션 A] 1회 주문 최대 한도 Hard Cap ($2,000)
+        cap = getattr(Config, 'MAX_SINGLE_ORDER_AMOUNT', 2000.0)
+        capped_target = min(target_amount, cap) if (cap is not None and cap > 0) else target_amount
+
+        # 4. [안전 장치] 주문 가능 현금의 90% (수수료 + 시장가 할증 5% 커버)
         safe_cash = self.balance * 0.90 
         
-        # 4. 최종 주문 금액 (둘 중 작은 값)
-        final_amount = min(target_amount, safe_cash)
+        # 5. 최종 주문 금액 (둘 중 작은 값)
+        final_amount = min(capped_target, safe_cash)
         
-        # 최소 주문 금액 ($50 미만은 주문 안 함 - 수수료 효율 고려)
+        # 최소 주문 금액 ($20 미만은 주문 안 함)
         if final_amount < 20:
             return 0.0
             
         return final_amount
 
-    def calculate_qty(self, price):
+    def _log_sizing_cap(self, record: dict):
         """
-        [주문 수량 계산]
+        [포워드 리스크 추적] $2,000 Hard Cap 발동 거래 전용 CSV 로깅 (sizing_cap_log.csv)
+        """
+        import csv
+        from pathlib import Path
+        try:
+            base_dir = Path(__file__).resolve().parent.parent
+            log_dir = base_dir / "logs" / "live"
+            log_dir.mkdir(parents=True, exist_ok=True)
+            
+            file_path = log_dir / "sizing_cap_log.csv"
+            file_exists = file_path.exists()
+            
+            with open(file_path, 'a', newline='', encoding='utf-8') as f:
+                writer = csv.DictWriter(f, fieldnames=record.keys(), extrasaction='ignore')
+                if not file_exists or file_path.stat().st_size == 0:
+                    writer.writeheader()
+                writer.writerow(record)
+        except Exception as e:
+            self.logger.error(f"⚠️ sizing_cap_log.csv 기록 실패: {e}")
+
+    def calculate_qty(self, price, ticker=None):
+        """
+        [주문 수량 계산 & $2,000 Hard Cap 적용 추적]
         현재 가용 자금과 목표 투자 비중을 고려하여 주문할 수량을 계산합니다.
+        캡 발동으로 수량이 축소된 경우 sizing_cap_log.csv에 별도 기록.
         """
         if price <= 0:
             return 0
             
-        # 1. 1회 주문 최대 금액 계산
-        max_order_amt = self.get_max_order_amount()
-        
-        # 2. 수량 계산 (소수점 버림)
-        qty = int(max_order_amt / price)
-        
-        # 3. 최소 주문 수량 체크 (1주 미만 불가)
+        # 1. 캡 미적용 시 원본 목표 금액 및 수량
+        uncapped_target = self.total_equity / max(1, self.MAX_SLOTS)
+        safe_cash = self.balance * 0.90
+        uncapped_order_amt = min(uncapped_target, safe_cash)
+        uncapped_qty = int(uncapped_order_amt / price) if uncapped_order_amt >= 20 else 0
+
+        # 2. 캡 적용 금액 및 최종 수량
+        final_amount = self.get_max_order_amount()
+        if final_amount < 20:
+            return 0
+
+        qty = int(final_amount / price)
         if qty < 1:
             return 0
-            
+
+        # 3. 캡 발동 여부 감지 및 로깅 (실제 수량 축소 발생 시)
+        cap = getattr(Config, 'MAX_SINGLE_ORDER_AMOUNT', 2000.0)
+        is_capped = (uncapped_qty > qty) or (uncapped_target > cap and (cap is not None and cap > 0))
+        if is_capped and uncapped_qty > qty:
+            reduced_qty = uncapped_qty - qty
+            self.logger.warning(
+                f"🛡️ [Sizing Cap Applied] {ticker or 'ORDER'}: "
+                f"총자산 ${self.total_equity:,.0f} -> 원본 ${uncapped_target:,.2f}({uncapped_qty}주) "
+                f"-> $2,000 캡 적용 ${final_amount:,.2f}({qty}주, -{reduced_qty}주 축소)"
+            )
+            self._log_sizing_cap({
+                'timestamp_et': datetime.datetime.now(pytz.timezone('America/New_York')).strftime("%Y-%m-%d %H:%M:%S"),
+                'ticker': ticker or 'UNKNOWN',
+                'price': price,
+                'total_equity': round(self.total_equity, 2),
+                'uncapped_target': round(uncapped_target, 2),
+                'capped_target': round(final_amount, 2),
+                'uncapped_qty': uncapped_qty,
+                'capped_qty': qty,
+                'reduced_qty': reduced_qty,
+                'is_capped': True
+            })
+
         return qty
     def update_position(self, fill):
         """

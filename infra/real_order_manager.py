@@ -1,8 +1,9 @@
 # infra/real_order_manager.py
 import time
 import datetime
+import requests
 from config import Config
-from infra.utils import get_logger
+from infra.utils import get_logger, round_price
 from infra.paper_execution_engine import VirtualExecutionEngine
 
 class RealOrderManager:
@@ -33,10 +34,10 @@ class RealOrderManager:
         import pytz
         from pathlib import Path
         import datetime
-        
         try:
             # 로그 저장 폴더 생성 (logs/spread_analysis)
-            log_dir = Path("logs/spread_analysis")
+            base_dir = Path(__file__).resolve().parent.parent
+            log_dir = base_dir / "logs" / "spread_analysis"
             log_dir.mkdir(parents=True, exist_ok=True)
             
             # 날짜별로 파일 분리 (미국 시간 기준)
@@ -142,7 +143,7 @@ class RealOrderManager:
         # ============================================================
         # 3. 수량 계산
         # ============================================================
-        qty = portfolio.calculate_qty(price)
+        qty = portfolio.calculate_qty(price, ticker=ticker)
         if qty <= 0:
             return {'status': 'failed', 'msg': f"❌ 잔고 부족 또는 수량 계산 실패 ({ticker})"}
 
@@ -199,9 +200,80 @@ class RealOrderManager:
             fail_msg = resp.get('msg1', '알 수 없는 오류') if resp else '응답 없음'
             return {'status': 'failed', 'msg': f"❌ 매수 실패 ({ticker}): {fail_msg}"}
 
+    def _calculate_dynamic_stop_buffer(self, ticker, price, exchange="NAS"):
+        """
+        [수정안 2] 최근 1분봉 레인지(ATR) 및 호가 스프레드 기반 동적 손절 지정가 버퍼 계산
+        - 목표: 저유동성 종목의 불필요한 -5% 시장가 슬리피지 방지
+        - 최근 1분봉 레인지 비율 ((High - Low) / Open)의 50%를 1단계 지정가 버퍼로 적용
+        - 클램프 범위: 최소 0.5% ~ 최대 2.0%
+        """
+        dynamic_buffer = 0.010  # 기본값 1.0%
+        try:
+            df = self.kis.get_minute_candles(exchange, ticker, limit=5)
+            if df is not None and not df.empty and len(df) >= 2:
+                recent_candle = df.iloc[-1]
+                high = float(recent_candle.get('high', 0))
+                low = float(recent_candle.get('low', 0))
+                open_p = float(recent_candle.get('open', 0))
+                if open_p > 0 and high >= low:
+                    candle_range_ratio = (high - low) / open_p
+                    dynamic_buffer = max(0.005, min(0.020, candle_range_ratio * 0.5))
+                    return dynamic_buffer
+        except Exception as e:
+            self.logger.debug(f"⚠️ [{ticker}] 캔들 기반 동적 버퍼 계산 실패, 호가 스프레드로 폴백: {e}")
+
+        try:
+            ask, bid, _, _ = self.kis.get_market_spread(ticker, exchange=exchange)
+            if ask > 0 and bid > 0:
+                spread = (ask - bid) / bid
+                dynamic_buffer = max(0.005, min(0.020, spread * 1.5))
+        except Exception:
+            pass
+
+        return dynamic_buffer
+
+    def _send_telegram_alert(self, text: str):
+        """
+        [긴급 경보] 손절 3단계 실패 등 치명적 이벤트 발생 시 텔레그램 발송
+        """
+        token = getattr(Config, 'TELEGRAM_BOT_TOKEN', None)
+        chat_id = getattr(Config, 'TELEGRAM_CHAT_ID', None)
+        if not token or not chat_id:
+            self.logger.warning("Telegram alert skipped: missing bot token/chat_id")
+            return
+        try:
+            url = f"https://api.telegram.org/bot{token}/sendMessage"
+            params = {"chat_id": chat_id, "text": text, "parse_mode": "HTML"}
+            requests.get(url, params=params, timeout=10)
+        except Exception as e:
+            self.logger.error(f"Telegram emergency alert failed: {e}")
+
+    def _log_stop_loss_execution(self, record: dict):
+        """
+        [Data Enhancement] 3단계 동적 지정가 & 최후 탈출 손절 체결 추적 로깅 (CSV 저장)
+        - 1단계 지정가 체결 소요시간, 체결 실패율, 2단계 전환, 3단계 진입/최종 체결 여부 추적
+        """
+        import csv
+        from pathlib import Path
+        try:
+            base_dir = Path(__file__).resolve().parent.parent
+            log_dir = base_dir / "logs" / "live"
+            log_dir.mkdir(parents=True, exist_ok=True)
+            
+            file_path = log_dir / "stop_loss_execution_tracker.csv"
+            file_exists = file_path.exists()
+            
+            with open(file_path, 'a', newline='', encoding='utf-8') as f:
+                writer = csv.DictWriter(f, fieldnames=record.keys(), extrasaction='ignore')
+                if not file_exists or file_path.stat().st_size == 0:
+                    writer.writeheader()
+                writer.writerow(record)
+        except Exception as e:
+            self.logger.error(f"⚠️ 손절 체결 추적 로그 기록 실패: {e}")
+
     def execute_sell(self, portfolio, ticker, reason, price=0):
         """
-        [핵심 수정] 스마트 매도 집행 (Cancel-Then-Sell)
+        [핵심 수정] 스마트 매도 집행 (Cancel-Then-Sell + 2단계 동적 지정가 손절)
         
         우리의 3가지 문제(손절, 타임컷, 장마감)를 해결하는 곳입니다.
         매도 주문을 내기 전에 '미체결 주문'이 있는지 확인하고, 있다면 취소합니다.
@@ -239,27 +311,213 @@ class RealOrderManager:
 
             # [조건별 주문 유형 설정]
             if reason == "TAKE_PROFIT":
-                order_type = "00" 
+                order_type = "00"
+                self.logger.info(f"💰 [{reason}] 매도 시도: {ticker} (가격: {order_price}, 수량: {qty})")
+                resp = self.kis.send_order(
+                    ticker=ticker,
+                    side="SELL",
+                    qty=qty,
+                    price=order_price,
+                    order_type=order_type 
+                )
             elif reason == "TRAILING_STOP":
                 order_type = "00"
                 if price > 0:
-                    order_price = price * 0.99
+                    order_price = round_price(price * 0.99)
+                self.logger.info(f"📉 [{reason}] 매도 시도: {ticker} (가격: {order_price}, 수량: {qty})")
+                resp = self.kis.send_order(
+                    ticker=ticker,
+                    side="SELL",
+                    qty=qty,
+                    price=order_price,
+                    order_type=order_type 
+                )
+            elif reason == "FORCE_EOD_EXIT":
+                order_price = round_price(price * 0.95) if price > 0 else 0
+                self.logger.info(f"⏰ [{reason}] 장마감 긴급 매도: {ticker} (가격: {order_price}, 수량: {qty})")
+                resp = self.kis.send_order(
+                    ticker=ticker,
+                    side="SELL",
+                    qty=qty,
+                    price=order_price,
+                    order_type="00" 
+                )
             else:
-                order_price = 0 
-                order_type = "00" 
-                if price > 0:
-                    order_price = price * 0.95
+                # --------------------------------------------------------
+                # 🛡️ [3단계 동적 지정가 & 최후 탈출 손절 체계 (3-Step Guaranteed Exit)]
+                # 1단계: 종목 최근 변동성(ATR/레인지) 기반 동적 지정가 우선 발주
+                # 2단계: 1.5초 내 미체결 시 취소 후 긴급 탈출가(-5%)로 전환
+                # 3단계: 2단계 미체결 시 실시간 Bid-3% 관통 재시도(최대 3회),
+                #       3회 모두 실패 시 텔레그램 긴급 경보 발송 및 HTS 수동 청산 유도
+                # --------------------------------------------------------
+                exchange = position.get('exchange', 'NASD')
+                dyn_buffer = self._calculate_dynamic_stop_buffer(ticker, price)
+                first_limit_price = round_price(price * (1.0 - dyn_buffer)) if price > 0 else 0
+                order_price = first_limit_price
+                step1_sent_time = time.time()
 
-            # 주문 전송
-            self.logger.info(f"📉 [{reason}] 매도 시도: {ticker} (가격: {order_price}, 수량: {qty})")
-            
-            resp = self.kis.send_order(
-                ticker=ticker,
-                side="SELL",
-                qty=qty,
-                price=order_price,
-                order_type=order_type 
-            )
+                self.logger.info(
+                    f"📉 [{reason}] [1단계 동적 지정가] 매도 시도: {ticker} "
+                    f"(가격: ${first_limit_price:.4f}, 동적버퍼: -{dyn_buffer*100:.2f}%, 수량: {qty})"
+                )
+
+                resp = self.kis.send_order(
+                    ticker=ticker,
+                    side="SELL",
+                    qty=qty,
+                    price=first_limit_price,
+                    order_type="00",
+                    exchange=exchange
+                )
+
+                step1_status = "UNKNOWN"
+                step2_triggered = False
+                step1_elapsed = 0.0
+                step3_entered = False
+                step3_retries = 0
+                step3_success = False
+                final_status = "UNKNOWN"
+
+                # 2단계: 1단계 주문 접수 성공 시 미체결 체크 후 전환
+                if resp and resp.get('rt_cd') == '0':
+                    time.sleep(1.5)
+                    step1_elapsed = round(time.time() - step1_sent_time, 2)
+                    try:
+                        pending_list = self.kis.get_pending_orders(ticker)
+                        if pending_list and len(pending_list) > 0:
+                            step1_status = "FAILED_PENDING"
+                            step2_triggered = True
+                            self.logger.warning(
+                                f"⚠️ [{ticker}] 1단계 지정가(${first_limit_price:.4f}) {step1_elapsed}초 내 미체결 잔량 감지 "
+                                f"-> 2단계 긴급 탈출가(-5%)로 전환"
+                            )
+                            # 1단계 미체결 주문 취소
+                            for p_order in pending_list:
+                                oid = p_order.get('odno')
+                                excd = p_order.get('ovrs_excg_cd', exchange)
+                                self.kis.cancel_order(ticker, oid, qty=0, exchange=excd)
+
+                            time.sleep(0.5)
+
+                            # 2단계 긴급 탈출가 재발주
+                            emergency_price = round_price(price * 0.95) if price > 0 else 0
+                            resp_step2 = self.kis.send_order(
+                                ticker=ticker,
+                                side="SELL",
+                                qty=qty,
+                                price=emergency_price,
+                                order_type="00",
+                                exchange=exchange
+                            )
+                            if resp_step2 and resp_step2.get('rt_cd') == '0':
+                                resp = resp_step2
+                                order_price = emergency_price
+                                self.logger.info(f"✅ [{ticker}] 2단계 긴급 매도 주문 전송 완료 (${emergency_price:.4f})")
+
+                                # 3단계: 2단계 체결 여부 확인 (1.5초 대기)
+                                time.sleep(1.5)
+                                pending_step2 = self.kis.get_pending_orders(ticker)
+                                if pending_step2 and len(pending_step2) > 0:
+                                    step3_entered = True
+                                    self.logger.error(
+                                        f"🚨 [{ticker}] 2단계 긴급 탈출가(${emergency_price:.4f})도 1.5초 내 미체결! "
+                                        f"-> 3단계 최후 탈출 루프(Bid-3% 관통 재시도 최대 3회) 가동"
+                                    )
+                                    # 2단계 미체결 취소
+                                    for p_order in pending_step2:
+                                        oid = p_order.get('odno')
+                                        excd = p_order.get('ovrs_excg_cd', exchange)
+                                        self.kis.cancel_order(ticker, oid, qty=0, exchange=excd)
+                                    time.sleep(0.5)
+
+                                    # 최대 3회 재시도 루프
+                                    for retry in range(1, 4):
+                                        step3_retries = retry
+                                        try:
+                                            ask_p, bid_p, _, _ = self.kis.get_market_spread(ticker, exchange=exchange)
+                                        except Exception:
+                                            bid_p = 0.0
+
+                                        if bid_p and bid_p > 0:
+                                            deep_price = round_price(bid_p * 0.97)
+                                        else:
+                                            deep_price = round_price(price * 0.90) if price > 0 else 0
+
+                                        self.logger.warning(
+                                            f"🔥 [{ticker}] 3단계 최후 탈출 시도 #{retry}/3: 매도가 ${deep_price:.4f} (현재 Bid: ${bid_p:.4f})"
+                                        )
+
+                                        resp_step3 = self.kis.send_order(
+                                            ticker=ticker,
+                                            side="SELL",
+                                            qty=qty,
+                                            price=deep_price,
+                                            order_type="00",
+                                            exchange=exchange
+                                        )
+                                        if resp_step3 and resp_step3.get('rt_cd') == '0':
+                                            resp = resp_step3
+                                            order_price = deep_price
+                                            time.sleep(1.5)
+                                            pending_step3 = self.kis.get_pending_orders(ticker)
+                                            if not pending_step3 or len(pending_step3) == 0:
+                                                step3_success = True
+                                                final_status = f"STEP3_FILLED_RETRY_{retry}"
+                                                self.logger.info(f"🎯 [{ticker}] 3단계 최후 탈출 체결 성공! (시도 #{retry}, 체결가: ${deep_price:.4f})")
+                                                break
+                                            else:
+                                                self.logger.warning(f"⚠️ [{ticker}] 3단계 시도 #{retry} 여전히 미체결 -> 취소 후 재시도")
+                                                for p_order in pending_step3:
+                                                    oid = p_order.get('odno')
+                                                    excd = p_order.get('ovrs_excg_cd', exchange)
+                                                    self.kis.cancel_order(ticker, oid, qty=0, exchange=excd)
+                                                time.sleep(0.5)
+                                        else:
+                                            self.logger.error(f"❌ [{ticker}] 3단계 시도 #{retry} 주문 전송 실패: {resp_step3}")
+                                            time.sleep(0.5)
+
+                                    if not step3_success:
+                                        final_status = "STEP3_ALL_FAILED"
+                                        alert_msg = (
+                                            f"🚨🚨 <b>[긴급 경보] 손절 3단계 최후 탈출 3회 연속 실패!</b>\n"
+                                            f"• 종목: <b>{ticker}</b>\n"
+                                            f"• 잔여 수량: <b>{qty}주</b>\n"
+                                            f"• 최종 시도가: <b>${order_price:.4f}</b>\n"
+                                            f"• 상태: <b>미체결 호가 붕괴/호가 공백 의심 - 즉시 HTS 수동 청산 필요!</b>"
+                                        )
+                                        self._send_telegram_alert(alert_msg)
+                                        self.logger.critical(alert_msg)
+                                else:
+                                    step3_entered = False
+                                    final_status = "STEP2_FILLED"
+                                    self.logger.info(f"🎯 [{ticker}] 2단계 긴급 탈출가(${emergency_price:.4f}) 정상 체결 확인!")
+                        else:
+                            step1_status = "FILLED"
+                            final_status = "STEP1_FILLED"
+                            self.logger.info(f"🎯 [{ticker}] 1단계 동적 지정가(${first_limit_price:.4f}) {step1_elapsed}초 내 정상 체결 확인!")
+                    except Exception as err:
+                        self.logger.error(f"⚠️ [{ticker}] 2/3단계 손절 전환 처리 중 오류: {err}")
+
+                # 📊 [Stop Loss Execution Logging]
+                import pytz
+                now_et_str = datetime.datetime.now(pytz.timezone('America/New_York')).strftime("%Y-%m-%d %H:%M:%S")
+                self._log_stop_loss_execution({
+                    "timestamp_et": now_et_str,
+                    "ticker": ticker,
+                    "trigger_price": price,
+                    "step1_price": first_limit_price,
+                    "step1_buffer_pct": round(dyn_buffer * 100.0, 3),
+                    "step1_elapsed_sec": step1_elapsed,
+                    "step1_status": step1_status,
+                    "step2_triggered": step2_triggered,
+                    "step3_entered": step3_entered,
+                    "step3_retries": step3_retries,
+                    "step3_success": step3_success,
+                    "final_status": final_status,
+                    "final_order_price": order_price,
+                    "qty": qty,
+                    "reason": reason
+                })
 
         if resp and resp.get('rt_cd') == '0':
             output_dict = resp.get('output', {}) if isinstance(resp.get('output'), dict) else {}
@@ -276,17 +534,27 @@ class RealOrderManager:
                     'time': datetime.datetime.now()
                 })
             else:
+                # [체결기준 손익 즉시 반영] 실현손익 및 D+2 미결제 매도대금 등록
+                portfolio.register_realized_sale(
+                    ticker=ticker,
+                    qty=qty,
+                    sell_price=order_price,
+                    entry_price=entry_price,
+                    reason=reason
+                )
                 # 포트폴리오에서 즉시 제거 (재진입 방지 쿨다운은 main.py에서 처리)
                 portfolio.close_position(ticker)
             
             mode_title = "가상 매도 체결 [PAPER]" if self.is_paper else "실전 매도 체결 [REAL]"
+            daily_pnl = getattr(portfolio, 'daily_realized_pnl', 0.0)
             return {
                 'status': 'success',
                 'msg': (
                     f"🔴 <b>[{mode_title}] {ticker}</b>\n"
                     f"사유: {reason}\n"
                     f"수량: {qty}주 | 체결가: ${order_price:.4f}\n"
-                    f"손익: ${realized_pnl:+.2f} ({return_pct:+.2f}%)"
+                    f"확정 손익: ${realized_pnl:+.2f} ({return_pct:+.2f}%)\n"
+                    f"💰 금일 누적 실현손익: ${daily_pnl:+,.2f}"
                 )
             }
         else:
