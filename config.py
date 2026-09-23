@@ -23,9 +23,12 @@ class Config(metaclass=ConfigMeta):
     def EXECUTION_MODE(self):
         return "PAPER" if getattr(self, 'IS_PAPER_TRADING', False) else "REAL"
 
-    VIRTUAL_INITIAL_BALANCE = 10000.0      # 가상 시작 예수금 ($10,000)
+    # 🧪 가상 결합 페이퍼 트랙 설정 (백테스트 골든 벤치마크 기준: $2,000.0)
+    # 평소에는 아래 줄의 숫자($2000.0)만 직접 수정하거나, 환경변수 VIRTUAL_INITIAL_BALANCE로 지정 가능
+    VIRTUAL_INITIAL_BALANCE = float(os.getenv("VIRTUAL_INITIAL_BALANCE", 2000.0))
     VIRTUAL_LATENCY_MS = 100               # 네트워크 지연 모사 (100ms)
     VIRTUAL_SLIPPAGE_PCT = 0.0003          # 시장가 슬리피지 페널티 (0.03%)
+    ENABLE_COMBINED_PAPER_TRACK = True     # 🧪 실전봇 내부 결합 페이퍼 매매 트랙 동시 구동 (EMA+Alpha)
 
     # ==========================================
     # 🕒 [시간 설정] (중요!)
@@ -67,7 +70,7 @@ class Config(metaclass=ConfigMeta):
     PAUSE_END_HOUR = 9          # 일시정지 종료 시간 (ET 09:00 = KST 22:00 이전까지 차단 -> 09시부터 진입 재개)
 
     UPPER_BUFFER = 0.015       # 🛡️ [Anti-FOMO] 매수 상한 버퍼 1.5% (백테스트 1 + 0.015 동기화)
-    BUY_SLIPPAGE_BUFFER = 0.01 # 매수 슬리피지 버퍼 0.5%
+    BUY_SLIPPAGE_BUFFER = 0.005 # 매수 슬리피지 버퍼 0.5%
     ACTIVATION_THRESHOLD = 0.40 
     MAX_DAILY_CHANGE = 5.0     
     
@@ -80,6 +83,10 @@ class Config(metaclass=ConfigMeta):
     LATE_HOUR_START = 9        
    
     MAX_HOLDING_MINUTES = 0
+
+    # 💰 [포지션 사이징 & $2,000 Hard Cap (옵션 A)]
+    MAX_SLOTS = 2
+    MAX_SINGLE_ORDER_AMOUNT = 2000.0  # 1회 주문 최대 한도 Hard Cap ($2,000)
 
     # ==========================================
     # 🏦 [계좌 및 인증]

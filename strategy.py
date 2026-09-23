@@ -27,10 +27,11 @@ class EmaStrategy:
         self.debug_logger = logging.getLogger("StrategyDebug")
         self.debug_logger.setLevel(logging.DEBUG)
         if not self.debug_logger.hasHandlers():
-            log_dir = os.path.join(os.getcwd(), "logs")
-            if not os.path.exists(log_dir): os.makedirs(log_dir)
-            fh = logging.FileHandler(os.path.join(log_dir, "strategy_debug.log"), encoding='utf-8')
-            fh.setFormatter(logging.Formatter('%(asctime)s [%(levelname)s] %(message)s'))
+            base_dir = Path(__file__).resolve().parent
+            log_dir = base_dir / "logs"
+            log_dir.mkdir(parents=True, exist_ok=True)
+            fh = logging.FileHandler(str(log_dir / "strategy_debug.log"), encoding='utf-8')
+            fh.setFormatter(logging.Formatter('[LIVE] %(asctime)s [%(levelname)s] %(message)s'))
             self.debug_logger.addHandler(fh)
         
         # ------------------------------------------------------------------
@@ -77,7 +78,8 @@ class EmaStrategy:
         self.banned_tickers = set()
 
         # 윗꼬리 필터 전용 로그 폴더 생성
-        self.upper_wick_skip_log_dir = Path(os.getcwd()) / "logs" / "live"
+        base_dir = Path(__file__).resolve().parent
+        self.upper_wick_skip_log_dir = base_dir / "logs" / "live"
         self.upper_wick_skip_log_dir.mkdir(parents=True, exist_ok=True)
 
         # 상태 관리
@@ -306,24 +308,15 @@ class EmaStrategy:
                 return None
         
         # =========================================================
-        # 🛑 [Step 4.5] 추격 매수 방지 (Anti-Chasing Logic: Open > EMA + 1.5% / +3%)
+        # 🛑 [Step 4.5] 추격 매수 방지 (Anti-Chasing Logic: Open > EMA + 3.0% - 백테스트 100% 동기화)
         # =========================================================
         current_open = df['open'].iloc[-1]
-        open_upper_threshold = prev_ema * (1.0 + self.upper_buffer)  # +1.5% 상한선
-        chasing_threshold = prev_ema * 1.03  # +3.0% 상한선
+        open_upper_threshold = prev_ema * 1.03  # +3.0% 상한선 (백테스트 check_deterministic_entry Step 4 동기화)
 
         if current_open > open_upper_threshold:
             self._log_rejection(
                 ticker, 
-                f"🚀 [Anti-Chasing] 시가 눌림목 상한 초과 (Open ${current_open:.4f} > EMA+1.5% ${open_upper_threshold:.4f})", 
-                current_price
-            )
-            return None
-
-        if current_open > chasing_threshold:
-            self._log_rejection(
-                ticker, 
-                f"🚀 [Anti-Chasing] 이평선 괴리 과다 (Open ${current_open:.4f} > EMA ${prev_ema:.4f} + 3%)", 
+                f"🚀 [Anti-Chasing] 이평선 괴리 과다 (Open ${current_open:.4f} > EMA+3.0% ${open_upper_threshold:.4f})", 
                 current_price
             )
             return None
