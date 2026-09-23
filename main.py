@@ -240,17 +240,6 @@ def main():
         order_manager = RealOrderManager(kis)
         strategy = get_strategy() 
 
-        # 🧪 [VIRTUAL PAPER TRACK] 결합 전략 가상 페이퍼 엔진 인스턴스화
-        virtual_combined_engine = None
-        if getattr(Config, 'ENABLE_COMBINED_PAPER_TRACK', True):
-            try:
-                from infra.virtual_combined_engine import VirtualCombinedEngine
-                v_seed = getattr(Config, 'VIRTUAL_INITIAL_BALANCE', 2000.0)
-                virtual_combined_engine = VirtualCombinedEngine(kis_api=kis, initial_capital=v_seed)
-                logger.info(f"🧪 [VirtualTrack] 결합 전략 가상 페이퍼 엔진 탑재 완료 (EMA + Alpha + CapitalManager, Seed: ${v_seed:,.0f})")
-            except Exception as e:
-                logger.error(f"⚠️ [VirtualTrack Init Error] 가상 엔진 초기화 실패: {e}") 
-
         # 3. 서버 동기화 및 상태 복구
         logger.info("📡 증권사 서버와 동기화 중...")
         portfolio.sync_with_kis()
@@ -468,9 +457,6 @@ def main():
                     for ticker in list(portfolio.positions.keys()):
                         order_manager.execute_sell(portfolio, ticker, "FORCE_EOD_EXIT", price=0)
                         time.sleep(0.2)
-
-                if virtual_combined_engine:
-                    virtual_combined_engine.force_eod_exit(now)
                 
                 save_state(portfolio.ban_list, active_candidates, risk_filter.loss_blacklist, portfolio=portfolio)
                 run_live_candle_export(current_date_str, reason="eod")
@@ -521,8 +507,6 @@ def main():
                 portfolio.daily_reset()    # 👈 [추가] 일일 실현손익 및 미결제대금 리셋
                 strategy.daily_reset()     # 👈 [추가] 일별 세션 상태(banned_tickers 등) 초기화
                 risk_filter.reset_daily()  # 👈 [추가] 일일 리스크 필터 리셋
-                if virtual_combined_engine:
-                    virtual_combined_engine.daily_reset()
                 active_candidates.clear()
                 candle_cache.clear()
                 candle_exporter.reset_session()
@@ -810,16 +794,6 @@ def main():
                             candle_cache.pop(sym, None)
                             save_state(portfolio.ban_list, active_candidates, risk_filter.loss_blacklist, portfolio=portfolio)
 
-                    # -----------------------------------------------------
-                    # 🧪 [VIRTUAL PAPER TRACK] 결합 전략 가상 페이퍼 엔진 훅
-                    # 실전 주문 로직이 완전히 끝난 직후 호출 (실전 체결 지연 0ms 보장)
-                    # -----------------------------------------------------
-                    if virtual_combined_engine:
-                        try:
-                            virtual_combined_engine.on_candle(sym, df, now_time=now)
-                        except Exception as ve_err:
-                            logger.error(f"⚠️ [VirtualEngine Error] {sym}: {ve_err}")
-
                     time.sleep(0.55)
 
                 except Exception as e:
@@ -827,19 +801,6 @@ def main():
                     bot.send_message(f"⚠️ [System Error] 매수 로직 중 오류 발생\n종목: {sym}\n내용: {str(e)}")
                     continue
 
-            # ---------------------------------------------------------
-            # 🧪 [VirtualTrack] 감시 외 보유 가상 포지션 청산 조건 추적
-            # ---------------------------------------------------------
-            if virtual_combined_engine and virtual_combined_engine.positions:
-                for v_sym in list(virtual_combined_engine.positions.keys()):
-                    if v_sym not in targets_to_check and v_sym in candle_cache:
-                        v_df = candle_cache[v_sym].get('df')
-                        if v_df is not None and not v_df.empty:
-                            try:
-                                virtual_combined_engine.on_candle(v_sym, v_df, now_time=now)
-                            except Exception as ve_err:
-                                logger.error(f"⚠️ [VirtualEngine Exit Error] {v_sym}: {ve_err}")
-            
             if not portfolio.positions and portfolio.balance < 10:
                 logger.info("🔄 [Sync] 매도 후 잔고 재동기화 수행...")
                 portfolio.sync_balance() 

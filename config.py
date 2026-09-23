@@ -23,12 +23,10 @@ class Config(metaclass=ConfigMeta):
     def EXECUTION_MODE(self):
         return "PAPER" if getattr(self, 'IS_PAPER_TRADING', False) else "REAL"
 
-    # 🧪 가상 결합 페이퍼 트랙 설정 (백테스트 골든 벤치마크 기준: $2,000.0)
-    # 평소에는 아래 줄의 숫자($2000.0)만 직접 수정하거나, 환경변수 VIRTUAL_INITIAL_BALANCE로 지정 가능
-    VIRTUAL_INITIAL_BALANCE = float(os.getenv("VIRTUAL_INITIAL_BALANCE", 2000.0))
-    VIRTUAL_LATENCY_MS = 100               # 네트워크 지연 모사 (100ms)
-    VIRTUAL_SLIPPAGE_PCT = 0.0003          # 시장가 슬리피지 페널티 (0.03%)
-    ENABLE_COMBINED_PAPER_TRACK = True     # 🧪 실전봇 내부 결합 페이퍼 매매 트랙 동시 구동 (EMA+Alpha)
+    # 페이퍼 매매 모드 가상 환경 설정 (IS_PAPER_TRADING = True 일 때 사용)
+    VIRTUAL_INITIAL_BALANCE = float(os.getenv("VIRTUAL_INITIAL_BALANCE", 10000.0))
+    VIRTUAL_LATENCY_MS = 100               # 가상 네트워크 지연 모사 (100ms)
+    VIRTUAL_SLIPPAGE_PCT = 0.0003          # 가상 시장가 슬리피지 페널티 (0.03%)
 
     # ==========================================
     # 🕒 [시간 설정] (중요!)
