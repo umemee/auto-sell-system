@@ -394,7 +394,25 @@ class EmaStrategy:
                 return None
             
         # =========================================================
-        # 🛡️ [Step 4.8] F1 Crash Filter (5분 급락 방어: -4.0% 이하 차단)
+        # 5. 지지선 및 눌림목 조건 검사 (백테스트 ema_strategy.py 100% Parity)
+        # =========================================================
+        lower_bound = prev_ema * (1.0 - self.dip_tolerance)
+        upper_bound = prev_ema * (1.0 + self.upper_buffer)
+        drop_cutoff = lower_bound * (1.0 - self.drop_slack)
+
+        # 🛑 [Step 5.1] 지지선 하방 이탈 및 추세 붕괴(DROP) 확정 시 영구 밴 등록
+        # 대전제 준수: 모멘텀(Step 4.7 recent_peak >= EMA * 1.03)을 이미 통과한 상태에서만 
+        # 지지선(DropCutoff) 이탈 시 DROP 영구 밴 등록이 성립함 (백테스트 check_deterministic_entry Step 2 동기화)
+        # F1 Crash(-4%) 등 일시 스킵 필터보다 앞서 판정하여 붕괴 종목의 DROP 밴 누락을 원천 차단
+        if prev_low < drop_cutoff or prev_close < drop_cutoff:
+            self.banned_tickers.add(ticker)
+            self._log_rejection(ticker, f"지지선 이탈 (Low {prev_low:.4f} < Bound {lower_bound:.4f})", current_price)
+            self.debug_logger.debug(f"🗑️ [DROP] {ticker} 추세 붕괴 (모멘텀 발생 후 지지선 이탈) -> 당일 영구 밴 등록")
+            self.logger.warning(f"🚫 [DROP-PERMANENT] {ticker} 지지선 붕괴(Low {prev_low:.4f} < Cutoff {drop_cutoff:.4f})로 당일 진입 영구 차단")
+            return {'type': 'DROP', 'reason': 'Trend Broken'}
+
+        # =========================================================
+        # 🛡️ [Step 5.2] F1 Crash Filter (5분 급락 방어: -4.0% 이하 차단)
         # =========================================================
         if self.chg_5m_crash_filter_enabled:
             if len(df) >= 6:
@@ -409,29 +427,12 @@ class EmaStrategy:
                         )
                         return None
 
-        # =========================================================
-        # 5. 지지선 및 눌림목 조건 검사 (백테스트 ema_strategy.py 100% Parity)
-        # =========================================================
-        lower_bound = prev_ema * (1.0 - self.dip_tolerance)
-        upper_bound = prev_ema * (1.0 + self.upper_buffer)
-        drop_cutoff = lower_bound * (1.0 - self.drop_slack)
-
-        # 🛑 [Step 5.1] 지지선 하방 이탈 및 추세 붕괴(DROP) 확정 시 영구 밴 등록
-        # 대전제 준수: 모멘텀(Step 4.7 recent_peak >= EMA * 1.03)을 이미 통과한 상태에서만 
-        # 지지선(DropCutoff) 이탈 시 DROP 영구 밴 등록이 성립함 (모멘텀 없는 종목은 대기 상태 유지)
-        if prev_low < drop_cutoff or prev_close < drop_cutoff:
-            self.banned_tickers.add(ticker)
-            self._log_rejection(ticker, f"지지선 이탈 (Low {prev_low:.4f} < Bound {lower_bound:.4f})", current_price)
-            self.debug_logger.debug(f"🗑️ [DROP] {ticker} 추세 붕괴 (모멘텀 발생 후 지지선 이탈) -> 당일 영구 밴 등록")
-            self.logger.warning(f"🚫 [DROP-PERMANENT] {ticker} 지지선 붕괴(Low {prev_low:.4f} < Cutoff {drop_cutoff:.4f})로 당일 진입 영구 차단")
-            return {'type': 'DROP', 'reason': 'Trend Broken'}
-
-        # 🛑 [Step 5.2] 눌림목 범위 벗어남 (Low > UpperBound)
+        # 🛑 [Step 5.3] 눌림목 범위 벗어남 (Low > UpperBound)
         if not (lower_bound <= prev_low <= upper_bound):
             self._log_rejection(ticker, f"눌림목 범위 벗어남 (Low {prev_low:.4f} > Upper {upper_bound:.4f})", current_price)
             return None
 
-        # 🛑 [Step 5.3] 지지선 위 종가 마감 실패 (Close <= EMA)
+        # 🛑 [Step 5.4] 지지선 위 종가 마감 실패 (Close <= EMA)
         if prev_close <= prev_ema:
             self._log_rejection(ticker, f"지지선 위 종가 마감 실패 (Close {prev_close:.4f} <= EMA {prev_ema:.4f})", current_price)
             return None
