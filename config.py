@@ -13,20 +13,26 @@ class ConfigMeta(type):
 
 class Config(metaclass=ConfigMeta):
     # ==========================================
-    # 🚨 [CRITICAL SAFETY] 실행 모드 단일 토글 설정
+    # 🚨 [CRITICAL SAFETY] 실행 모드 및 환경 분리
     # ==========================================
-    # IS_PAPER_TRADING = True  -> 페이퍼 매매 (실계좌 주문 차단, VirtualExecutionEngine 동작, 가상 예수금 운용)
-    # IS_PAPER_TRADING = False -> 실전 매매 (KIS 실제 주문 전송, 실계좌 잔고 동기화, 사전 익절 주문 전송)
-    IS_PAPER_TRADING = False  # 💡 단일 스위치: True=페이퍼 매매, False=실전 매매
+    # EXECUTION_ENVIRONMENT:
+    #   - "LIVE_TRADING"  : 실전 단일 매매 (실계좌 주문 전송)
+    #   - "PAPER_TRADING" : 완전 격리 가상 매매 (실주문 API 원천 차단, Mock Engine 동작)
+    #   - "DUAL_SHADOW"   : 실전 주문 병행 + 백그라운드 섀도우 가상 매매
+    EXECUTION_ENVIRONMENT = os.getenv("EXECUTION_ENVIRONMENT", "PAPER_TRADING").strip()
+
+    # 하위 호환성 단일 스위치 (LIVE_TRADING일 때만 False, 그 외 모두 True로 실계좌 주문 원천 차단)
+    IS_PAPER_TRADING = (EXECUTION_ENVIRONMENT in ["PAPER_TRADING", "DUAL_SHADOW"])
 
     @property
     def EXECUTION_MODE(self):
         return "PAPER" if getattr(self, 'IS_PAPER_TRADING', False) else "REAL"
 
-    # 페이퍼 매매 모드 가상 환경 설정 (IS_PAPER_TRADING = True 일 때 사용)
-    VIRTUAL_INITIAL_BALANCE = float(os.getenv("VIRTUAL_INITIAL_BALANCE", 10000.0))
-    VIRTUAL_LATENCY_MS = 100               # 가상 네트워크 지연 모사 (100ms)
-    VIRTUAL_SLIPPAGE_PCT = 0.0003          # 가상 시장가 슬리피지 페널티 (0.03%)
+    # 🧪 가상 결합 페이퍼 트랙 설정 (백테스트 골든 벤치마크 기준: $2,000.0)
+    VIRTUAL_INITIAL_BALANCE = float(os.getenv("VIRTUAL_INITIAL_BALANCE", 2000.0))
+    VIRTUAL_LATENCY_MS = 100               # 네트워크 지연 모사 (100ms)
+    VIRTUAL_SLIPPAGE_PCT = 0.0010          # 가상 호가 슬리피지 페널티 (0.10%)
+    ENABLE_COMBINED_PAPER_TRACK = True     # 🧪 결합 페이퍼 매매 트랙 활성화 (EMA + Alpha FIFO Shared)
 
     # ==========================================
     # 🕒 [시간 설정] (중요!)
@@ -81,7 +87,7 @@ class Config(metaclass=ConfigMeta):
     LATE_HOUR_START = 9        
    
     MAX_HOLDING_MINUTES = 0
-
+ 
     # 💰 [포지션 사이징 & $2,000 Hard Cap (옵션 A)]
     MAX_SLOTS = 2
     MAX_SINGLE_ORDER_AMOUNT = 2000.0  # 1회 주문 최대 한도 Hard Cap ($2,000)
