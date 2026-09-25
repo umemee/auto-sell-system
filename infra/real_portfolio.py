@@ -338,8 +338,8 @@ class RealPortfolio:
 
     def get_max_order_amount(self):
         """
-        [Double Engine 자금 관리 - Fixed for Market Order & Hard Cap Option A]
-        목표: 전체 자산의 50% 베팅 (단, 현금 범위 내에서 & 최대 $2,000 Hard Cap)
+        [Double Engine 자금 관리 - Fixed for Market Order]
+        목표: 전체 자산의 50% 베팅 (단, 현금 범위 내에서)
         수정: 시장가 주문(+5% 할증)을 고려하여 현금 버퍼를 2% -> 10%로 확대
         """
         # 1. 현재 슬롯 확인 (이미 꽉 찼으면 0 반환)
