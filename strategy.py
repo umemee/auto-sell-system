@@ -219,6 +219,12 @@ class EmaStrategy:
         if (hour < entry_start_h) or (hour == entry_start_h and minute < entry_start_m):
             return None
 
+        # 🛑 [전략별 진입 시작 시간 분리] EMA 전략은 ET 09:00 (KST 22:00) 이전 진입 원천 차단
+        ema_start_hour = getattr(Config, 'EMA_ENTRY_START_HOUR_ET', 9)
+        if hour < ema_start_hour:
+            self._log_rejection(ticker, f"EMA 전략 진입 대기 ({ema_start_hour}시 이전, 현재 {hour}:{minute:02d})", df.iloc[-1]['close'])
+            return None
+
         # 🛑 [Pause Window] 특정 프리마켓 구간 진입 일시정지 (04:00:00 ~ 08:59:59 차단 - 백테스트 100% 동기화)
         if self.use_pause_window and (self.pause_start_hour <= hour < self.pause_end_hour):
             self._log_rejection(ticker, f"프리마켓 일시정지 대기 ({self.pause_start_hour}시~{self.pause_end_hour}시, 현재 {hour}:{minute:02d})", df.iloc[-1]['close'])
@@ -441,6 +447,7 @@ class EmaStrategy:
         self.logger.info(f"⚡ [BUY SIGNAL] {ticker} 조건 만족! (Data: {data_count} bars, EMA: ${prev_ema:.4f}, Price: ${df.iloc[-1]['open']:.4f})")
         return {
             'type': 'BUY',
+            'strategy_name': 'EMA',
             'ticker': ticker,
             'price': df.iloc[-1]['open'],
             'time': datetime.datetime.now()

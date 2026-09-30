@@ -9,7 +9,28 @@ load_dotenv()
 class ConfigMeta(type):
     @property
     def EXECUTION_MODE(cls):
-        return "PAPER" if getattr(cls, 'IS_PAPER_TRADING', False) else "REAL"
+        if hasattr(cls, 'IS_PAPER_TRADING') and not cls.IS_PAPER_TRADING:
+            return "REAL"
+        return "PAPER" if cls.IS_PURE_PAPER else "REAL"
+
+    @property
+    def IS_REAL_TRADING(cls):
+        if hasattr(cls, 'IS_PAPER_TRADING') and not cls.IS_PAPER_TRADING:
+            return True
+        env = getattr(cls, 'EXECUTION_ENVIRONMENT', 'PAPER_TRADING')
+        return env in ["LIVE_TRADING", "DUAL_SHADOW"]
+
+    @property
+    def IS_PURE_PAPER(cls):
+        if hasattr(cls, 'IS_PAPER_TRADING') and not cls.IS_PAPER_TRADING:
+            return False
+        env = getattr(cls, 'EXECUTION_ENVIRONMENT', 'PAPER_TRADING')
+        return env == "PAPER_TRADING"
+
+    @property
+    def IS_SHADOW_ACTIVE(cls):
+        env = getattr(cls, 'EXECUTION_ENVIRONMENT', 'PAPER_TRADING')
+        return env == "DUAL_SHADOW" or getattr(cls, 'ENABLE_COMBINED_PAPER_TRACK', False)
 
 class Config(metaclass=ConfigMeta):
     # ==========================================
@@ -22,11 +43,29 @@ class Config(metaclass=ConfigMeta):
     EXECUTION_ENVIRONMENT = os.getenv("EXECUTION_ENVIRONMENT", "PAPER_TRADING").strip()
 
     # 하위 호환성 단일 스위치 (LIVE_TRADING일 때만 False, 그 외 모두 True로 실계좌 주문 원천 차단)
-    IS_PAPER_TRADING = (EXECUTION_ENVIRONMENT in ["PAPER_TRADING", "DUAL_SHADOW"])
+    IS_PAPER_TRADING = (EXECUTION_ENVIRONMENT == "PAPER_TRADING")
 
     @property
     def EXECUTION_MODE(self):
-        return "PAPER" if getattr(self, 'IS_PAPER_TRADING', False) else "REAL"
+        if hasattr(self, 'IS_PAPER_TRADING') and not self.IS_PAPER_TRADING:
+            return "REAL"
+        return "PAPER" if self.IS_PURE_PAPER else "REAL"
+
+    @property
+    def IS_REAL_TRADING(self):
+        if hasattr(self, 'IS_PAPER_TRADING') and not self.IS_PAPER_TRADING:
+            return True
+        return self.EXECUTION_ENVIRONMENT in ["LIVE_TRADING", "DUAL_SHADOW"]
+
+    @property
+    def IS_PURE_PAPER(self):
+        if hasattr(self, 'IS_PAPER_TRADING') and not self.IS_PAPER_TRADING:
+            return False
+        return self.EXECUTION_ENVIRONMENT == "PAPER_TRADING"
+
+    @property
+    def IS_SHADOW_ACTIVE(self):
+        return self.EXECUTION_ENVIRONMENT == "DUAL_SHADOW" or getattr(self, 'ENABLE_COMBINED_PAPER_TRACK', False)
 
     # 🧪 가상 결합 페이퍼 트랙 설정 (백테스트 골든 벤치마크 기준: $2,000.0)
     VIRTUAL_INITIAL_BALANCE = float(os.getenv("VIRTUAL_INITIAL_BALANCE", 2000.0))
@@ -35,10 +74,14 @@ class Config(metaclass=ConfigMeta):
     ENABLE_COMBINED_PAPER_TRACK = True     # 🧪 결합 페이퍼 매매 트랙 활성화 (EMA + Alpha FIFO Shared)
 
     # ==========================================
-    # 🕒 [시간 설정] (중요!)
+    # 🕒 [시간 설정] (프리마켓 데이터 수집 및 전략별 진입 시작 시간 - ET 기준)
     # ==========================================
-    ACTIVE_START_HOUR = 4  
-    ACTIVE_END_HOUR = 16   
+    PREMARKET_DATA_START_HOUR_ET = 4   # KST 17:00 (실제 미국 프리마켓 개장 및 캔들 수집 개시)
+    ALPHA_ENTRY_START_HOUR_ET = 8      # KST 21:00 (Alpha 전략 매매 개시 진입 윈도우)
+    EMA_ENTRY_START_HOUR_ET = 9        # KST 22:00 (EMA 전략 매매 개시 진입 윈도우)
+    REGULAR_MARKET_END_HOUR_ET = 16    # KST 05:00 (미국 정규장 마감)
+    ACTIVE_START_HOUR = 4              # 하위 호환
+    ACTIVE_END_HOUR = 16               # 하위 호환
     
     # ==========================================
     # 🛡️ [3중 리스크 차단 필터] (PRD-202608-TRADING-01)
