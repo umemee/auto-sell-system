@@ -77,6 +77,11 @@ class AlphaLiveAdapter:
         t_str = now_et.strftime("%H:%M:%S")
         d_str = now_et.strftime("%Y-%m-%d")
 
+        # 전략별 진입 허용 시작 시간 (ET 기준) 검사 (기본 08시 = KST 21:00)
+        alpha_start_hour = getattr(Config, 'ALPHA_ENTRY_START_HOUR_ET', 8)
+        if now_et.hour < alpha_start_hour:
+            return None
+
         # 거래 윈도우 검사 (08:30:00 ~ 09:20:00)
         if not (self.trading_window_start <= t_str < self.trading_window_end):
             return None
@@ -124,6 +129,7 @@ class AlphaLiveAdapter:
                         return {
                             'type': 'BUY',
                             'strategy': 'ALPHA',
+                            'strategy_name': 'ALPHA',
                             'alpha_id': 'Alpha 02',
                             'ticker': ticker,
                             'price': curr_price,
@@ -180,6 +186,7 @@ class AlphaLiveAdapter:
                     return {
                         'type': 'BUY',
                         'strategy': 'ALPHA',
+                        'strategy_name': 'ALPHA',
                         'alpha_id': 'Alpha 01',
                         'ticker': ticker,
                         'price': curr_price,

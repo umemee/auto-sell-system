@@ -354,7 +354,11 @@ class RealPortfolio:
         capped_target = min(target_amount, cap) if (cap is not None and cap > 0) else target_amount
 
         # 4. [안전 장치] 주문 가능 현금의 90% (수수료 + 시장가 할증 5% 커버)
-        safe_cash = self.balance * 0.90 
+        # 매도 직후 증권사 API 일시 지연 시 D+2 미결제 대금(unsettled_sell_amount)과의 가용성 보호
+        available_cash = self.balance
+        if available_cash < 20 and getattr(self, 'unsettled_sell_amount', 0.0) > 0:
+            available_cash = max(available_cash, self.unsettled_sell_amount * 0.95)
+        safe_cash = available_cash * 0.90 
         
         # 5. 최종 주문 금액 (둘 중 작은 값)
         final_amount = min(capped_target, safe_cash)
@@ -469,6 +473,7 @@ class RealPortfolio:
                 del self.positions[ticker]
 
             # [수정 2] 신규 데이터 생성 (평단가 = 현재 매수가로 고정)
+            strat_name = fill.get('strategy_name', fill.get('strategy', 'EMA'))
             self.positions[ticker] = {
                 'ticker': ticker,
                 'qty': qty,
@@ -477,7 +482,8 @@ class RealPortfolio:
                 'eval_value': cost,
                 'pnl_pct': 0.0,
                 'highest_price': price, 
-                'entry_time': now_et         # 진입 시간 기록
+                'entry_time': now_et,        # 진입 시간 기록
+                'strategy_name': strat_name  # 전략 식별 메타데이터 태깅
             }
             
             self.logger.info(f"✅ [Local Update] BUY {ticker} ({qty}주 @ ${price}) | Balance: ${self.balance:.2f}")
@@ -510,10 +516,12 @@ class RealPortfolio:
                 # self.logger.info(f"📈 [{ticker}] 고가 갱신: ${old_high} -> ${current_price}")
     
     # [신규 추가] 외부(main.py)에서 호출할 잔고 강제 동기화 함수
-    def sync_balance(self):
-        """API를 통해 예수금만 강제 동기화 (매도 직후 사용)"""
+    def sync_balance(self, wait_sec: float = 0.0):
+        """API를 통해 예수금만 강제 동기화 (매도 직후 사용, 증권사 전산 지연 완충 지원)"""
         if self.is_paper:
             return
+        if wait_sec > 0:
+            time.sleep(wait_sec)
         try:
             # get_buyable_cash는 kis_api에 구현되어 있어야 함
             cash = self.kis.get_buyable_cash() 

@@ -19,7 +19,7 @@ class RealOrderManager:
         self.logger = get_logger("OrderManager")
         
         # 🚨 페이퍼 트레이딩 모드 여부 및 가상 체결 엔진 초기화
-        self.is_paper = getattr(Config, 'IS_PAPER_TRADING', False)
+        self.is_paper = getattr(Config, 'IS_PURE_PAPER', getattr(Config, 'IS_PAPER_TRADING', False))
         self.virtual_engine = VirtualExecutionEngine(kis_api)
         
         # 🛡️ [로그 폭탄 방지] 종목별 마지막 로그 시간 기록부
@@ -148,9 +148,10 @@ class RealOrderManager:
             return {'status': 'failed', 'msg': f"❌ 잔고 부족 또는 수량 계산 실패 ({ticker})"}
 
         # ============================================================
-        # 4. 주문 전송 (페이퍼 모드 분기)
+        # 4. 주문 전송 (페이퍼 모드 분기 및 원천 차단 가드)
         # ============================================================
-        if self.is_paper:
+        is_pure_paper = getattr(Config, 'IS_PURE_PAPER', self.is_paper)
+        if is_pure_paper:
             resp = self.virtual_engine.execute_paper_buy(
                 ticker=ticker,
                 qty=qty,
@@ -158,6 +159,7 @@ class RealOrderManager:
                 exchange="NAS"
             )
         else:
+            assert not is_pure_paper, "CRITICAL GUARD: Pure paper mode must NEVER call send_order"
             resp = self.kis.send_order(
                 ticker=ticker,
                 side="BUY",
@@ -175,25 +177,37 @@ class RealOrderManager:
             entry_guess = output_dict.get('fill_price', price)
             odno = output_dict.get('ODNO', 'Unknown')
 
+            strat_name = signal.get('strategy_name', signal.get('strategy', 'EMA'))
+
             try:
                 portfolio.update_position({
                     'ticker': ticker,
                     'qty': qty,
                     'price': entry_guess,
                     'entry_price': entry_guess,
+                    'strategy_name': strat_name,
                     'type': 'BUY',
                     'time': datetime.datetime.now()
                 })
             except Exception as e:
                 self.logger.error(f"❌ 포트폴리오 업데이트 실패: {e}")
             
-            mode_title = "가상 매수 체결 완료 [PAPER]" if self.is_paper else "실전 매수 체결 완료 [REAL]"
+            if self.is_paper:
+                mode_str = "[PAPER]"
+            else:
+                env_mode = getattr(Config, 'EXECUTION_ENVIRONMENT', '')
+                mode_str = "[SHADOW]" if env_mode == 'DUAL_SHADOW' else "[REAL]"
+
+            tp_pct = getattr(Config, 'TARGET_PROFIT_PCT', 0.07)
+            target_price = round_price(entry_guess * (1.0 + tp_pct)) if entry_guess > 0 else 0.0
+
             msg = (
-                f"⚡ <b>{mode_title}</b>\n"
+                f"🔔 [매수 체결 완료]\n"
+                f"🕹️ 모드: {mode_str}\n"
+                f"🎯 전략: {strat_name} 전략\n"
                 f"📦 종목: {ticker}\n"
-                f"🔢 수량: {qty}주\n"
-                f"💵 체결가: ${entry_guess:.4f} (시그널: ${price:.4f})\n"
-                f"📝 주문번호: {odno}"
+                f"🔢 수량: {qty}주 | 체결가: ${entry_guess:.4f}\n"
+                f"🎯 목표 익절가: ${target_price:.4f}"
             )
             return {'status': 'success', 'msg': msg, 'qty': qty, 'avg_price': entry_guess}
         else:
@@ -289,13 +303,14 @@ class RealOrderManager:
         # 🛡️ [Safety Protocol] 기존 주문 취소 (선주문 해결)
         # ============================================================
         # 익절/손절/타임컷 상관없이, 매도를 하려면 기존 주문(익절 대기 등)을 치워야 합니다.
-        if not self.is_paper:
+        is_pure_paper = getattr(Config, 'IS_PURE_PAPER', self.is_paper)
+        if not is_pure_paper:
             self._clear_pending_orders(ticker)
 
         # ============================================================
         # 🔫 [Execution] 매도 주문 실행 (페이퍼 모드 분기)
         # ============================================================
-        if self.is_paper:
+        if is_pure_paper:
             resp = self.virtual_engine.execute_paper_sell(
                 ticker=ticker,
                 qty=qty,
@@ -306,6 +321,7 @@ class RealOrderManager:
             )
             order_price = resp.get('output', {}).get('fill_price', price) if resp else price
         else:
+            assert not is_pure_paper, "CRITICAL GUARD: Pure paper mode must NEVER call send_order"
             order_type = "00" # 지정가 기본
             order_price = price
 
@@ -545,17 +561,26 @@ class RealOrderManager:
                 # 포트폴리오에서 즉시 제거 (재진입 방지 쿨다운은 main.py에서 처리)
                 portfolio.close_position(ticker)
             
-            mode_title = "가상 매도 체결 [PAPER]" if self.is_paper else "실전 매도 체결 [REAL]"
-            daily_pnl = getattr(portfolio, 'daily_realized_pnl', 0.0)
+            if self.is_paper:
+                mode_str = "[PAPER]"
+            else:
+                env_mode = getattr(Config, 'EXECUTION_ENVIRONMENT', '')
+                mode_str = "[SHADOW]" if env_mode == 'DUAL_SHADOW' else "[REAL]"
+            
+            strat_name = position.get('strategy_name', position.get('strategy', 'EMA'))
+            strat_label = f"{strat_name} 전략"
+            
+            msg = (
+                f"🎉 [매도/청산 체결 완료]\n"
+                f"🕹️ 모드: {mode_str}\n"
+                f"🎯 전략: {strat_label}\n"
+                f"📦 종목: {ticker}\n"
+                f"💵 실현손익: ${realized_pnl:+,.2f} ({return_pct:+.2f}%)\n"
+                f"📌 사유: {reason}"
+            )
             return {
                 'status': 'success',
-                'msg': (
-                    f"🔴 <b>[{mode_title}] {ticker}</b>\n"
-                    f"사유: {reason}\n"
-                    f"수량: {qty}주 | 체결가: ${order_price:.4f}\n"
-                    f"확정 손익: ${realized_pnl:+.2f} ({return_pct:+.2f}%)\n"
-                    f"💰 금일 누적 실현손익: ${daily_pnl:+,.2f}"
-                )
+                'msg': msg
             }
         else:
             self.logger.error(f"❌ 매도 실패 ({ticker}): {resp}")
