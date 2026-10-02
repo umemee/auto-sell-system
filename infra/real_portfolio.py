@@ -255,6 +255,28 @@ class RealPortfolio:
         self.ban_list.clear()
         self.logger.info("🔄 [RealPortfolio] 일일 실현손익 및 미결제대금 초기화 완료")
 
+    def validate_and_apply_state(self, saved_date: str, daily_pnl: float, unsettled: float) -> bool:
+        """
+        [지시 7 안전장치] system_state.json 로드 시, 저장된 날짜가 현재 KST 일자와 다르면
+        어제 손익 및 미결제 대금을 복원하지 않고 즉시 daily_reset()을 호출합니다.
+        """
+        import pytz
+        today_kst = datetime.datetime.now(pytz.timezone('Asia/Seoul')).strftime("%Y-%m-%d")
+        if not saved_date or saved_date != today_kst:
+            self.logger.warning(
+                f"📅 [날짜 불일치 감지] 저장일자({saved_date}) != 현재 KST({today_kst}) "
+                f"-> 어제 손익/미결제 복원 차단 및 daily_reset() 자동 집행"
+            )
+            self.daily_reset()
+            return False
+
+        self.daily_realized_pnl = float(daily_pnl)
+        self.unsettled_sell_amount = float(unsettled)
+        self.logger.info(
+            f"🔄 [당일 상태 복원] 일자: {saved_date} | 손익: ${self.daily_realized_pnl:+,.2f} | 미결제: ${self.unsettled_sell_amount:,.2f}"
+        )
+        return True
+
     def recover_from_log(self, log_path=None, today_str=None):
         """
         [장중 재시작 복구력] trade.log를 파싱하여 당일 실현손익과 미결제대금을 복구
@@ -270,7 +292,7 @@ class RealPortfolio:
             return 0
             
         if today_str is None:
-            today_str = datetime.datetime.now(pytz.timezone('US/Eastern')).strftime("%Y-%m-%d")
+            today_str = datetime.datetime.now(pytz.timezone('Asia/Seoul')).strftime("%Y-%m-%d")
 
         recovered_pnl = 0.0
         recovered_unsettled = 0.0
