@@ -27,9 +27,16 @@ class RealPortfolio:
         
         # 💵 [Trade-Date Settlement] 체결기준 정산 및 당일 실현손익 추적
         self.daily_realized_pnl = 0.0          # 당일 누적 실현손익 ($)
+        self.initial_seed_today = 0.0          # [지시 6] 당일 장 시작 기준 예수금 ($)
         self.unsettled_sell_amount = 0.0       # D+2 미결제 매도대금 합계 ($)
         self.closed_trades_today = []          # 당일 청산 거래 목록
         self.last_sync_removed_positions = {}  # 최근 동기화 시 매도 감지된 포지션 백업
+
+        # [A3] 잔고 미반영 의심 감지 플래그 및 매도 추적 변수
+        self.is_balance_unconfirmed = False
+        self._sale_in_progress = False
+        self._balance_before_sale = 0.0
+        self._pending_sale_proceeds = 0.0
         
         # Positions Dictionary
         # { 'TICKER': { 'qty': 10, 'entry_price': 100, 'highest_price': 120, ... } }
@@ -165,8 +172,8 @@ class RealPortfolio:
                     del self.positions[ticker]
                     self.ban_list.add(ticker) # [Cool-down] 금일 재매수 금지 등록
 
-            # 4. 체결기준 총 자산 가치 업데이트 (증권사 D+2 지연 대금 포함)
-            self.total_equity = self.balance + current_stock_value + self.unsettled_sell_amount
+            # 4. 체결기준 총 자산 가치 업데이트 (증권사 D+2 지연 대금 이중합산 제거)
+            self.total_equity = self.balance + current_stock_value
 
             # 로그 출력 (선택 사항)
             # self._log_status()
@@ -188,6 +195,24 @@ class RealPortfolio:
         pnl = net_proceeds - total_cost
         ret_pct = ((sell_price - entry_price) / entry_price * 100.0) if entry_price > 0 else 0.0
 
+        # [C2] 매도 정산 대조용 INFO 로그
+        self.logger.info(
+            f"🧾 [매도 정산 대조] 종목: {ticker} | 순매도대금(봇 계산): ${net_proceeds:,.2f} | 호출 직전 balance: ${self.balance:,.2f}"
+        )
+
+        # [A2] 원응답 로깅 (register_realized_sale 호출 시 [순매도대금, 호출 직전 balance])
+        self.logger.debug(
+            f"🔍 [register_realized_sale DEBUG] 순매도대금: ${net_proceeds:,.2f} | 호출 직전 balance: ${self.balance:,.2f}"
+        )
+
+        # [A3] 매도 후 잔고 미반영 의심 감지용 직전 잔고 및 누적 매도대금 추적
+        if not getattr(self, '_sale_in_progress', False):
+            self._balance_before_sale = self.balance
+            self._pending_sale_proceeds = net_proceeds
+            self._sale_in_progress = True
+        else:
+            self._pending_sale_proceeds += net_proceeds
+
         self.daily_realized_pnl += pnl
         if not self.is_paper:
             self.unsettled_sell_amount += net_proceeds
@@ -204,13 +229,13 @@ class RealPortfolio:
         }
         self.closed_trades_today.append(record)
         
-        # 체결기준 총자산 즉시 재계산 (매도된 종목은 평가액에서 즉시 제외)
+        # 체결기준 총자산 즉시 재계산 (매도된 종목은 평가액에서 즉시 제외, D+2 미결제 대금 이중합산 제거)
         current_val = sum(
             p['qty'] * p.get('current_price', p.get('entry_price', 0.0))
             for t, p in self.positions.items()
             if t != ticker
         )
-        self.total_equity = self.balance + current_val + self.unsettled_sell_amount
+        self.total_equity = self.balance + current_val
 
         self.logger.info(
             f"📈 [Trade Realized] {ticker} | PnL: ${pnl:+,.2f} ({ret_pct:+.2f}%) | "
@@ -221,7 +246,11 @@ class RealPortfolio:
     def daily_reset(self):
         """[Daily Reset] 자정/세션 시작 시 당일 손익 초기화"""
         self.daily_realized_pnl = 0.0
+        self.initial_seed_today = 0.0
         self.unsettled_sell_amount = 0.0
+        self.is_balance_unconfirmed = False
+        self._sale_in_progress = False
+        self._pending_sale_proceeds = 0.0
         self.closed_trades_today.clear()
         self.ban_list.clear()
         self.logger.info("🔄 [RealPortfolio] 일일 실현손익 및 미결제대금 초기화 완료")
@@ -332,7 +361,7 @@ class RealPortfolio:
             p['qty'] * p.get('current_price', p.get('entry_price', 0.0))
             for p in self.positions.values()
         )
-        self.total_equity = self.balance + current_val + self.unsettled_sell_amount
+        self.total_equity = self.balance + current_val
 
         return removed
 
@@ -519,16 +548,46 @@ class RealPortfolio:
     def sync_balance(self, wait_sec: float = 0.0):
         """API를 통해 예수금만 강제 동기화 (매도 직후 사용, 증권사 전산 지연 완충 지원)"""
         if self.is_paper:
+            if getattr(self, 'initial_seed_today', 0.0) == 0.0 and self.balance > 0:
+                self.initial_seed_today = self.balance
             return
         if wait_sec > 0:
+            import time
             time.sleep(wait_sec)
         try:
             # get_buyable_cash는 kis_api에 구현되어 있어야 함
+            old_balance = self.balance
             cash = self.kis.get_buyable_cash() 
+            now_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            raw_fields = getattr(self.kis, 'last_buyable_cash_raw', {})
+            
+            # [A2] 원응답 로깅
+            self.logger.debug(
+                f"🔍 [sync_balance DEBUG] 시각: {now_str} | 직전 balance: ${old_balance:.2f} | "
+                f"파싱된 balance: ${cash:.2f} | API 원응답 금액 필드: {raw_fields}"
+            )
+
             if cash > 0:
-                old_balance = self.balance
                 self.balance = float(cash)
+                # [지시 6] 최초 1회 당일 시작 기준 예수금 고정 보존
+                if getattr(self, 'initial_seed_today', 0.0) == 0.0 and self.balance > 0:
+                    self.initial_seed_today = self.balance
+                    self.logger.info(f"🌱 [RealPortfolio] 당일 시작 기준 예수금 고정: ${self.initial_seed_today:,.2f}")
                 self.logger.info(f"💰 [Sync] 잔고 갱신 완료: ${old_balance:.2f} -> ${self.balance:.2f}")
+
+            # [A3] 매도 체결 후 잔고 미반영 의심 경고 감지
+            if getattr(self, '_sale_in_progress', False):
+                min_expected = self._balance_before_sale + (self._pending_sale_proceeds * 0.5)
+                if self.balance < min_expected:
+                    self.logger.warning(
+                        f"⚠️ [잔고 미반영 의심] sync_balance 결과(${self.balance:,.2f}) < "
+                        f"직전 balance(${self._balance_before_sale:,.2f}) + 순매도대금(${self._pending_sale_proceeds:,.2f}) × 0.5 (${min_expected:,.2f})"
+                    )
+                    self.is_balance_unconfirmed = True
+                else:
+                    self.is_balance_unconfirmed = False
+                    self._sale_in_progress = False
+                    self._pending_sale_proceeds = 0.0
         except Exception as e:
             self.logger.error(f"❌ 잔고 동기화 실패: {e}")
     

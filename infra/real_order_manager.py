@@ -570,12 +570,17 @@ class RealOrderManager:
             strat_name = position.get('strategy_name', position.get('strategy', 'EMA'))
             strat_label = f"{strat_name} 전략"
             
+            init_seed = getattr(portfolio, 'initial_seed_today', portfolio.balance)
+            cum_pnl = getattr(portfolio, 'daily_realized_pnl', 0.0)
+            est_seed = init_seed + cum_pnl
+
             msg = (
                 f"🎉 [매도/청산 체결 완료]\n"
                 f"🕹️ 모드: {mode_str}\n"
                 f"🎯 전략: {strat_label}\n"
                 f"📦 종목: {ticker}\n"
                 f"💵 실현손익: ${realized_pnl:+,.2f} ({return_pct:+.2f}%)\n"
+                f"📊 당일 누적 손익: ${cum_pnl:+,.2f} | 🏦 추정 총시드: ${est_seed:,.2f}\n"
                 f"📌 사유: {reason}"
             )
             return {

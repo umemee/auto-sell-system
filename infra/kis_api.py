@@ -5,6 +5,7 @@ import requests
 import json
 import pandas as pd
 import time
+import datetime
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
@@ -40,6 +41,8 @@ class KisApi:
             "tr_id": "",
             "custtype": "P"
         }
+        self._last_selected_cash = None
+        self.last_buyable_cash_raw = {}
         
         # [Smart Retry] 세션 설정 (HTTP 연결 풀링 및 재시도)
         # requests.get을 매번 새로 만드는 것보다 Session을 쓰면 훨씬 빠르고 안정적입니다.
@@ -167,11 +170,28 @@ class KisApi:
             ("frcr_ord_psbl_amt1", "외화주문가능금액1(통합)"),
         ]
 
+        # [C1] 원응답 후보 금액 필드 전체 추출
+        candidate_field_names = [f[0] for f in candidate_fields]
+        raw_amt_fields = {
+            k: output.get(k) for k in candidate_field_names
+        }
+        self.last_buyable_cash_raw = raw_amt_fields
+        now_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
         for field_name, desc in candidate_fields:
             raw_val = output.get(field_name)
             val = self._safe_float(raw_val)
             if val > 0:
-                self.logger.info(f"💵 [예수금 조회 성공] {field_name}({desc}): ${val:,.2f}")
+                self.logger.debug(
+                    f"🔍 [get_buyable_cash DEBUG] 시각: {now_str} | API 원응답 금액 필드: {raw_amt_fields} | 파싱된 금액: ${val:,.2f}"
+                )
+                # [C1] 선택된 값이 직전 호출 값과 달라졌을 때만 INFO 기록 (동일 값이면 기록 생략)
+                if not hasattr(self, '_last_selected_cash') or self._last_selected_cash != val:
+                    self.logger.info(
+                        f"💵 [예수금 조회 성공] {field_name}({desc}): ${val:,.2f} | "
+                        f"원응답 후보 필드 전체: {raw_amt_fields}"
+                    )
+                    self._last_selected_cash = val
                 return val
 
         # 모든 후보 필드가 0 이하 또는 결측인 경우
