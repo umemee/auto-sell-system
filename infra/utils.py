@@ -138,3 +138,31 @@ def round_price(price: float) -> float:
         return round(float(price), 2)
     else:
         return round(float(price), 4)
+
+def get_trade_date_key(now=None) -> str:
+    """
+    [거래일 키 표준화 함수]
+    - 미국 동부시간(America/New_York) 벽시계 시각 기준 +4시간 시프트한 날짜(YYYY-MM-DD) 반환.
+    - ET 20:00(애프터마켓 종료) = KST 09:00(서머타임)/10:00(표준시)에 거래일이 익일로 전환됨.
+    - now는 반드시 timezone-aware datetime이어야 하며, naive일 경우 ValueError 발생.
+    - DST 경계 왜곡 방지를 위해 ET 벽시계 시각 추출 후 naive 상태에서 +4h 연산 수행.
+    """
+    if now is None:
+        now = datetime.datetime.now(pytz.timezone('Asia/Seoul'))
+    elif now.tzinfo is None or now.tzinfo.utcoffset(now) is None:
+        raise ValueError("now must be a timezone-aware datetime")
+
+    tz_ny = pytz.timezone('America/New_York')
+    ny_dt = now.astimezone(tz_ny)
+    ny_naive = ny_dt.replace(tzinfo=None) + datetime.timedelta(hours=4)
+    return ny_naive.strftime("%Y-%m-%d")
+
+def format_est_seed(seed: float, pnl: float) -> str:
+    """
+    [추정 총시드 표기 공통 포맷팅 함수]
+    - seed > 0.0: f"${seed + pnl:,.2f}"
+    - seed <= 0.0 (미설정/장중 재시작): "산정 불가(장중 재시작)"
+    """
+    if seed is not None and float(seed) > 0.0:
+        return f"${float(seed) + float(pnl):,.2f}"
+    return "산정 불가(장중 재시작)"

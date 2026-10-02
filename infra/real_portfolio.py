@@ -255,16 +255,17 @@ class RealPortfolio:
         self.ban_list.clear()
         self.logger.info("🔄 [RealPortfolio] 일일 실현손익 및 미결제대금 초기화 완료")
 
-    def validate_and_apply_state(self, saved_date: str, daily_pnl: float, unsettled: float) -> bool:
+    def validate_and_apply_state(self, saved_date: str, daily_pnl: float, unsettled: float, saved_seed: float = 0.0) -> bool:
         """
-        [지시 7 안전장치] system_state.json 로드 시, 저장된 날짜가 현재 KST 일자와 다르면
+        [지시 1-2 & 작업 2 안전장치] system_state.json 로드 시, 저장된 trade_date가 현재 거래일 키와 다르면
         어제 손익 및 미결제 대금을 복원하지 않고 즉시 daily_reset()을 호출합니다.
+        거래일이 일치하면 daily_pnl, unsettled, initial_seed_today를 복원합니다.
         """
-        import pytz
-        today_kst = datetime.datetime.now(pytz.timezone('Asia/Seoul')).strftime("%Y-%m-%d")
-        if not saved_date or saved_date != today_kst:
+        from infra.utils import get_trade_date_key
+        current_trade_date = get_trade_date_key()
+        if not saved_date or saved_date != current_trade_date:
             self.logger.warning(
-                f"📅 [날짜 불일치 감지] 저장일자({saved_date}) != 현재 KST({today_kst}) "
+                f"📅 [거래일 불일치 감지] 저장일자({saved_date}) != 현재 거래일({current_trade_date}) "
                 f"-> 어제 손익/미결제 복원 차단 및 daily_reset() 자동 집행"
             )
             self.daily_reset()
@@ -272,17 +273,22 @@ class RealPortfolio:
 
         self.daily_realized_pnl = float(daily_pnl)
         self.unsettled_sell_amount = float(unsettled)
+        self.initial_seed_today = float(saved_seed)
         self.logger.info(
-            f"🔄 [당일 상태 복원] 일자: {saved_date} | 손익: ${self.daily_realized_pnl:+,.2f} | 미결제: ${self.unsettled_sell_amount:,.2f}"
+            f"🔄 [당일 상태 복원] 거래일: {saved_date} | 손익: ${self.daily_realized_pnl:+,.2f} | "
+            f"미결제: ${self.unsettled_sell_amount:,.2f} | 시작시드: ${self.initial_seed_today:,.2f}"
         )
         return True
 
     def recover_from_log(self, log_path=None, today_str=None):
         """
-        [장중 재시작 복구력] trade.log를 파싱하여 당일 실현손익과 미결제대금을 복구
+        [장중 재시작 복구력] trade.log를 파싱하여 당일 거래일 키 기준 실현손익과 미결제대금을 복구
+        - 로그의 KST 타임스탬프를 Asia/Seoul로 localize 후 get_trade_date_key()로 변환하여 대조
+        - '[LIVE] [YYYY-MM-DD HH:MM:SS]' 및 '[LIVE] YYYY-MM-DD HH:MM:SS,mmm' 두 가지 형식 모두 지원
         """
         import re
         from pathlib import Path
+        from infra.utils import get_trade_date_key
         
         if log_path is None:
             log_path = Path(__file__).resolve().parent.parent / "logs" / "trade.log"
@@ -291,8 +297,8 @@ class RealPortfolio:
         if not log_path.exists():
             return 0
             
-        if today_str is None:
-            today_str = datetime.datetime.now(pytz.timezone('Asia/Seoul')).strftime("%Y-%m-%d")
+        target_trade_date = today_str if today_str is not None else get_trade_date_key()
+        kst_tz = pytz.timezone('Asia/Seoul')
 
         recovered_pnl = 0.0
         recovered_unsettled = 0.0
@@ -300,10 +306,12 @@ class RealPortfolio:
         last_unsettled = None
         
         pattern_realized = re.compile(
-            r'\[(\d{4}-\d{2}-\d{2})\s[\d:]+\].*?📈\s+\[Trade Realized\]\s+(\S+)\s+\|\s+PnL:\s+\$([+\-\d\.,]+).*?미결제대금:\s+\$([+\-\d\.,]+)'
+            r'\[LIVE\]\s+(?:\[(\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2})\]|(\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}))(?:,\d+)?.*?'
+            r'📈\s+\[Trade Realized\]\s+(\S+)\s+\|\s+PnL:\s+\$([+\-\d\.,]+).*?미결제대금:\s+\$([+\-\d\.,]+)'
         )
         pattern_sell_fill = re.compile(
-            r'\[(\d{4}-\d{2}-\d{2})\s[\d:]+\].*?🔴\s+\[.*?체결\]\s+(\S+).*?수량:\s+(\d+)주\s+\|\s+체결가:\s+\$([\d\.]+).*?손익:\s+\$([+\-\d\.,]+)'
+            r'\[LIVE\]\s+(?:\[(\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2})\]|(\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}))(?:,\d+)?.*?'
+            r'🔴\s+\[.*?체결\]\s+(\S+).*?수량:\s+(\d+)주\s+\|\s+체결가:\s+\$([\d\.]+).*?손익:\s+\$([+\-\d\.,]+)'
         )
 
         try:
@@ -311,8 +319,13 @@ class RealPortfolio:
                 for line in f:
                     m1 = pattern_realized.search(line)
                     if m1:
-                        log_date, sym, pnl_str, unsettled_str = m1.groups()
-                        if log_date == today_str:
+                        ts1, ts2, sym, pnl_str, unsettled_str = m1.groups()
+                        ts_str = ts1 or ts2
+                        dt_naive = datetime.datetime.strptime(ts_str, "%Y-%m-%d %H:%M:%S")
+                        dt_aware = kst_tz.localize(dt_naive)
+                        line_trade_date = get_trade_date_key(dt_aware)
+                        
+                        if line_trade_date == target_trade_date:
                             pnl_val = float(pnl_str.replace(',', ''))
                             unsettled_val = float(unsettled_str.replace(',', ''))
                             recovered_pnl += pnl_val
@@ -322,8 +335,13 @@ class RealPortfolio:
 
                     m2 = pattern_sell_fill.search(line)
                     if m2 and last_unsettled is None:
-                        log_date, sym, qty_str, price_str, pnl_str = m2.groups()
-                        if log_date == today_str:
+                        ts1, ts2, sym, qty_str, price_str, pnl_str = m2.groups()
+                        ts_str = ts1 or ts2
+                        dt_naive = datetime.datetime.strptime(ts_str, "%Y-%m-%d %H:%M:%S")
+                        dt_aware = kst_tz.localize(dt_naive)
+                        line_trade_date = get_trade_date_key(dt_aware)
+                        
+                        if line_trade_date == target_trade_date:
                             pnl_val = float(pnl_str.replace(',', ''))
                             qty_val = float(qty_str)
                             price_val = float(price_str)
@@ -566,12 +584,25 @@ class RealPortfolio:
                 # (선택) 로그가 너무 많으면 주석 처리 가능
                 # self.logger.info(f"📈 [{ticker}] 고가 갱신: ${old_high} -> ${current_price}")
     
+    def _maybe_latch_initial_seed(self):
+        """
+        [작업 2-2 래치 조건 강화]
+        - 아직 당일 매매가 시작되지 않은 깨끗한 상태(시드 미설정, 잔고>0, 포지션 0개, 당일 손익 0)일 때만
+          현재 잔고를 당일 시작 시드로 래치 고정.
+        - 장중 포지션 보유 중이거나 손익 발생 상태에서의 재시작 시에는 래치하지 않고 0.0 유지.
+        """
+        if (getattr(self, 'initial_seed_today', 0.0) == 0.0 and 
+            self.balance > 0 and 
+            len(self.positions) == 0 and 
+            getattr(self, 'daily_realized_pnl', 0.0) == 0.0):
+            self.initial_seed_today = self.balance
+            self.logger.info(f"🌱 [RealPortfolio] 당일 시작 기준 예수금 고정: ${self.initial_seed_today:,.2f}")
+
     # [신규 추가] 외부(main.py)에서 호출할 잔고 강제 동기화 함수
     def sync_balance(self, wait_sec: float = 0.0):
         """API를 통해 예수금만 강제 동기화 (매도 직후 사용, 증권사 전산 지연 완충 지원)"""
         if self.is_paper:
-            if getattr(self, 'initial_seed_today', 0.0) == 0.0 and self.balance > 0:
-                self.initial_seed_today = self.balance
+            self._maybe_latch_initial_seed()
             return
         if wait_sec > 0:
             import time
@@ -591,10 +622,8 @@ class RealPortfolio:
 
             if cash > 0:
                 self.balance = float(cash)
-                # [지시 6] 최초 1회 당일 시작 기준 예수금 고정 보존
-                if getattr(self, 'initial_seed_today', 0.0) == 0.0 and self.balance > 0:
-                    self.initial_seed_today = self.balance
-                    self.logger.info(f"🌱 [RealPortfolio] 당일 시작 기준 예수금 고정: ${self.initial_seed_today:,.2f}")
+                # [작업 2-2] 최초 1회 당일 시작 기준 예수금 고정 보존 (포지션 0개, 당일 손익 0일 때만 래치)
+                self._maybe_latch_initial_seed()
                 self.logger.info(f"💰 [Sync] 잔고 갱신 완료: ${old_balance:.2f} -> ${self.balance:.2f}")
 
             # [A3] 매도 체결 후 잔고 미반영 의심 경고 감지
