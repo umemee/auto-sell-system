@@ -17,7 +17,7 @@ if sys.platform == 'win32':
     except Exception:
         pass
 from config import Config
-from infra.utils import get_logger, round_price
+from infra.utils import get_logger, round_price, get_trade_date_key, format_est_seed
 from infra.kis_api import KisApi
 from infra.kis_auth import KisAuth
 from infra.telegram_bot import TelegramBot
@@ -34,33 +34,39 @@ STATE_FILE = str(BASE_DIR / "system_state.json")
 
 def save_state(ban_list, active_candidates, loss_blacklist=None, daily_realized_pnl=None, unsettled_sell_amount=None, portfolio=None):
     """
-    [설명] 밴 리스트, 감시 중인 종목, 손절 블랙리스트 및 체결기준 손익/미결제대금을 파일로 저장합니다.
+    [설명] 밴 리스트, 감시 중인 종목, 손절 블랙리스트 및 체결기준 손익/미결제대금/당일시작시드를 파일로 저장합니다.
     """
     try:
+        initial_seed_today = None
         if portfolio is not None:
+            initial_seed_today = getattr(portfolio, 'initial_seed_today', 0.0)
             if daily_realized_pnl is None:
                 daily_realized_pnl = getattr(portfolio, 'daily_realized_pnl', 0.0)
             if unsettled_sell_amount is None:
                 unsettled_sell_amount = getattr(portfolio, 'unsettled_sell_amount', 0.0)
 
-        # 손익/미결제금이 명시되지 않은 경우 기존 파일의 당일 값 보존
-        if daily_realized_pnl is None or unsettled_sell_amount is None:
+        # 손익/미결제금/시드가 명시되지 않은 경우 기존 파일의 당일 값 보존
+        if daily_realized_pnl is None or unsettled_sell_amount is None or initial_seed_today is None:
             if os.path.exists(STATE_FILE):
                 try:
                     with open(STATE_FILE, "r") as f_prev:
                         old_s = json.load(f_prev)
-                        today_s = datetime.datetime.now().strftime("%Y-%m-%d")
-                        if old_s.get("date") == today_s:
+                        current_t_key = get_trade_date_key()
+                        if old_s.get("trade_date") == current_t_key:
                             if daily_realized_pnl is None:
                                 daily_realized_pnl = old_s.get("daily_realized_pnl", 0.0)
                             if unsettled_sell_amount is None:
                                 unsettled_sell_amount = old_s.get("unsettled_sell_amount", 0.0)
+                            if initial_seed_today is None:
+                                initial_seed_today = old_s.get("initial_seed_today", 0.0)
                 except Exception:
                     pass
         if daily_realized_pnl is None:
             daily_realized_pnl = 0.0
         if unsettled_sell_amount is None:
             unsettled_sell_amount = 0.0
+        if initial_seed_today is None:
+            initial_seed_today = 0.0
 
         candidates_data = {}
         if isinstance(active_candidates, dict):
@@ -79,7 +85,7 @@ def save_state(ban_list, active_candidates, loss_blacklist=None, daily_realized_
                     'target_price': p_data.get('target_price', 0.0)
                 }
 
-        now_kst = datetime.datetime.now(pytz.timezone('Asia/Seoul'))
+        trade_date = get_trade_date_key()
         state = {
             "ban_list": list(ban_list),
             "loss_blacklist": list(loss_blacklist) if loss_blacklist is not None else [],
@@ -87,7 +93,8 @@ def save_state(ban_list, active_candidates, loss_blacklist=None, daily_realized_
             "positions_meta": positions_meta,
             "daily_realized_pnl": float(daily_realized_pnl),
             "unsettled_sell_amount": float(unsettled_sell_amount),
-            "date": now_kst.strftime("%Y-%m-%d")
+            "initial_seed_today": float(initial_seed_today),
+            "trade_date": trade_date
         }
         
         with open(STATE_FILE, "w") as f:
@@ -99,22 +106,27 @@ def save_state(ban_list, active_candidates, loss_blacklist=None, daily_realized_
 def load_state():
     """[설명] 저장된 상태 파일이 있다면 불러옵니다."""
     if not os.path.exists(STATE_FILE):
-        return set(), {}, set(), 0.0, 0.0, {}, ""
+        return set(), {}, set(), 0.0, 0.0, {}, None, 0.0
     
     try:
         with open(STATE_FILE, "r") as f:
             state = json.load(f)
             
-        today = datetime.datetime.now(pytz.timezone('Asia/Seoul')).strftime("%Y-%m-%d")
-        saved_date = state.get("date", "")
-        if saved_date != today:
-            logger.info(f"📅 날짜 변경 감지(저장일: {saved_date} vs 오늘: {today})으로 저장된 상태를 초기화합니다.")
-            return set(), {}, set(), 0.0, 0.0, {}, saved_date
+        current_trade_date = get_trade_date_key()
+        saved_trade_date = state.get("trade_date")
+        if not saved_trade_date:
+            logger.info("📅 [상태 파일] trade_date 키가 없는 구버전 파일이므로 상태를 초기화합니다.")
+            return set(), {}, set(), 0.0, 0.0, {}, None, 0.0
+            
+        if saved_trade_date != current_trade_date:
+            logger.info(f"📅 거래일 변경 감지(저장일: {saved_trade_date} vs 현재: {current_trade_date})으로 저장된 상태를 초기화합니다.")
+            return set(), {}, set(), 0.0, 0.0, {}, saved_trade_date, 0.0
             
         loaded_ban = set(state.get("ban_list", []))
         loaded_loss = set(state.get("loss_blacklist", []))
         daily_pnl = float(state.get("daily_realized_pnl", 0.0))
         unsettled = float(state.get("unsettled_sell_amount", 0.0))
+        loaded_seed = float(state.get("initial_seed_today", 0.0))
         raw_candidates = state.get("active_candidates", {})
         loaded_positions_meta = state.get("positions_meta", {})
         
@@ -127,11 +139,11 @@ def load_state():
         else:
             loaded_candidates = {}
             
-        return loaded_ban, loaded_candidates, loaded_loss, daily_pnl, unsettled, loaded_positions_meta, saved_date
+        return loaded_ban, loaded_candidates, loaded_loss, daily_pnl, unsettled, loaded_positions_meta, saved_trade_date, loaded_seed
     
     except Exception as e:
         logger.error(f"⚠️ 상태 로드 실패: {e}")
-        return set(), {}, set(), 0.0, 0.0, {}, ""
+        return set(), {}, set(), 0.0, 0.0, {}, None, 0.0
 
 def merge_candle_dfs(old_df, new_df, max_len=1200):
     """
@@ -214,15 +226,15 @@ def send_heartbeat_report(bot, portfolio, risk_filter, active_candidates, tz_kst
         loss_str = ", ".join(loss_list[:5]) + ("..." if len(loss_list) > 5 else "")
         holdings_str = ", ".join(portfolio.positions.keys()) if pos_cnt else "없음"
 
-        init_seed = getattr(portfolio, 'initial_seed_today', buyable_cash)
+        init_seed = getattr(portfolio, 'initial_seed_today', 0.0)
         cum_pnl = getattr(portfolio, 'daily_realized_pnl', 0.0)
-        est_seed = init_seed + cum_pnl
+        est_seed_str = format_est_seed(init_seed, cum_pnl)
 
         unconfirmed_tag = " ⚠️잔고 미확정" if getattr(portfolio, 'is_balance_unconfirmed', False) else ""
         msg = (
             f"💓 [하트비트 - {trigger_reason}] KR {cur_k} / NY {cur_n}\n"
             f"💵 매매 가능 시드: ${buyable_cash:,.2f}{unconfirmed_tag} (1회 주문한도: ${order_limit:,.2f})\n"
-            f"📊 당일 누적 손익: ${cum_pnl:+,.2f} | 🏦 추정 총시드: ${est_seed:,.2f}\n"
+            f"📊 당일 누적 손익: ${cum_pnl:+,.2f} | 🏦 추정 총시드: {est_seed_str}\n"
             f"💰 총 평가 자산: ${total_eq:,.2f}\n"
             f"🎰 보유({pos_cnt}개): {holdings_str}\n"
             f"👁️ 감시({len(watching_list)}개): {watch_str if watch_str else '없음'}\n"
@@ -282,7 +294,7 @@ def main():
     
     last_processed_minute = None
     eod_processed = False  
-    current_date_str = now_et_start.strftime("%Y-%m-%d")
+    current_date_str = get_trade_date_key(now_kst_start)
 
     try:
         # 1. 인프라 초기화
@@ -316,7 +328,10 @@ def main():
         portfolio.sync_with_kis()
         loaded_state_res = load_state()
         saved_date = ""
-        if len(loaded_state_res) == 7:
+        loaded_seed = 0.0
+        if len(loaded_state_res) == 8:
+            loaded_ban, loaded_candidates, loaded_loss, loaded_daily_pnl, loaded_unsettled, loaded_positions_meta, saved_date, loaded_seed = loaded_state_res
+        elif len(loaded_state_res) == 7:
             loaded_ban, loaded_candidates, loaded_loss, loaded_daily_pnl, loaded_unsettled, loaded_positions_meta, saved_date = loaded_state_res
         elif len(loaded_state_res) == 6:
             loaded_ban, loaded_candidates, loaded_loss, loaded_daily_pnl, loaded_unsettled, loaded_positions_meta = loaded_state_res
@@ -328,12 +343,13 @@ def main():
         strategy.banned_tickers.update(loaded_ban)
         risk_filter.loss_blacklist.update(loaded_loss)
         
-        # [지시 7 안전장치] 날짜 일치 여부 검증 후 상태 반영 (날짜 불일치 시 daily_reset 자동 수행)
+        # [지시 1-2 & 작업 2 안전장치] 거래일 일치 여부 검증 후 상태 반영 (불일치 시 daily_reset 자동 수행)
         if hasattr(portfolio, 'validate_and_apply_state'):
-            portfolio.validate_and_apply_state(saved_date, loaded_daily_pnl, loaded_unsettled)
+            portfolio.validate_and_apply_state(saved_date, loaded_daily_pnl, loaded_unsettled, loaded_seed)
         else:
             portfolio.daily_realized_pnl = loaded_daily_pnl
             portfolio.unsettled_sell_amount = loaded_unsettled
+            portfolio.initial_seed_today = loaded_seed
 
         # 복구된 포지션 메타데이터(전략명, 목표가) 복원
         for t_sym, p_meta in loaded_positions_meta.items():
@@ -342,9 +358,13 @@ def main():
                 if 'target_price' in p_meta and p_meta['target_price'] > 0:
                     portfolio.positions[t_sym]['target_price'] = p_meta['target_price']
 
-        # 2차 복구: 당일 trade.log 기반 복구 (KST 오늘 날짜 명시)
-        today_kst_str = datetime.datetime.now(pytz.timezone('Asia/Seoul')).strftime("%Y-%m-%d")
-        recovered_count = portfolio.recover_from_log(today_str=today_kst_str)
+        # 2차 복구: 당일 trade.log 기반 복구 (현재 거래일 키 명시)
+        current_trade_date = get_trade_date_key(now_kst_start)
+        recovered_count = portfolio.recover_from_log(today_str=current_trade_date)
+
+        # [작업 2-2] 상태 복원 완료 후 시작 시드 래치 점검 (포지션 0개, 실현손익 0일 때만 래치)
+        if hasattr(portfolio, '_maybe_latch_initial_seed'):
+            portfolio._maybe_latch_initial_seed()
 
         # 체결기준 총자산 재계산 (미결제대금 이중합산 완전 제거)
         current_val = sum(
@@ -365,27 +385,28 @@ def main():
             f"💾 [Memory] 복구 완료 | 🚫Ban: {len(portfolio.ban_list)}개, "
             f"🛑Loss-Blacklist: {len(risk_filter.loss_blacklist)}개, "
             f"👁️Watch: {len(active_candidates)}개 | "
-            f"손익: ${portfolio.daily_realized_pnl:+,.2f}, 미결제: ${portfolio.unsettled_sell_amount:,.2f}"
+            f"시드: ${portfolio.initial_seed_today:,.2f}, 손익: ${portfolio.daily_realized_pnl:+,.2f}, 미결제: ${portfolio.unsettled_sell_amount:,.2f}"
         )
         
         mode_label = "가상 페이퍼 [PAPER]" if is_paper_mode else f"실계좌 실전 [REAL] ({cano_masked})"
         buyable_cash = portfolio.balance
         cum_pnl = getattr(portfolio, 'daily_realized_pnl', 0.0)
         init_seed = getattr(portfolio, 'initial_seed_today', 0.0)
-        if init_seed == 0.0:
-            init_seed = buyable_cash
-        est_seed = init_seed + cum_pnl
+        est_seed_str = format_est_seed(init_seed, cum_pnl)
 
         start_msg = (
             f"⚔️ [시스템 가동 v5.4 - 3중 리스크 필터 탑재]\n"
             f"🕹️ 모드: {mode_label}\n"
             f"⏰ 시간: KR {now_kst_start.strftime('%H:%M')} / NY {now_et_start.strftime('%H:%M')}\n"
             f"💵 매매 가능 시드: ${buyable_cash:,.2f}\n"
-            f"📊 당일 누적 손익: ${cum_pnl:+,.2f} | 🏦 추정 총시드: ${est_seed:,.2f}\n"
+            f"📊 당일 누적 손익: ${cum_pnl:+,.2f} | 🏦 추정 총시드: {est_seed_str}\n"
             f"🎰 슬롯: {len(portfolio.positions)} / {portfolio.MAX_SLOTS}\n"
             f"🛡️ 손절 차단 종목 수: {len(risk_filter.loss_blacklist)}개"
         )
         bot.send_message(start_msg)
+
+        # 시작 시점에 상태 즉시 1회 저장 (시작 시드 등 확정 저장)
+        save_state(portfolio.ban_list, active_candidates, risk_filter.loss_blacklist, portfolio=portfolio)
         
         def get_status_data():
             return {
@@ -592,11 +613,11 @@ def main():
                 last_heartbeat_time = time.time()
 
             # =========================================================
-            # 📅 [Daily Reset] 날짜 변경 체크
+            # 📅 [Daily Reset] 거래일 변경 체크
             # =========================================================
-            new_date_str = now.strftime("%Y-%m-%d")
+            new_date_str = get_trade_date_key(now)
             if new_date_str != current_date_str:
-                logger.info(f"📅 [New Day] 날짜 변경 감지: {current_date_str} -> {new_date_str}")
+                logger.info(f"📅 [New Trading Day] 거래일 변경 감지: {current_date_str} -> {new_date_str}")
                 portfolio.daily_reset()    # 👈 [추가] 일일 실현손익 및 미결제대금 리셋
                 strategy.daily_reset()     # 👈 [추가] 일별 세션 상태(banned_tickers 등) 초기화
                 risk_filter.reset_daily()  # 👈 [추가] 일일 리스크 필터 리셋
