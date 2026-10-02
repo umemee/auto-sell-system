@@ -396,7 +396,7 @@ class EmaStrategy:
         if not recent_highs.empty:
             recent_peak = recent_highs.max()
             if recent_peak < prev_ema * 1.03:
-                self._log_rejection(ticker, f"모멘텀 부족 (최고점 {recent_peak:.2f} < EMA 3% {prev_ema*1.03:.2f})", current_price)
+                self._log_rejection(ticker, f"모멘텀 부족 (최고점 {recent_peak:.4f} < EMA 3% {prev_ema*1.03:.4f})", current_price)
                 return None
             
         # =========================================================

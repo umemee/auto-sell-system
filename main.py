@@ -212,10 +212,16 @@ def send_heartbeat_report(bot, portfolio, risk_filter, active_candidates, tz_kst
         loss_str = ", ".join(loss_list[:5]) + ("..." if len(loss_list) > 5 else "")
         holdings_str = ", ".join(portfolio.positions.keys()) if pos_cnt else "없음"
 
+        init_seed = getattr(portfolio, 'initial_seed_today', buyable_cash)
+        cum_pnl = getattr(portfolio, 'daily_realized_pnl', 0.0)
+        est_seed = init_seed + cum_pnl
+
+        unconfirmed_tag = " ⚠️잔고 미확정" if getattr(portfolio, 'is_balance_unconfirmed', False) else ""
         msg = (
             f"💓 [하트비트 - {trigger_reason}] KR {cur_k} / NY {cur_n}\n"
-            f"💵 매매 가능 시드: ${buyable_cash:,.2f} (1회 주문한도: ${order_limit:,.2f})\n"
-            f"💰 총 평가 자산: ${total_eq:,.2f} | 금일 실현손익: ${portfolio.daily_realized_pnl:+,.2f}\n"
+            f"💵 매매 가능 시드: ${buyable_cash:,.2f}{unconfirmed_tag} (1회 주문한도: ${order_limit:,.2f})\n"
+            f"📊 당일 누적 손익: ${cum_pnl:+,.2f} | 🏦 추정 총시드: ${est_seed:,.2f}\n"
+            f"💰 총 평가 자산: ${total_eq:,.2f}\n"
             f"🎰 보유({pos_cnt}개): {holdings_str}\n"
             f"👁️ 감시({len(watching_list)}개): {watch_str if watch_str else '없음'}\n"
             f"🚫 Ban({len(banned_list)}개): {ban_str if ban_str else '없음'}\n"
