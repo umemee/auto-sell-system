@@ -79,6 +79,7 @@ def save_state(ban_list, active_candidates, loss_blacklist=None, daily_realized_
                     'target_price': p_data.get('target_price', 0.0)
                 }
 
+        now_kst = datetime.datetime.now(pytz.timezone('Asia/Seoul'))
         state = {
             "ban_list": list(ban_list),
             "loss_blacklist": list(loss_blacklist) if loss_blacklist is not None else [],
@@ -86,7 +87,7 @@ def save_state(ban_list, active_candidates, loss_blacklist=None, daily_realized_
             "positions_meta": positions_meta,
             "daily_realized_pnl": float(daily_realized_pnl),
             "unsettled_sell_amount": float(unsettled_sell_amount),
-            "date": datetime.datetime.now().strftime("%Y-%m-%d")
+            "date": now_kst.strftime("%Y-%m-%d")
         }
         
         with open(STATE_FILE, "w") as f:
@@ -98,16 +99,17 @@ def save_state(ban_list, active_candidates, loss_blacklist=None, daily_realized_
 def load_state():
     """[설명] 저장된 상태 파일이 있다면 불러옵니다."""
     if not os.path.exists(STATE_FILE):
-        return set(), {}, set(), 0.0, 0.0, {}
+        return set(), {}, set(), 0.0, 0.0, {}, ""
     
     try:
         with open(STATE_FILE, "r") as f:
             state = json.load(f)
             
-        today = datetime.datetime.now().strftime("%Y-%m-%d")
-        if state.get("date") != today:
-            logger.info("📅 날짜 변경으로 저장된 상태를 초기화합니다.")
-            return set(), {}, set(), 0.0, 0.0, {}
+        today = datetime.datetime.now(pytz.timezone('Asia/Seoul')).strftime("%Y-%m-%d")
+        saved_date = state.get("date", "")
+        if saved_date != today:
+            logger.info(f"📅 날짜 변경 감지(저장일: {saved_date} vs 오늘: {today})으로 저장된 상태를 초기화합니다.")
+            return set(), {}, set(), 0.0, 0.0, {}, saved_date
             
         loaded_ban = set(state.get("ban_list", []))
         loaded_loss = set(state.get("loss_blacklist", []))
@@ -120,16 +122,16 @@ def load_state():
         if isinstance(raw_candidates, dict):
             loaded_candidates = raw_candidates
         elif isinstance(raw_candidates, (list, set)):
-            now_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            now_str = datetime.datetime.now(pytz.timezone('Asia/Seoul')).strftime("%Y-%m-%d %H:%M:%S")
             loaded_candidates = {sym: now_str for sym in raw_candidates}
         else:
             loaded_candidates = {}
             
-        return loaded_ban, loaded_candidates, loaded_loss, daily_pnl, unsettled, loaded_positions_meta
+        return loaded_ban, loaded_candidates, loaded_loss, daily_pnl, unsettled, loaded_positions_meta, saved_date
     
     except Exception as e:
         logger.error(f"⚠️ 상태 로드 실패: {e}")
-        return set(), {}, set(), 0.0, 0.0, {}
+        return set(), {}, set(), 0.0, 0.0, {}, ""
 
 def merge_candle_dfs(old_df, new_df, max_len=1200):
     """
@@ -313,7 +315,10 @@ def main():
         logger.info("📡 증권사 서버와 동기화 중...")
         portfolio.sync_with_kis()
         loaded_state_res = load_state()
-        if len(loaded_state_res) == 6:
+        saved_date = ""
+        if len(loaded_state_res) == 7:
+            loaded_ban, loaded_candidates, loaded_loss, loaded_daily_pnl, loaded_unsettled, loaded_positions_meta, saved_date = loaded_state_res
+        elif len(loaded_state_res) == 6:
             loaded_ban, loaded_candidates, loaded_loss, loaded_daily_pnl, loaded_unsettled, loaded_positions_meta = loaded_state_res
         else:
             loaded_ban, loaded_candidates, loaded_loss, loaded_daily_pnl, loaded_unsettled = loaded_state_res[:5]
@@ -322,8 +327,13 @@ def main():
         portfolio.ban_list.update(loaded_ban)
         strategy.banned_tickers.update(loaded_ban)
         risk_filter.loss_blacklist.update(loaded_loss)
-        portfolio.daily_realized_pnl = loaded_daily_pnl
-        portfolio.unsettled_sell_amount = loaded_unsettled
+        
+        # [지시 7 안전장치] 날짜 일치 여부 검증 후 상태 반영 (날짜 불일치 시 daily_reset 자동 수행)
+        if hasattr(portfolio, 'validate_and_apply_state'):
+            portfolio.validate_and_apply_state(saved_date, loaded_daily_pnl, loaded_unsettled)
+        else:
+            portfolio.daily_realized_pnl = loaded_daily_pnl
+            portfolio.unsettled_sell_amount = loaded_unsettled
 
         # 복구된 포지션 메타데이터(전략명, 목표가) 복원
         for t_sym, p_meta in loaded_positions_meta.items():
@@ -332,18 +342,19 @@ def main():
                 if 'target_price' in p_meta and p_meta['target_price'] > 0:
                     portfolio.positions[t_sym]['target_price'] = p_meta['target_price']
 
-        # 2차 복구: 당일 trade.log 기반 복구
-        recovered_count = portfolio.recover_from_log()
+        # 2차 복구: 당일 trade.log 기반 복구 (KST 오늘 날짜 명시)
+        today_kst_str = datetime.datetime.now(pytz.timezone('Asia/Seoul')).strftime("%Y-%m-%d")
+        recovered_count = portfolio.recover_from_log(today_str=today_kst_str)
 
-        # 체결기준 총자산 재계산
+        # 체결기준 총자산 재계산 (미결제대금 이중합산 완전 제거)
         current_val = sum(
             p['qty'] * p.get('current_price', p.get('entry_price', 0.0))
             for p in portfolio.positions.values()
         )
-        portfolio.total_equity = portfolio.balance + current_val + portfolio.unsettled_sell_amount
+        portfolio.total_equity = portfolio.balance + current_val
         
         if isinstance(loaded_candidates, (set, list)):
-             active_candidates = {sym: datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S") for sym in loaded_candidates}
+             active_candidates = {sym: datetime.datetime.now(pytz.timezone('Asia/Seoul')).strftime("%Y-%m-%d %H:%M:%S") for sym in loaded_candidates}
         else:
              active_candidates = loaded_candidates
 
@@ -358,12 +369,19 @@ def main():
         )
         
         mode_label = "가상 페이퍼 [PAPER]" if is_paper_mode else f"실계좌 실전 [REAL] ({cano_masked})"
+        buyable_cash = portfolio.balance
+        cum_pnl = getattr(portfolio, 'daily_realized_pnl', 0.0)
+        init_seed = getattr(portfolio, 'initial_seed_today', 0.0)
+        if init_seed == 0.0:
+            init_seed = buyable_cash
+        est_seed = init_seed + cum_pnl
+
         start_msg = (
             f"⚔️ [시스템 가동 v5.4 - 3중 리스크 필터 탑재]\n"
             f"🕹️ 모드: {mode_label}\n"
             f"⏰ 시간: KR {now_kst_start.strftime('%H:%M')} / NY {now_et_start.strftime('%H:%M')}\n"
-            f"💰 체결기준 자산: ${portfolio.total_equity:,.0f} (예수금: ${portfolio.balance:,.0f}, 미결제: ${portfolio.unsettled_sell_amount:,.0f})\n"
-            f"📈 금일 누적 손익: ${portfolio.daily_realized_pnl:+,.2f}\n"
+            f"💵 매매 가능 시드: ${buyable_cash:,.2f}\n"
+            f"📊 당일 누적 손익: ${cum_pnl:+,.2f} | 🏦 추정 총시드: ${est_seed:,.2f}\n"
             f"🎰 슬롯: {len(portfolio.positions)} / {portfolio.MAX_SLOTS}\n"
             f"🛡️ 손절 차단 종목 수: {len(risk_filter.loss_blacklist)}개"
         )
