@@ -173,7 +173,7 @@ class RealPortfolio:
                     self.ban_list.add(ticker) # [Cool-down] 금일 재매수 금지 등록
 
             # 4. 체결기준 총 자산 가치 업데이트 (증권사 D+2 지연 대금 이중합산 제거)
-            self.total_equity = self.balance + current_stock_value
+            self.total_equity = self.get_effective_balance() + current_stock_value
 
             # 로그 출력 (선택 사항)
             # self._log_status()
@@ -229,13 +229,13 @@ class RealPortfolio:
         }
         self.closed_trades_today.append(record)
         
-        # 체결기준 총자산 즉시 재계산 (매도된 종목은 평가액에서 즉시 제외, D+2 미결제 대금 이중합산 제거)
+        # 체결기준 총자산 즉시 재계산 (매도된 종목은 평가액에서 즉시 제외, 체결기준 유효 가용금액 반영)
         current_val = sum(
             p['qty'] * p.get('current_price', p.get('entry_price', 0.0))
             for t, p in self.positions.items()
             if t != ticker
         )
-        self.total_equity = self.balance + current_val
+        self.total_equity = self.get_effective_balance() + current_val
 
         self.logger.info(
             f"📈 [Trade Realized] {ticker} | PnL: ${pnl:+,.2f} ({ret_pct:+.2f}%) | "
@@ -401,30 +401,37 @@ class RealPortfolio:
             p['qty'] * p.get('current_price', p.get('entry_price', 0.0))
             for p in self.positions.values()
         )
-        self.total_equity = self.balance + current_val
+        self.total_equity = self.get_effective_balance() + current_val
 
         return removed
 
-    def get_max_order_amount(self):
+    def get_max_order_amount(self, capital_frac=None, strategy=None):
         """
-        [Double Engine 자금 관리 - Fixed for Market Order]
-        목표: 전체 자산의 50% 베팅 (단, 현금 범위 내에서)
+        [Double Engine 자금 관리 - Fixed for Market Order & Alpha Sweep]
+        목표: 전체 자산의 50% 베팅 (EMA) 또는 잔여 가용자본 스윕 (Alpha, 최대 100%)
         수정: 시장가 주문(+5% 할증)을 고려하여 현금 버퍼를 2% -> 10%로 확대
         """
         # 1. 현재 슬롯 확인 (이미 꽉 찼으면 0 반환)
         if len(self.positions) >= self.MAX_SLOTS:
             return 0.0
 
-        # 2. 1슬롯당 목표 금액 계산 (총 자산 / 2)
-        target_amount = self.total_equity / self.MAX_SLOTS
+        # 2. 목표 금액 계산
+        if capital_frac is not None:
+            target_amount = self.total_equity * float(capital_frac)
+        elif strategy == 'ALPHA':
+            rem_slots = max(0, self.MAX_SLOTS - len(self.positions))
+            slot_ratio = 1.0 if len(self.positions) == 0 else (rem_slots / self.MAX_SLOTS)
+            target_amount = self.total_equity * slot_ratio
+        else:
+            target_amount = self.total_equity / self.MAX_SLOTS
         
         # 3. [옵션 A] 1회 주문 최대 한도 Hard Cap ($2,000)
         cap = getattr(Config, 'MAX_SINGLE_ORDER_AMOUNT', 2000.0)
         capped_target = min(target_amount, cap) if (cap is not None and cap > 0) else target_amount
 
         # 4. [안전 장치] 주문 가능 현금의 90% (수수료 + 시장가 할증 5% 커버)
-        # 매도 직후 증권사 API 일시 지연 시 D+2 미결제 대금(unsettled_sell_amount)과의 가용성 보호
-        available_cash = self.balance
+        # 매도 직후 증권사 API 일시 지연 시 체결기준 유효 가용 현금(get_effective_balance) 사용
+        available_cash = self.get_effective_balance()
         if available_cash < 20 and getattr(self, 'unsettled_sell_amount', 0.0) > 0:
             available_cash = max(available_cash, self.unsettled_sell_amount * 0.95)
         safe_cash = available_cash * 0.90 
@@ -460,7 +467,7 @@ class RealPortfolio:
         except Exception as e:
             self.logger.error(f"⚠️ sizing_cap_log.csv 기록 실패: {e}")
 
-    def calculate_qty(self, price, ticker=None):
+    def calculate_qty(self, price, ticker=None, strategy=None, capital_frac=None):
         """
         [주문 수량 계산 & $2,000 Hard Cap 적용 추적]
         현재 가용 자금과 목표 투자 비중을 고려하여 주문할 수량을 계산합니다.
@@ -470,13 +477,21 @@ class RealPortfolio:
             return 0
             
         # 1. 캡 미적용 시 원본 목표 금액 및 수량
-        uncapped_target = self.total_equity / max(1, self.MAX_SLOTS)
-        safe_cash = self.balance * 0.90
+        if capital_frac is not None:
+            uncapped_target = self.total_equity * float(capital_frac)
+        elif strategy == 'ALPHA':
+            rem_slots = max(0, self.MAX_SLOTS - len(self.positions))
+            slot_ratio = 1.0 if len(self.positions) == 0 else (rem_slots / self.MAX_SLOTS)
+            uncapped_target = self.total_equity * slot_ratio
+        else:
+            uncapped_target = self.total_equity / max(1, self.MAX_SLOTS)
+
+        safe_cash = self.get_effective_balance() * 0.90
         uncapped_order_amt = min(uncapped_target, safe_cash)
         uncapped_qty = int(uncapped_order_amt / price) if uncapped_order_amt >= 20 else 0
 
         # 2. 캡 적용 금액 및 최종 수량
-        final_amount = self.get_max_order_amount()
+        final_amount = self.get_max_order_amount(capital_frac=capital_frac, strategy=strategy)
         if final_amount < 20:
             return 0
 
@@ -552,10 +567,15 @@ class RealPortfolio:
                 'pnl_pct': 0.0,
                 'highest_price': price, 
                 'entry_time': now_et,        # 진입 시간 기록
-                'strategy_name': strat_name  # 전략 식별 메타데이터 태깅
+                'strategy': strat_name,      # 전략 식별 키 ('EMA' vs 'ALPHA')
+                'strategy_name': strat_name,  # 전략 식별 메타데이터 태깅
+                'alpha_id': fill.get('alpha_id', ''),
+                'time_cut_minutes': fill.get('time_cut_minutes', fill.get('max_hold_min', getattr(Config, 'ALPHA_TIME_CUT_MINUTES', 45) if strat_name == 'ALPHA' else 0)),
+                'tp_pct': fill.get('tp_pct', getattr(Config, 'ALPHA_TP_PCT', 0.035) if strat_name == 'ALPHA' else getattr(Config, 'TARGET_PROFIT_PCT', 0.07)),
+                'sl_pct': fill.get('sl_pct', getattr(Config, 'ALPHA_SL_PCT', -0.10) if strat_name == 'ALPHA' else -0.10)
             }
             
-            self.logger.info(f"✅ [Local Update] BUY {ticker} ({qty}주 @ ${price}) | Balance: ${self.balance:.2f}")
+            self.logger.info(f"✅ [Local Update] BUY {ticker} ({qty}주 @ ${price}) [{strat_name}] | Balance: ${self.balance:.2f}")
             
         elif fill['type'] == 'SELL':
             # [수정 3] 수수료(0.2% 가정)를 뗀 금액만 예수금에 반영하여 '자금 부족' 방지
@@ -584,6 +604,23 @@ class RealPortfolio:
                 # (선택) 로그가 너무 많으면 주석 처리 가능
                 # self.logger.info(f"📈 [{ticker}] 고가 갱신: ${old_high} -> ${current_price}")
     
+    def get_effective_balance(self) -> float:
+        """
+        [체결기준 유효 가용 현금 (Trade-Date Settled Buying Power)]
+        - 실전 모드(REAL)에서 매도 체결 직후 증권사(KIS) 원장에 매도 대금이 
+          아직 입금 반영되지 않은 경우(_sale_in_progress=True),
+          체결 완료된 순매도대금(_pending_sale_proceeds)을 합산하여 정확한 가용 현금을 반환합니다.
+        - 증권사 원장에 정상 반영되어 _sale_in_progress가 해제되면 self.balance를 반환합니다.
+        - 가상/페이퍼 모드(PAPER)에서는 self.balance를 그대로 반환합니다.
+        """
+        if self.is_paper:
+            return float(self.balance)
+            
+        if getattr(self, '_sale_in_progress', False) and getattr(self, '_pending_sale_proceeds', 0.0) > 0:
+            return float(self.balance + self._pending_sale_proceeds)
+            
+        return float(self.balance)
+
     def _maybe_latch_initial_seed(self):
         """
         [작업 2-2 래치 조건 강화]
@@ -639,6 +676,13 @@ class RealPortfolio:
                     self.is_balance_unconfirmed = False
                     self._sale_in_progress = False
                     self._pending_sale_proceeds = 0.0
+
+            # 체결기준 총자산 최신화
+            current_stock_val = sum(
+                p['qty'] * p.get('current_price', p.get('entry_price', 0.0))
+                for p in self.positions.values()
+            )
+            self.total_equity = self.get_effective_balance() + current_stock_val
         except Exception as e:
             self.logger.error(f"❌ 잔고 동기화 실패: {e}")
     

@@ -52,9 +52,9 @@ class AlphaLiveAdapter:
         self.a01_early_paths = ("C", "D")
         self.a01_late_paths = ("A", "C", "D")
         self.a02_or_window_bars = 10
-        self.a02_max_range_pct = 4.00
-        self.tp_pct = 0.035
-        self.sl_pct = -0.10
+        self.tp_pct = getattr(Config, 'ALPHA_TP_PCT', 0.035)
+        self.sl_pct = getattr(Config, 'ALPHA_SL_PCT', -0.10)
+        self.max_hold_min = getattr(Config, 'ALPHA_TIME_CUT_MINUTES', 45)
         
         self.or10_cache = {}  # {ticker: {'or_high': float, 'or_low': float, 'range_pct': float, 'date': str}}
         self.triggered_today = set()

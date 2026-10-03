@@ -143,7 +143,9 @@ class RealOrderManager:
         # ============================================================
         # 3. 수량 계산
         # ============================================================
-        qty = portfolio.calculate_qty(price, ticker=ticker)
+        strat_name = signal.get('strategy_name', signal.get('strategy', 'EMA'))
+        cap_frac = signal.get('capital_frac')
+        qty = portfolio.calculate_qty(price, ticker=ticker, strategy=strat_name, capital_frac=cap_frac)
         if qty <= 0:
             return {'status': 'failed', 'msg': f"❌ 잔고 부족 또는 수량 계산 실패 ({ticker})"}
 
@@ -177,15 +179,18 @@ class RealOrderManager:
             entry_guess = output_dict.get('fill_price', price)
             odno = output_dict.get('ODNO', 'Unknown')
 
-            strat_name = signal.get('strategy_name', signal.get('strategy', 'EMA'))
-
             try:
                 portfolio.update_position({
                     'ticker': ticker,
                     'qty': qty,
                     'price': entry_guess,
                     'entry_price': entry_guess,
+                    'strategy': strat_name,
                     'strategy_name': strat_name,
+                    'alpha_id': signal.get('alpha_id', ''),
+                    'time_cut_minutes': signal.get('time_cut_minutes', signal.get('max_hold_min', getattr(Config, 'ALPHA_TIME_CUT_MINUTES', 45) if strat_name == 'ALPHA' else 0)),
+                    'tp_pct': signal.get('tp_pct', getattr(Config, 'ALPHA_TP_PCT', 0.035) if strat_name == 'ALPHA' else getattr(Config, 'TARGET_PROFIT_PCT', 0.07)),
+                    'sl_pct': signal.get('sl_pct', getattr(Config, 'ALPHA_SL_PCT', -0.10) if strat_name == 'ALPHA' else -0.10),
                     'type': 'BUY',
                     'time': datetime.datetime.now()
                 })
@@ -285,6 +290,65 @@ class RealOrderManager:
         except Exception as e:
             self.logger.error(f"⚠️ 손절 체결 추적 로그 기록 실패: {e}")
 
+    def check_alpha_exit(self, position: dict, current_price: float, now_time: datetime.datetime = None):
+        """
+        [알파 전략 전용 실시간 청산 감시 엔진] (지시 9)
+        1. 익절: +3.5% 도달 시 매도 집행 (TARGET_PROFIT_0.035)
+        2. 손절: -10.0% 이탈 시 시장가 손절 집행 (STOP_LOSS_0.10)
+        3. 타임컷: 진입 시각으로부터 45분 경과 시 시장가 청산 집행 (TIME_CUT_45M)
+        """
+        if current_price <= 0:
+            return None
+        entry_price = position.get('entry_price', 0.0)
+        if entry_price <= 0:
+            return None
+
+        pnl_pct = round((current_price - entry_price) / entry_price, 6)
+        tp_target = position.get('tp_pct', getattr(Config, 'ALPHA_TP_PCT', 0.035))
+        sl_target = position.get('sl_pct', getattr(Config, 'ALPHA_SL_PCT', -0.10))
+
+        # (1) 익절 +3.5%
+        if pnl_pct >= tp_target:
+            return {
+                'type': 'SELL',
+                'reason': 'TARGET_PROFIT_0.035',
+                'price': current_price,
+                'pnl_pct': pnl_pct
+            }
+
+        # (2) 손절 -10.0%
+        if pnl_pct <= sl_target:
+            return {
+                'type': 'SELL',
+                'reason': 'STOP_LOSS_0.10',
+                'price': current_price,
+                'pnl_pct': pnl_pct
+            }
+
+        # (3) 타임컷 45분
+        entry_time = position.get('entry_time')
+        if entry_time:
+            if now_time is None:
+                now_time = datetime.datetime.now(pytz.timezone('US/Eastern'))
+
+            if hasattr(now_time, 'tzinfo') and now_time.tzinfo is not None and hasattr(entry_time, 'tzinfo') and entry_time.tzinfo is None:
+                entry_time = pytz.timezone('US/Eastern').localize(entry_time)
+            elif hasattr(entry_time, 'tzinfo') and entry_time.tzinfo is not None and hasattr(now_time, 'tzinfo') and now_time.tzinfo is None:
+                now_time = pytz.timezone('US/Eastern').localize(now_time)
+
+            elapsed_minutes = (now_time - entry_time).total_seconds() / 60.0
+            time_cut_minutes = float(position.get('time_cut_minutes', position.get('max_hold_min', getattr(Config, 'ALPHA_TIME_CUT_MINUTES', 45))))
+            if elapsed_minutes >= time_cut_minutes:
+                time_cut_int = int(round(time_cut_minutes))
+                return {
+                    'type': 'SELL',
+                    'reason': f'TIME_CUT_{time_cut_int}M',
+                    'price': current_price,
+                    'elapsed_minutes': elapsed_minutes
+                }
+
+        return None
+
     def execute_sell(self, portfolio, ticker, reason, price=0):
         """
         [핵심 수정] 스마트 매도 집행 (Cancel-Then-Sell + 2단계 동적 지정가 손절)
@@ -326,7 +390,7 @@ class RealOrderManager:
             order_price = price
 
             # [조건별 주문 유형 설정]
-            if reason == "TAKE_PROFIT":
+            if reason in ["TAKE_PROFIT", "TARGET_PROFIT_0.035"]:
                 order_type = "00"
                 self.logger.info(f"💰 [{reason}] 매도 시도: {ticker} (가격: {order_price}, 수량: {qty})")
                 resp = self.kis.send_order(
@@ -541,7 +605,14 @@ class RealOrderManager:
             return_pct = output_dict.get('return_pct', ((order_price - entry_price) / entry_price * 100.0 if entry_price > 0 else 0.0))
             
             if self.is_paper:
-                # 🛡️ 페이퍼 모드: 매도 대금 및 실현 손익 가상 잔고에 반영
+                # 🛡️ 페이퍼 모드: 손익 누적 및 매도 대금 가상 잔고에 반영
+                portfolio.register_realized_sale(
+                    ticker=ticker,
+                    qty=qty,
+                    sell_price=order_price,
+                    entry_price=entry_price,
+                    reason=reason
+                )
                 portfolio.update_position({
                     'ticker': ticker,
                     'qty': qty,
@@ -575,12 +646,17 @@ class RealOrderManager:
             from infra.utils import format_est_seed
             est_seed_str = format_est_seed(init_seed, cum_pnl)
 
+            effective_cash = portfolio.get_effective_balance() if hasattr(portfolio, 'get_effective_balance') else portfolio.balance
+            order_limit = portfolio.get_max_order_amount()
+            unconfirmed_tag = " (원장 반영 대기중)" if getattr(portfolio, 'is_balance_unconfirmed', False) else ""
+
             msg = (
                 f"🎉 [매도/청산 체결 완료]\n"
                 f"🕹️ 모드: {mode_str}\n"
                 f"🎯 전략: {strat_label}\n"
                 f"📦 종목: {ticker}\n"
                 f"💵 실현손익: ${realized_pnl:+,.2f} ({return_pct:+.2f}%)\n"
+                f"💰 매매 가능 시드: ${effective_cash:,.2f}{unconfirmed_tag} (1회 한도: ${order_limit:,.2f})\n"
                 f"📊 당일 누적 손익: ${cum_pnl:+,.2f} | 🏦 추정 총시드: {est_seed_str}\n"
                 f"📌 사유: {reason}"
             )
