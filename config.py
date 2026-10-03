@@ -135,6 +135,14 @@ class Config(metaclass=ConfigMeta):
     MAX_SLOTS = 2
     MAX_SINGLE_ORDER_AMOUNT = 2000.0  # 1회 주문 최대 한도 Hard Cap ($2,000)
 
+    # ------------------------------------------
+    # ⚡ [알파 전략 실계좌 주문 연동 설정] (지시 9)
+    # ------------------------------------------
+    ALPHA_TRADING_MODE = os.getenv("ALPHA_TRADING_MODE", "LIVE").strip()  # "PAPER"(가상/로그만) | "LIVE"(실계좌 주문)
+    ALPHA_TP_PCT = float(os.getenv("ALPHA_TP_PCT", 0.035))                 # 익절 +3.5%
+    ALPHA_SL_PCT = float(os.getenv("ALPHA_SL_PCT", -0.10))                 # 손절 -10.0%
+    ALPHA_TIME_CUT_MINUTES = int(os.getenv("ALPHA_TIME_CUT_MINUTES", 45))  # 타임컷 45분
+
     # ==========================================
     # 🏦 [계좌 및 인증]
     # ==========================================

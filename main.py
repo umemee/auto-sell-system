@@ -79,10 +79,16 @@ def save_state(ban_list, active_candidates, loss_blacklist=None, daily_realized_
         if portfolio is not None and hasattr(portfolio, 'positions'):
             for t_sym, p_data in portfolio.positions.items():
                 positions_meta[t_sym] = {
+                    'strategy': p_data.get('strategy', p_data.get('strategy_name', 'EMA')),
                     'strategy_name': p_data.get('strategy_name', p_data.get('strategy', 'EMA')),
+                    'alpha_id': p_data.get('alpha_id', ''),
                     'entry_price': p_data.get('entry_price', 0.0),
                     'qty': p_data.get('qty', 0),
-                    'target_price': p_data.get('target_price', 0.0)
+                    'target_price': p_data.get('target_price', 0.0),
+                    'entry_time': str(p_data.get('entry_time', '')),
+                    'time_cut_minutes': p_data.get('time_cut_minutes', p_data.get('max_hold_min', 45)),
+                    'tp_pct': p_data.get('tp_pct', 0.035),
+                    'sl_pct': p_data.get('sl_pct', -0.10)
                 }
 
         trade_date = get_trade_date_key()
@@ -210,7 +216,7 @@ def send_heartbeat_report(bot, portfolio, risk_filter, active_candidates, tz_kst
     """
     try:
         portfolio.sync_balance()
-        buyable_cash = portfolio.balance
+        buyable_cash = portfolio.get_effective_balance() if hasattr(portfolio, 'get_effective_balance') else portfolio.balance
         order_limit = portfolio.get_max_order_amount()
         total_eq = portfolio.total_equity
         pos_cnt = len(portfolio.positions)
@@ -230,7 +236,7 @@ def send_heartbeat_report(bot, portfolio, risk_filter, active_candidates, tz_kst
         cum_pnl = getattr(portfolio, 'daily_realized_pnl', 0.0)
         est_seed_str = format_est_seed(init_seed, cum_pnl)
 
-        unconfirmed_tag = " ⚠️잔고 미확정" if getattr(portfolio, 'is_balance_unconfirmed', False) else ""
+        unconfirmed_tag = " (원장 반영 대기중)" if getattr(portfolio, 'is_balance_unconfirmed', False) else ""
         msg = (
             f"💓 [하트비트 - {trigger_reason}] KR {cur_k} / NY {cur_n}\n"
             f"💵 매매 가능 시드: ${buyable_cash:,.2f}{unconfirmed_tag} (1회 주문한도: ${order_limit:,.2f})\n"
@@ -311,6 +317,15 @@ def main():
         portfolio = RealPortfolio(kis)
         order_manager = RealOrderManager(kis)
         strategy = get_strategy() 
+        
+        # 🎯 [지시 9] Alpha 실시간 전략 어댑터 인스턴스화
+        alpha_strategy = None
+        try:
+            from infra.virtual_combined_engine import AlphaLiveAdapter
+            alpha_strategy = AlphaLiveAdapter()
+            logger.info("🎯 [AlphaLiveAdapter] 알파 실시간 전략 어댑터 로드 완료")
+        except Exception as ae:
+            logger.error(f"⚠️ [AlphaLiveAdapter Init Error] 알파 어댑터 로드 실패: {ae}")
 
         # 🧪 [VIRTUAL PAPER TRACK] 결합 전략 가상 페이퍼 엔진 인스턴스화
         virtual_combined_engine = None
@@ -351,12 +366,30 @@ def main():
             portfolio.unsettled_sell_amount = loaded_unsettled
             portfolio.initial_seed_today = loaded_seed
 
-        # 복구된 포지션 메타데이터(전략명, 목표가) 복원
+        # 복구된 포지션 메타데이터(전략명, 목표가, 알파 청산 정보) 복원
         for t_sym, p_meta in loaded_positions_meta.items():
             if t_sym in portfolio.positions:
-                portfolio.positions[t_sym]['strategy_name'] = p_meta.get('strategy_name', 'EMA')
+                strat_saved = p_meta.get('strategy', p_meta.get('strategy_name', 'EMA'))
+                portfolio.positions[t_sym]['strategy'] = strat_saved
+                portfolio.positions[t_sym]['strategy_name'] = p_meta.get('strategy_name', strat_saved)
+                if 'alpha_id' in p_meta:
+                    portfolio.positions[t_sym]['alpha_id'] = p_meta['alpha_id']
                 if 'target_price' in p_meta and p_meta['target_price'] > 0:
                     portfolio.positions[t_sym]['target_price'] = p_meta['target_price']
+                if 'time_cut_minutes' in p_meta:
+                    portfolio.positions[t_sym]['time_cut_minutes'] = p_meta['time_cut_minutes']
+                if 'tp_pct' in p_meta:
+                    portfolio.positions[t_sym]['tp_pct'] = p_meta['tp_pct']
+                if 'sl_pct' in p_meta:
+                    portfolio.positions[t_sym]['sl_pct'] = p_meta['sl_pct']
+                if 'entry_time' in p_meta and p_meta['entry_time']:
+                    try:
+                        entry_t_str = str(p_meta['entry_time'])
+                        if len(entry_t_str) > 5:
+                            from dateutil.parser import parse as parse_date
+                            portfolio.positions[t_sym]['entry_time'] = parse_date(entry_t_str)
+                    except Exception:
+                        pass
 
         # 2차 복구: 당일 trade.log 기반 복구 (현재 거래일 키 명시)
         current_trade_date = get_trade_date_key(now_kst_start)
@@ -489,15 +522,24 @@ def main():
                     
                     if real_time_price and real_time_price > 0:
                         pos = portfolio.positions[ticker]
-                        exit_signal = strategy.check_exit(
-                            ticker=ticker, position=pos, 
-                            current_price=real_time_price, now_time=now
-                        )
+                        strat_type = pos.get('strategy', pos.get('strategy_name', 'EMA'))
+                        is_alpha_pos = (strat_type == 'ALPHA')
+
+                        if is_alpha_pos:
+                            exit_signal = order_manager.check_alpha_exit(
+                                position=pos, current_price=real_time_price, now_time=now
+                            )
+                        else:
+                            exit_signal = strategy.check_exit(
+                                ticker=ticker, position=pos, 
+                                current_price=real_time_price, now_time=now
+                            )
                         
                         if exit_signal:
                             reason = exit_signal['reason']
-                            # 페이퍼 모드이거나 실전 비상 매도(손절/타임컷)일 때 매도 집행
-                            if is_paper_mode or reason != 'TAKE_PROFIT':
+                            # 페이퍼 모드이거나 실전 비상 매도(손절/타임컷 등)일 때 매도 집행
+                            # (익절 주문은 EMA/Alpha 공히 매수 직후 브로커에 지정가 사전 예약되므로, 실전에서는 손절/타임컷 시 취소 후 비상 매도 집행)
+                            if is_paper_mode or (reason != 'TAKE_PROFIT' and reason != 'TARGET_PROFIT_0.035'):
                                 entry_p = pos.get('entry_price', real_time_price)
                                 trade_pnl = (real_time_price - entry_p) / entry_p if entry_p > 0 else -0.01
 
@@ -620,6 +662,8 @@ def main():
                 logger.info(f"📅 [New Trading Day] 거래일 변경 감지: {current_date_str} -> {new_date_str}")
                 portfolio.daily_reset()    # 👈 [추가] 일일 실현손익 및 미결제대금 리셋
                 strategy.daily_reset()     # 👈 [추가] 일별 세션 상태(banned_tickers 등) 초기화
+                if alpha_strategy:
+                    alpha_strategy.daily_reset() # 👈 [지시 9] 알파 전략 일별 세션 상태 초기화
                 risk_filter.reset_daily()  # 👈 [추가] 일일 리스크 필터 리셋
                 if virtual_combined_engine:
                     virtual_combined_engine.daily_reset()
@@ -649,10 +693,14 @@ def main():
                 qty = pos_info.get('qty', 0)
                 entry_p = pos_info.get('entry_price', 0.0)
                 
-                target_profit_pct = getattr(Config, 'TARGET_PROFIT_PCT', 0.07)
+                strat_name = pos_info.get('strategy_name', pos_info.get('strategy', 'EMA'))
+                is_alpha_sold = (strat_name == 'ALPHA')
+                default_tp_pct = getattr(Config, 'ALPHA_TP_PCT', 0.035) if is_alpha_sold else getattr(Config, 'TARGET_PROFIT_PCT', 0.07)
                 sell_p = pos_info.get('target_price', 0.0)
                 if sell_p <= 0:
-                    sell_p = round_price(entry_p * (1.0 + target_profit_pct)) if entry_p > 0 else 0.0
+                    sell_p = round_price(entry_p * (1.0 + default_tp_pct)) if entry_p > 0 else 0.0
+                
+                exit_reason = 'TARGET_PROFIT_0.035' if is_alpha_sold else 'TAKE_PROFIT'
                 
                 if qty > 0 and entry_p > 0 and sell_p > 0:
                     record = portfolio.register_realized_sale(
@@ -660,7 +708,7 @@ def main():
                         qty=qty,
                         sell_price=sell_p,
                         entry_price=entry_p,
-                        reason='TAKE_PROFIT'
+                        reason=exit_reason
                     )
                     pnl = record.get('pnl', 0.0)
                     ret_pct = record.get('return_pct', 0.0)
@@ -672,8 +720,14 @@ def main():
                     else:
                         mode_str = "PAPER"
 
-                    strat_name = pos_info.get('strategy_name', pos_info.get('strategy', 'EMA'))
                     strat_label = f"{strat_name} 전략"
+
+                    init_seed = getattr(portfolio, 'initial_seed_today', 0.0)
+                    cum_pnl = getattr(portfolio, 'daily_realized_pnl', 0.0)
+                    est_seed_str = format_est_seed(init_seed, cum_pnl)
+                    effective_cash = portfolio.get_effective_balance() if hasattr(portfolio, 'get_effective_balance') else portfolio.balance
+                    order_limit = portfolio.get_max_order_amount()
+                    unconfirmed_tag = " (원장 반영 대기중)" if getattr(portfolio, 'is_balance_unconfirmed', False) else ""
 
                     msg = (
                         f"🎉 [매도/청산 체결 완료]\n"
@@ -681,18 +735,28 @@ def main():
                         f"🎯 전략: {strat_label}\n"
                         f"📦 종목: {ticker}\n"
                         f"💵 실현손익: ${pnl:+,.2f} ({ret_pct:+.2f}%)\n"
-                        f"📌 사유: TAKE_PROFIT"
+                        f"💰 매매 가능 시드: ${effective_cash:,.2f}{unconfirmed_tag} (1회 한도: ${order_limit:,.2f})\n"
+                        f"📊 당일 누적 손익: ${cum_pnl:+,.2f} | 🏦 추정 총시드: {est_seed_str}\n"
+                        f"📌 사유: {exit_reason}"
                     )
                 else:
                     logger.info(f"🎉 [익절 감지] {ticker} 목표가 도달 확인!")
                     env_mode = getattr(Config, 'EXECUTION_ENVIRONMENT', '')
                     mode_str = "REAL" if env_mode == 'LIVE_TRADING' else ("SHADOW" if env_mode == 'DUAL_SHADOW' else "PAPER")
                     strat_name = pos_info.get('strategy_name', 'EMA')
+                    init_seed = getattr(portfolio, 'initial_seed_today', 0.0)
+                    cum_pnl = getattr(portfolio, 'daily_realized_pnl', 0.0)
+                    est_seed_str = format_est_seed(init_seed, cum_pnl)
+                    effective_cash = portfolio.get_effective_balance() if hasattr(portfolio, 'get_effective_balance') else portfolio.balance
+                    order_limit = portfolio.get_max_order_amount()
+                    unconfirmed_tag = " (원장 반영 대기중)" if getattr(portfolio, 'is_balance_unconfirmed', False) else ""
                     msg = (
                         f"🎉 [매도/청산 체결 완료]\n"
                         f"🕹️ 모드: {mode_str}\n"
                         f"🎯 전략: {strat_name} 전략\n"
                         f"📦 종목: {ticker}\n"
+                        f"💰 매매 가능 시드: ${effective_cash:,.2f}{unconfirmed_tag} (1회 한도: ${order_limit:,.2f})\n"
+                        f"📊 당일 누적 손익: ${cum_pnl:+,.2f} | 🏦 추정 총시드: {est_seed_str}\n"
                         f"📌 사유: TAKE_PROFIT"
                     )
                 
@@ -736,12 +800,146 @@ def main():
             targets_to_check = buy_candidates[:15]
             listener.current_watchlist = targets_to_check 
 
+            def _execute_buy_flow(sym, sig, sel_exch):
+                if not portfolio.has_open_slot():
+                    logger.warning(f"🚌 [Missed Bus] {sym} ({sig.get('strategy', 'EMA')}) 진입 신호 왔으나 자리 없음 -> 영구 제외")
+                    portfolio.ban_list.add(sym)      
+                    if sym in active_candidates:
+                        del active_candidates[sym]
+                    candle_cache.pop(sym, None)
+                    save_state(portfolio.ban_list, active_candidates, risk_filter.loss_blacklist, portfolio=portfolio)
+                    return False
+                
+                sig_price = float(sig['price'])
+                ask, bid, ask_vol, bid_vol = kis.get_market_spread(sym, exchange=sel_exch or "NAS")
+                if ask > 0 and bid > 0:
+                    spread = (ask - bid) / ask * 100.0
+                    if spread > 3.0:
+                        logger.warning(f"⚠️ [Spread Guard] {sym}: 스프레드 과다 ({spread:.2f}% > 3.0%) 로 매수 보류")
+                        return False
+
+                    buy_buffer = float(getattr(Config, 'BUY_SLIPPAGE_BUFFER', 0.005))
+                    max_allowed_price = sig_price * (1.0 + buy_buffer)
+                    if ask > max_allowed_price:
+                        logger.warning(
+                            f"⚠️ [Pre-Order Price Guard] {sym}: "
+                            f"Ask ${ask:.4f} > 허용상한 ${max_allowed_price:.4f} (시그널 ${sig_price:.4f} +{buy_buffer*100:.1f}%) -> 매수 차단"
+                        )
+                        return False
+
+                entry_price = ask if ask > 0 else sig_price
+                sig['price'] = entry_price
+                sig['ticker'] = sym
+
+                is_blocked, block_reason = risk_filter.is_order_blocked(
+                    ticker=sym, price=entry_price, current_time_et=now
+                )
+                if is_blocked:
+                    logger.warning(f"🛑 [Risk Filter Blocked] {sym}: {block_reason}")
+                    return False
+
+                is_alpha_sig = (sig.get('strategy') == 'ALPHA' or sig.get('strategy_name') == 'ALPHA')
+                alpha_mode = getattr(Config, 'ALPHA_TRADING_MODE', 'PAPER').upper()
+
+                if is_alpha_sig and alpha_mode == 'PAPER':
+                    time_cut = sig.get('time_cut_minutes', sig.get('max_hold_min', getattr(Config, 'ALPHA_TIME_CUT_MINUTES', 45)))
+                    alpha_lbl = sig.get('alpha_id', 'ALPHA')
+                    logger.info(
+                        f"🧪 [ALPHA PAPER] 알파 진입 신호 포착 (ALPHA_TRADING_MODE=PAPER, 실주문 미전송): "
+                        f"{sym} ({alpha_lbl}) @ ${entry_price:.4f}"
+                    )
+                    bot.send_message(
+                        f"🧪 [ALPHA 진입 신호 - PAPER 모드]\n"
+                        f"📦 종목: {sym}\n"
+                        f"🎯 세부전략: {alpha_lbl}\n"
+                        f"💵 진입가: ${entry_price:.4f}\n"
+                        f"⏱️ 타임컷: {time_cut}분\n"
+                        f"ℹ️ 안내: ALPHA_TRADING_MODE=PAPER 설정에 따라 실주문을 전송하지 않고 가상 기록합니다."
+                    )
+                    candle_cache.pop(sym, None)
+                    return False
+
+                if portfolio.has_open_slot():
+                    res = order_manager.execute_buy(portfolio, sig)
+                    if res:
+                        if res.get('msg'):
+                            bot.send_message(res['msg'])
+                        if res['status'] == 'success':
+                            candle_cache.pop(sym, None)
+                            save_state(portfolio.ban_list, active_candidates, risk_filter.loss_blacklist, portfolio=portfolio)
+                            time.sleep(1.5)
+                            portfolio.sync_with_kis()
+
+                            try:
+                                actual_pos = portfolio.get_position(sym)
+                                if actual_pos and actual_pos.get('entry_price', 0) > 0:
+                                    buy_p = actual_pos['entry_price']
+                                else:
+                                    buy_p = res.get('avg_price', sig['price'])
+
+                                if buy_p > 0:
+                                    qty = res.get('qty', 0)
+                                    is_pure_paper = getattr(Config, 'IS_PURE_PAPER', is_paper_mode)
+                                    if not is_alpha_sig:
+                                        # EMA: +7% 지정가 사전 주문 전송
+                                        tp_pct = getattr(Config, 'TARGET_PROFIT_PCT', 0.07)
+                                        tgt_p = round_price(buy_p * (1.0 + tp_pct))
+                                        if sym in portfolio.positions:
+                                            portfolio.positions[sym]['target_price'] = tgt_p
+                                            if 'strategy_name' not in portfolio.positions[sym]:
+                                                portfolio.positions[sym]['strategy_name'] = sig.get('strategy_name', 'EMA')
+                                        if qty > 0:
+                                            if is_pure_paper:
+                                                logger.info(f"🔒 [PAPER Pre-Order] [EMA] {sym} 가상 익절 목표가(${tgt_p}) 감시 등록 완료 (평단가: ${buy_p:.3f})")
+                                                bot.send_message(f"🔒 [가상 익절 잠금/PAPER] [EMA] {sym} 익절 감시 등록 (평단가: ${buy_p:.3f} -> 목표가: ${tgt_p:.2f})")
+                                            else:
+                                                assert not is_pure_paper, "CRITICAL GUARD: Pure paper mode must NEVER call send_order"
+                                                logger.info(f"⚡ [REAL Pre-Order] [EMA] {sym} 실제 평단가(${buy_p:.3f}) 기반 익절 주문 전송: ${tgt_p:.2f}")
+                                                kis.send_order(sym, "SELL", qty, tgt_p, "00", exchange=sel_exch or "NAS")
+                                                bot.send_message(f"🔒 [실전 익절 잠금/REAL] [EMA] {sym} 익절 주문 전송 완료 (평단가: ${buy_p:.3f} -> 목표가: ${tgt_p:.2f})")
+                                    else:
+                                        # ALPHA: +3.5% 지정가 사전 주문 전송 및 동적 타임컷 등록
+                                        alpha_tp = getattr(Config, 'ALPHA_TP_PCT', 0.035)
+                                        tgt_p = round_price(buy_p * (1.0 + alpha_tp))
+                                        time_cut = sig.get('time_cut_minutes', sig.get('max_hold_min', getattr(Config, 'ALPHA_TIME_CUT_MINUTES', 45)))
+                                        alpha_lbl = sig.get('alpha_id', 'ALPHA')
+                                        if sym in portfolio.positions:
+                                            portfolio.positions[sym]['target_price'] = tgt_p
+                                            portfolio.positions[sym]['strategy'] = 'ALPHA'
+                                            portfolio.positions[sym]['strategy_name'] = 'ALPHA'
+                                            portfolio.positions[sym]['alpha_id'] = alpha_lbl
+                                            portfolio.positions[sym]['entry_time'] = now
+                                            portfolio.positions[sym]['time_cut_minutes'] = time_cut
+                                            portfolio.positions[sym]['tp_pct'] = alpha_tp
+                                            portfolio.positions[sym]['sl_pct'] = getattr(Config, 'ALPHA_SL_PCT', -0.10)
+                                        if qty > 0:
+                                            if is_pure_paper:
+                                                logger.info(f"🔒 [PAPER Pre-Order] [ALPHA] {sym} 가상 익절 목표가(${tgt_p:.4f}) 감시 등록 완료 (평단가: ${buy_p:.3f}, 타임컷: {time_cut}분)")
+                                                bot.send_message(f"🔒 [가상 익절 잠금/PAPER] [{alpha_lbl}] {sym} 익절 감시 등록 (평단가: ${buy_p:.3f} -> 목표가: ${tgt_p:.2f} [+3.5%] | 타임컷: {time_cut}분)")
+                                            else:
+                                                assert not is_pure_paper, "CRITICAL GUARD: Pure paper mode must NEVER call send_order"
+                                                logger.info(f"⚡ [REAL Pre-Order] [ALPHA] {sym} 실제 평단가(${buy_p:.3f}) 기반 익절 주문 전송: ${tgt_p:.2f} (사전 예약)")
+                                                kis.send_order(sym, "SELL", qty, tgt_p, "00", exchange=sel_exch or "NAS")
+                                                bot.send_message(f"🔒 [실전 익절 잠금/REAL] [{alpha_lbl}] {sym} 익절 주문 전송 완료 (평단가: ${buy_p:.3f} -> 목표가: ${tgt_p:.2f} [+3.5%] | 타임컷: {time_cut}분)")
+                            except Exception as pe_err:
+                                logger.error(f"❌ 익절 사전 주문 처리 중 에러: {pe_err}")
+                            return True
+                        else:
+                            logger.warning(f"🚌 [실패] {sym} 매수 실패. 금일 제외.")
+                            portfolio.ban_list.add(sym)
+                            candle_cache.pop(sym, None)
+                            save_state(portfolio.ban_list, active_candidates, risk_filter.loss_blacklist, portfolio=portfolio)
+                            return False
+                return False
+
+            # ---------------------------------------------------------
+            # 1단계: 캔들 데이터 동기화 및 캐시 준비 (전 종목 일괄 수집)
+            # ---------------------------------------------------------
+            target_dfs = {}
             for sym in targets_to_check:
                 try:
-                    import pandas as pd
                     df = None
                     selected_exchange = None
-                    
                     if sym not in candle_cache:
                         for exch in ["NAS", "NYS", "AMS"]:
                             temp_df = kis.get_minute_candles(exch, sym, limit=1200)
@@ -755,7 +953,6 @@ def main():
                         old_df = cached_data['df']
                         exch = cached_data['exch']
                         selected_exchange = exch
-                        
                         new_df = kis.get_minute_candles(exch, sym, limit=120)
                         if not new_df.empty:
                             combined_df = merge_candle_dfs(old_df, new_df)
@@ -770,177 +967,77 @@ def main():
                         continue
 
                     candle_exporter.update_runtime_candles(sym, df, exchange=selected_exchange)
+                    target_dfs[sym] = (df, selected_exchange)
+                except Exception as c_err:
+                    logger.error(f"⚠️ 캔들 수집 오류 ({sym}): {c_err}")
 
-                    # =========================================================
-                    # 🧠 [Strategy] 전략 엔진 신호 확인 (EMA 활성화 시간대에만 집행)
-                    # =========================================================
-                    signal = None
-                    if is_ema_active:
-                        signal = strategy.check_entry(sym, df, now_time=now)
-
-                        # ⏳ [New-Bar Micro-Retry] 새 캔들 미도착 시 최대 2회 미세 재시도
+            # ---------------------------------------------------------
+            # 2단계: [EMA 우선 패스] 전략1(EMA) 신호 우선 평가 및 슬롯 선점 (SharedCapitalManager 규칙 1:1 일치)
+            # ---------------------------------------------------------
+            if is_ema_active and portfolio.has_open_slot():
+                for sym, (df, selected_exchange) in list(target_dfs.items()):
+                    if not portfolio.has_open_slot():
+                        break
+                    if portfolio.is_holding(sym) or portfolio.is_banned(sym):
+                        continue
+                    try:
+                        sig = strategy.check_entry(sym, df, now_time=now)
                         max_retries = 2
                         retry_count = 0
-                        while signal and isinstance(signal, dict) and signal.get('type') == 'WAIT_NEW_BAR' and retry_count < max_retries:
-                            expected = signal.get('expected')
-                            latest = signal.get('latest')
-                            logger.info(f"⏳ [New-Bar Wait] {sym}: 새 캔들({expected}) 미도착 (현재: {latest}) -> 1.0초 후 재조회")
+                        while sig and isinstance(sig, dict) and sig.get('type') == 'WAIT_NEW_BAR' and retry_count < max_retries:
                             time.sleep(1.0)
                             retry_count += 1
-
-                            exch = selected_exchange or (candle_cache.get(sym, {}).get('exch') if sym in candle_cache else "NAS")
+                            exch = selected_exchange or "NAS"
                             retry_df = kis.get_minute_candles(exch, sym, limit=120)
                             if not retry_df.empty:
                                 base_df = candle_cache[sym]['df'] if sym in candle_cache else df
-                                combined_df = merge_candle_dfs(base_df, retry_df)
-                                candle_cache[sym] = {'df': combined_df, 'exch': exch}
-                                df = combined_df
+                                df = merge_candle_dfs(base_df, retry_df)
+                                candle_cache[sym] = {'df': df, 'exch': exch}
+                                target_dfs[sym] = (df, exch)
                                 candle_exporter.update_runtime_candles(sym, df, exchange=exch)
+                            sig = strategy.check_entry(sym, df, now_time=datetime.datetime.now(pytz.timezone('America/New_York')))
 
-                            retry_now = datetime.datetime.now(pytz.timezone('America/New_York'))
-                            signal = strategy.check_entry(sym, df, now_time=retry_now)
-
-                        # 당해 분 내에 끝내 새 봉이 오지 않을 경우에만 해당 분을 안전하게 넘김
-                        if signal and isinstance(signal, dict) and signal.get('type') == 'WAIT_NEW_BAR':
-                            logger.warning(f"⚠️ [New-Bar Timeout] {sym}: 재시도 초과 후에도 새 캔들 미도착 -> 이번 분 건너뜀")
+                        if sig and isinstance(sig, dict) and sig.get('type') == 'WAIT_NEW_BAR':
                             continue
 
-                    if signal:
-                        if signal['type'] == 'BUY':
-                            # -----------------------------------------------------
-                            # 🚌 [Missed Bus] 슬롯 여유 확인
-                            # -----------------------------------------------------
-                            if not portfolio.has_open_slot():
-                                logger.warning(f"🚌 [Missed Bus] {sym} 진입 신호 왔으나 자리 없음 -> 영구 제외")
-                                portfolio.ban_list.add(sym)      
-                                if sym in active_candidates:
-                                    del active_candidates[sym]
-                                candle_cache.pop(sym, None)
-                                save_state(portfolio.ban_list, active_candidates, risk_filter.loss_blacklist, portfolio=portfolio)
-                                continue
-                            
-                            # -----------------------------------------------------
-                            # 🛡️ [Pre-Order Execution Pipeline] 호가 조회 및 괴리율 가드
-                            # -----------------------------------------------------
-                            signal_price = float(signal['price'])
-                            ask, bid, ask_vol, bid_vol = kis.get_market_spread(sym, exchange=selected_exchange or "NAS")
-
-                            if ask > 0 and bid > 0:
-                                # 1. 스프레드 과다 가드 (3.0%)
-                                spread = (ask - bid) / ask * 100.0
-                                if spread > 3.0:
-                                    logger.warning(f"⚠️ [Spread Guard] {sym}: 스프레드 과다 ({spread:.2f}% > 3.0%) 로 매수 보류")
-                                    continue
-
-                                # 2. Pre-Order Price Guard (+0.5% 괴리 차단)
-                                buy_buffer = float(getattr(Config, 'BUY_SLIPPAGE_BUFFER', 0.005))
-                                max_allowed_price = signal_price * (1.0 + buy_buffer)
-                                if ask > max_allowed_price:
-                                    logger.warning(
-                                        f"⚠️ [Pre-Order Price Guard] {sym}: "
-                                        f"Ask ${ask:.4f} > 허용상한 ${max_allowed_price:.4f} (시그널 ${signal_price:.4f} +{buy_buffer*100:.1f}%) -> 매수 차단"
-                                    )
-                                    continue
-
-                            # 3. 모든 가드 통과 후 진입가 갱신 및 주문 집행
-                            entry_price = ask if ask > 0 else signal_price
-                            signal['price'] = entry_price
-                            signal['ticker'] = sym
-
-                            # =========================================================
-                            # 🛡️ [Pre-Trade Validation] 3중 리스크 차단 필터 검사
-                            # =========================================================
-                            is_blocked, block_reason = risk_filter.is_order_blocked(
-                                ticker=sym, price=entry_price, current_time_et=now
-                            )
-                            
-                            if is_blocked:
-                                logger.warning(f"🛑 [Risk Filter Blocked] {sym}: {block_reason}")
-                                continue
-
-                            # =========================================================
-                            # ⚡ [Execution] 정상 주문 집행
-                            # =========================================================
-                            if portfolio.has_open_slot():
-                                result = order_manager.execute_buy(portfolio, signal)
-                                
-                                if result:
-                                    if result.get('msg'):
-                                        bot.send_message(result['msg'])
-                                    
-                                    if result['status'] == 'success':
-                                        candle_cache.pop(sym, None)
-                                        save_state(portfolio.ban_list, active_candidates, risk_filter.loss_blacklist, portfolio=portfolio)
-                                        
-                                        time.sleep(1.5) 
-                                        portfolio.sync_with_kis() 
-                                        
-                                        try:
-                                            actual_pos = portfolio.get_position(sym)
-                                            if actual_pos and actual_pos.get('entry_price', 0) > 0:
-                                                buy_price = actual_pos['entry_price']
-                                            else:
-                                                buy_price = result.get('avg_price', signal['price']) 
-                                            
-                                            if buy_price > 0:
-                                                target_profit_pct = getattr(Config, 'TARGET_PROFIT_PCT', 0.07)
-                                                target_price = buy_price * (1.0 + target_profit_pct)
-                                                target_price = round_price(target_price)
-                                                if sym in portfolio.positions:
-                                                    portfolio.positions[sym]['target_price'] = target_price
-                                                    if 'strategy_name' not in portfolio.positions[sym]:
-                                                        portfolio.positions[sym]['strategy_name'] = signal.get('strategy_name', 'EMA')
-                                                
-                                                qty = result.get('qty', 0)
-                                                
-                                                if qty > 0:
-                                                    is_pure_paper = getattr(Config, 'IS_PURE_PAPER', is_paper_mode)
-                                                    if is_pure_paper:
-                                                        logger.info(f"🔒 [PAPER Pre-Order] {sym} 가상 익절 목표가(${target_price}) 감시 등록 완료 (평단가: ${buy_price:.3f})")
-                                                        bot.send_message(f"🔒 [가상 익절 잠금/PAPER] {sym} 익절 감시 등록 (평단가: ${buy_price:.3f} -> 목표가: ${target_price:.2f})")
-                                                    else:
-                                                        assert not is_pure_paper, "CRITICAL GUARD: Pure paper mode must NEVER call send_order"
-                                                        logger.info(f"⚡ [REAL Pre-Order] {sym} 실제 평단가(${buy_price:.3f}) 기반 익절 주문 전송: ${target_price:.2f}")
-                                                        kis.send_order(sym, "SELL", qty, target_price, "00", exchange=selected_exchange or "NAS")
-                                                        bot.send_message(f"🔒 [실전 익절 잠금/REAL] {sym} 익절 주문 전송 완료 (평단가: ${buy_price:.3f} -> 목표가: ${target_price:.2f})")
-                                        except Exception as e:
-                                            logger.error(f"❌ 익절 주문 중 에러: {e}")
-
-                                        if not portfolio.has_open_slot():
-                                            break
-                                    else:
-                                        logger.warning(f"🚌 [실패] {sym} 매수 실패. 금일 제외.")
-                                        portfolio.ban_list.add(sym)
-                                        candle_cache.pop(sym, None)
-                                        save_state(portfolio.ban_list, active_candidates, risk_filter.loss_blacklist, portfolio=portfolio)
-
-                        elif signal['type'] == 'DROP':
+                        if sig and sig.get('type') == 'BUY':
+                            _execute_buy_flow(sym, sig, selected_exchange)
+                        elif sig and sig.get('type') == 'DROP':
                             logger.info(f"🗑️ [DROP] {sym} 추세 붕괴 확인 -> 감시 해제 및 당일 영구 밴 등록")
                             portfolio.ban_list.add(sym)
                             strategy.banned_tickers.add(sym)
-                            try:
-                                del active_candidates[sym]
-                            except KeyError:
-                                pass
+                            active_candidates.pop(sym, None)
                             candle_cache.pop(sym, None)
+                            target_dfs.pop(sym, None)
                             save_state(portfolio.ban_list, active_candidates, risk_filter.loss_blacklist, portfolio=portfolio)
+                    except Exception as e_err:
+                        logger.error(f"❌ EMA 매수 로직 에러 ({sym}): {e_err}")
 
-                    # -----------------------------------------------------
-                    # 🧪 [VIRTUAL PAPER TRACK] 결합 전략 가상 페이퍼 엔진 훅
-                    # 실전 주문 로직이 완전히 끝난 직후 호출 (실전 체결 지연 0ms 보장)
-                    # -----------------------------------------------------
-                    if virtual_combined_engine:
-                        try:
-                            virtual_combined_engine.on_candle(sym, df, now_time=now)
-                        except Exception as ve_err:
-                            logger.error(f"⚠️ [VirtualEngine Error] {sym}: {ve_err}")
+            # ---------------------------------------------------------
+            # 3단계: [Alpha 스윕 패스] 잔여 슬롯/가용 자본에 대해 전략2(Alpha) 신호 평가 (EMA 미점유 잔여자본 스윕)
+            # ---------------------------------------------------------
+            if is_alpha_active and alpha_strategy and portfolio.has_open_slot():
+                for sym, (df, selected_exchange) in list(target_dfs.items()):
+                    if not portfolio.has_open_slot():
+                        break
+                    if portfolio.is_holding(sym) or portfolio.is_banned(sym):
+                        continue
+                    try:
+                        alpha_sig = alpha_strategy.check_entry(sym, df, now_time=now)
+                        if alpha_sig and alpha_sig.get('type') == 'BUY':
+                            _execute_buy_flow(sym, alpha_sig, selected_exchange)
+                    except Exception as a_err:
+                        logger.error(f"❌ Alpha 매수 로직 에러 ({sym}): {a_err}")
 
-                    time.sleep(0.1)
-
-                except Exception as e:
-                    logger.error(f"❌ 매수 로직 에러({sym}): {e}")
-                    bot.send_message(f"⚠️ [System Error] 매수 로직 중 오류 발생\n종목: {sym}\n내용: {str(e)}")
-                    continue
+            # ---------------------------------------------------------
+            # 4단계: [Virtual Combined Engine 훅] 가상 페이퍼 엔진 캔들 전달
+            # ---------------------------------------------------------
+            if virtual_combined_engine:
+                for sym, (df, _) in target_dfs.items():
+                    try:
+                        virtual_combined_engine.on_candle(sym, df, now_time=now)
+                    except Exception as ve_err:
+                        logger.error(f"⚠️ [VirtualEngine Error] {sym}: {ve_err}")
 
             # ---------------------------------------------------------
             # 🧪 [VirtualTrack] 감시 외 보유 가상 포지션 청산 조건 추적
