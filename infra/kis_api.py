@@ -143,8 +143,8 @@ class KisApi:
     def get_buyable_cash(self, symbol="AAPL"):
         """
         [공식 규격서: TTTS3007R 해외주식 매수가능금액조회]
-        - 1순위: ord_psbl_frcr_amt (주문가능외화금액 - 순수 외화 자체 가용 금액)
-        - 2순위 Fallback: ovrs_ord_psbl_amt (해외주문가능금액 - MTS "외화" 기준 금액)
+        - 1순위: ovrs_ord_psbl_amt (해외주문가능금액 - MTS "외화" 기준 금액, 미결제 매도재사용금액 포함)
+        - 2순위 Fallback: ord_psbl_frcr_amt (주문가능외화금액 - 순수 외화 결제 완료 금액)
         - 3순위 Fallback: frcr_ord_psbl_amt1 (외화주문가능금액1 - MTS "통합증거금" 기준 금액)
         """
         path = "/uapi/overseas-stock/v1/trading/inquire-psamount"
@@ -165,15 +165,17 @@ class KisApi:
 
         output = data['output']
         candidate_fields = [
-            ("ord_psbl_frcr_amt", "주문가능외화금액"),
             ("ovrs_ord_psbl_amt", "해외주문가능금액(외화)"),
+            ("ord_psbl_frcr_amt", "주문가능외화금액"),
             ("frcr_ord_psbl_amt1", "외화주문가능금액1(통합)"),
         ]
 
-        # [C1] 원응답 후보 금액 필드 전체 추출
-        candidate_field_names = [f[0] for f in candidate_fields]
+        # [C1] 원응답 후보 금액 필드 전체 추출 (매도재사용금액 sll_ruse_psbl_amt 포함)
         raw_amt_fields = {
-            k: output.get(k) for k in candidate_field_names
+            "ovrs_ord_psbl_amt": output.get("ovrs_ord_psbl_amt"),
+            "ord_psbl_frcr_amt": output.get("ord_psbl_frcr_amt"),
+            "sll_ruse_psbl_amt": output.get("sll_ruse_psbl_amt"),
+            "frcr_ord_psbl_amt1": output.get("frcr_ord_psbl_amt1"),
         }
         self.last_buyable_cash_raw = raw_amt_fields
         now_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
