@@ -131,17 +131,19 @@ class Config(metaclass=ConfigMeta):
    
     MAX_HOLDING_MINUTES = 0
  
-    # 💰 [포지션 사이징 & $2,000 Hard Cap (옵션 A)]
+    # 💰 [포지션 사이징 & $3,000 Hard Cap (옵션 A)]
     MAX_SLOTS = 2
-    MAX_SINGLE_ORDER_AMOUNT = 2000.0  # 1회 주문 최대 한도 Hard Cap ($2,000)
+    MAX_SINGLE_ORDER_AMOUNT = 3000.0  # 1회 주문 최대 한도 Hard Cap ($3,000)
 
     # ------------------------------------------
-    # ⚡ [알파 전략 실계좌 주문 연동 설정] (지시 9)
+    # ⚡ [알파 전략 실계좌 주문 연동 설정] (지시 9 & 작업 M)
     # ------------------------------------------
+    ENABLE_ALPHA_STRATEGY = os.getenv("ENABLE_ALPHA_STRATEGY", "True").lower() in ("true", "1", "yes")
     ALPHA_TRADING_MODE = os.getenv("ALPHA_TRADING_MODE", "LIVE").strip()  # "PAPER"(가상/로그만) | "LIVE"(실계좌 주문)
     ALPHA_TP_PCT = float(os.getenv("ALPHA_TP_PCT", 0.035))                 # 익절 +3.5%
     ALPHA_SL_PCT = float(os.getenv("ALPHA_SL_PCT", -0.10))                 # 손절 -10.0%
     ALPHA_TIME_CUT_MINUTES = int(os.getenv("ALPHA_TIME_CUT_MINUTES", 45))  # 타임컷 45분
+    ENABLE_ALPHA02 = os.getenv("ENABLE_ALPHA02", "False").lower() in ("true", "1", "yes")  # [작업 N] Alpha 02 실전 비활성화 (기본 False)
 
     # ==========================================
     # 🏦 [계좌 및 인증]
