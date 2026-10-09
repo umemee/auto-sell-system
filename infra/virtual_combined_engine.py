@@ -52,6 +52,7 @@ class AlphaLiveAdapter:
         self.a01_early_paths = ("C", "D")
         self.a01_late_paths = ("A", "C", "D")
         self.a02_or_window_bars = 10
+        self.a02_max_range_pct = 4.00
         self.tp_pct = getattr(Config, 'ALPHA_TP_PCT', 0.035)
         self.sl_pct = getattr(Config, 'ALPHA_SL_PCT', -0.10)
         self.max_hold_min = getattr(Config, 'ALPHA_TIME_CUT_MINUTES', 45)
@@ -96,9 +97,9 @@ class AlphaLiveAdapter:
         key_today = f"{d_str}_{ticker}"
 
         # -----------------------------------------------------------------
-        # 1. Alpha 02 검사 (OR-10 압축 후 상방 돌파)
+        # 1. Alpha 02 검사 (OR-10 압축 후 상방 돌파) [작업 N: ENABLE_ALPHA02 플래그 제어]
         # -----------------------------------------------------------------
-        if key_today not in self.triggered_today:
+        if getattr(Config, 'ENABLE_ALPHA02', False) and key_today not in self.triggered_today:
             # 08:30 ~ 08:40 사이 캔들로 OR-10 계산
             or_cache = self.or10_cache.get(ticker)
             if or_cache is None or or_cache.get('date') != d_str:

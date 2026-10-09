@@ -74,9 +74,10 @@ class TradeRiskFilter:
         if pnl < 0 or reason in ["STOP_LOSS", "TIME_CUT_LOSS"]:
             self.loss_blacklist.add(ticker)
             self._save_persistent_loss_tickers()
+            pnl_pct_val = pnl * 100.0 if abs(pnl) <= 1.0 else pnl
             self.logger.warning(
                 f"🚫 [RiskFilter:Blacklist] 손절 발생 종목 영구 등록: {ticker} "
-                f"(PnL: {pnl:.2f}%, 사유: {reason}) | 누적 차단 종목: {len(self.loss_blacklist)}개"
+                f"(PnL: {pnl_pct_val:.2f}%, 사유: {reason}) | 누적 차단 종목: {len(self.loss_blacklist)}개"
             )
 
     def is_order_blocked(

@@ -81,9 +81,10 @@ class KisApi:
         return excd_map.get(norm, norm)
 
     def _get_order_exch(self, exchange):
-        """조회 거래소 코드를 주문 거래소 코드로 변환 (NAS->NASD, AMS->AMS, NYS->NYSE)"""
-        order_exch_map = {"NAS": "NASD", "AMS": "AMS", "NYS": "NYSE"}
-        return order_exch_map.get(exchange, "NASD")
+        """조회 거래소 코드를 주문 거래소 코드로 변환 (NAS->NASD, AMS->AMEX, NYS->NYSE)"""
+        norm = str(exchange).strip().upper() if exchange else "NASD"
+        order_exch_map = {"NAS": "NASD", "AMS": "AMEX", "AMEX": "AMEX", "NYS": "NYSE", "NASD": "NASD", "NYSE": "NYSE"}
+        return order_exch_map.get(norm, norm if norm in ["NASD", "AMEX", "AMS", "NYSE"] else "NASD")
 
     # =================================================================
     # 🛠️ [핵심] 스마트 요청 처리기 (Smart Request Handler)
@@ -433,12 +434,12 @@ class KisApi:
     # 🔫 [주문 관련] 매수/매도 실행 (수정됨)
     # =================================================================
 
-    def buy_limit(self, symbol, price, qty):
+    def buy_limit(self, symbol, price, qty, exchange="NASD"):
         """지정가 매수"""
         # "00"은 지정가(Limit) 코드입니다.
-        return self.place_order_final("NASD", symbol, "BUY", qty, price, ord_dvsn="00")
+        return self.place_order_final(self._get_order_exch(exchange), symbol, "BUY", qty, price, ord_dvsn="00")
 
-    def buy_market(self, symbol, current_price, qty):
+    def buy_market(self, symbol, current_price, qty, exchange="NASD"):
         """
         [신규] 시장가 매수 (사실상 시장가)
         - 급등주 00초 진입 시 주문 거부를 막기 위해 '현재가 + 2%' 지정가로 주문합니다.
@@ -446,7 +447,7 @@ class KisApi:
         """
         # 현재가보다 2% 비싸게 주문 -> 매도 호가 전량을 긁으며 즉시 체결됨
         agressive_price = current_price * 1.02 
-        return self.place_order_final("NASD", symbol, "BUY", qty, agressive_price, ord_dvsn="00")
+        return self.place_order_final(self._get_order_exch(exchange), symbol, "BUY", qty, agressive_price, ord_dvsn="00")
         
 
     @log_api_call("주문 전송")
@@ -474,9 +475,9 @@ class KisApi:
         except:
             final_price = "0"
 
-        exchange_candidates = [exchange]
-        if exchange == "NASD":
-            exchange_candidates.extend(["AMS", "NYSE"]) 
+        all_exchs = ["NASD", "AMEX", "AMS", "NYSE"]
+        primary_exch = exchange if exchange in all_exchs else self._get_order_exch(exchange)
+        exchange_candidates = [primary_exch] + [e for e in all_exchs if e != primary_exch]
         
         last_error_msg = ""
 
@@ -490,31 +491,37 @@ class KisApi:
                 "ORD_QTY": str(int(qty)),  
                 "OVRS_ORD_UNPR": final_price, 
                 "ORD_SVR_DVSN_CD": "0", 
-                # [수정] 하드코딩된 "00" 대신 파라미터 사용
                 "ORD_DVSN": ord_dvsn 
             }
+            
+            self.logger.info(
+                f"📤 [KIS 주문 요청 전송] TR={tr_id} | 거래소={try_exch} | 종목={symbol} | "
+                f"구분={side} | 수량={qty}주 | 가격=${final_price} | dvsn={ord_dvsn} | Body={body}"
+            )
             
             try:
                 res = requests.post(f"{self.base_url}{path}", headers=self.headers, json=body, timeout=10)
                 data = res.json()
                 
-                if data['rt_cd'] == '0':
+                if data.get('rt_cd') == '0':
                     odno = data['output'].get('ODNO')
-                    self.logger.info(f"✅ 주문 성공 ({try_exch}) [{side}] {symbol} {qty}주 #{odno}")
+                    self.last_order_exchange = try_exch
+                    self.logger.info(f"✅ [KIS 주문 성공] ({try_exch}) [{side}] {symbol} {qty}주 #{odno} | 원응답: {data}")
                     return odno
                 else:
                     msg = data.get('msg1')
                     code = data.get('msg_cd')
-                    self.logger.warning(f"⚠️ 주문 실패 ({try_exch}): {msg} (Code: {code}) -> 거래소 변경")
+                    self.logger.warning(f"⚠️ [KIS 주문 거부] ({try_exch}): {msg} (Code: {code}) | 원응답: {data} -> 다음 거래소 후보 시도")
                     last_error_msg = f"{msg} ({code})"
                     
             except Exception as e: 
-                self.logger.error(f"❌ 주문 통신 에러 ({try_exch}): {e}")
+                self.logger.error(f"❌ [KIS 주문 통신 에러] ({try_exch}): {e}")
                 last_error_msg = str(e)
             
             time.sleep(0.2)
 
-        self.logger.error(f"❌ 최종 주문 실패 ({symbol}): {last_error_msg}")
+        self.last_error_msg = last_error_msg
+        self.logger.error(f"❌ [KIS 최종 주문 실패] ({symbol}): {last_error_msg}")
         return None
 
     def sell_market(self, symbol, qty, price_hint=None, exchange="NAS"):
@@ -541,6 +548,10 @@ class KisApi:
         """[호환성 래퍼] RealOrderManager용
         - exchange: "NAS"(기본값), "AMS"(AMEX), "NYS"(NYSE)
         """
+        self.logger.info(
+            f"🚀 [send_order 호출] 종목={ticker}, side={side}, 수량={qty}, 가격={price}, "
+            f"order_type={order_type}, 전달된 거래소={exchange}"
+        )
         odno = None
         if side == "SELL":
             if order_type == "MARKET" or not price or price <= 0:
@@ -551,14 +562,16 @@ class KisApi:
         elif side == "BUY":
             # [수정] 매수 시 MARKET 옵션 처리 추가
             if order_type == "MARKET" and price:
-                 odno = self.buy_market(ticker, price, qty)
+                 odno = self.buy_market(ticker, price, qty, exchange=exchange)
             else:
-                 odno = self.buy_limit(ticker, price, qty)
+                 odno = self.buy_limit(ticker, price, qty, exchange=exchange)
 
+        success_exch = getattr(self, 'last_order_exchange', self._get_order_exch(exchange))
         if odno:
-            return {'rt_cd': '0', 'msg1': '주문 전송 성공', 'output': {'ODNO': odno}}
+            return {'rt_cd': '0', 'msg1': '주문 전송 성공', 'output': {'ODNO': odno, 'exchange': success_exch}}
         else:
-            return {'rt_cd': '1', 'msg1': '주문 전송 실패 (로그 확인)'}
+            err_detail = getattr(self, 'last_error_msg', '거부됨')
+            return {'rt_cd': '1', 'msg1': f'주문 전송 실패 ({err_detail})'}
         
         # -------------------------------------------------------------
     # [신규 추가] 데이터 정합성 및 유동성 검증 (공식 문서 기반)
@@ -817,35 +830,46 @@ class KisApi:
         path = "/uapi/overseas-stock/v1/trading/order-rvsecncl"
         tr_id = "TTTT1004U" 
 
-        self._update_headers(tr_id)
+        primary_exch = self._get_order_exch(exchange)
+        candidate_exchs = [primary_exch] + [e for e in ["NASD", "AMEX", "NYSE"] if e != primary_exch]
 
-        params = {
-            "CANO": Config.CANO,
-            "ACNT_PRDT_CD": Config.ACNT_PRDT_CD,
-            "OVRS_EXCG_CD": exchange,
-            "PDNO": ticker,
-            "ORGN_ODNO": order_id, 
-            "RVSE_CNCL_DVSN_CD": "02", 
-            "ORD_QTY": str(qty) if qty > 0 else "0", 
-            "OVRS_ORD_UNPR": "0",
-            "ORD_SVR_DVSN_CD": "0"
-        }
+        last_res = None
+        for try_exch in candidate_exchs:
+            self._update_headers(tr_id)
+            params = {
+                "CANO": Config.CANO,
+                "ACNT_PRDT_CD": Config.ACNT_PRDT_CD,
+                "OVRS_EXCG_CD": try_exch,
+                "PDNO": ticker,
+                "ORGN_ODNO": order_id, 
+                "RVSE_CNCL_DVSN_CD": "02", 
+                "ORD_QTY": str(qty) if qty > 0 else "0", 
+                "OVRS_ORD_UNPR": "0",
+                "ORD_SVR_DVSN_CD": "0"
+            }
 
-        try:
-            res = requests.post(
-                url=f"{self.base_url}{path}",
-                headers=self.headers,
-                data=json.dumps(params),
-                timeout=5
-            )
-            data = res.json()
-            if data.get('rt_cd') == '0':
-                self.logger.info(f"✅ 주문 취소 성공 ({exchange}) [{ticker}] 원주문#{order_id}")
-            else:
+            try:
+                res = requests.post(
+                    url=f"{self.base_url}{path}",
+                    headers=self.headers,
+                    data=json.dumps(params),
+                    timeout=5
+                )
+                data = res.json()
+                last_res = data
+                if data.get('rt_cd') == '0':
+                    self.logger.info(f"✅ 주문 취소 성공 ({try_exch}) [{ticker}] 원주문#{order_id}")
+                    return data
+                
                 msg = data.get('msg1')
                 code = data.get('msg_cd')
-                self.logger.warning(f"⚠️ 주문 취소 실패 ({exchange}) [{ticker}] 원주문#{order_id}: {msg} ({code})")
-            return data
-        except Exception as e:
-            self.logger.error(f"❌ 주문 취소 통신 실패 ({exchange}) [{ticker}] 원주문#{order_id}: {e}")
-            return None
+                self.logger.warning(f"⚠️ 주문 취소 실패 ({try_exch}) [{ticker}] 원주문#{order_id}: {msg} ({code})")
+                if code != 'APBK0656':
+                    # 종목코드 불일치 외의 에러는 다른 거래소 시도 없이 종료
+                    return data
+                self.logger.info(f"🔄 [{ticker}] APBK0656 감지 -> 다음 거래소 코드로 취소 재시도")
+            except Exception as e:
+                self.logger.error(f"❌ 주문 취소 통신 실패 ({try_exch}) [{ticker}] 원주문#{order_id}: {e}")
+                return None
+
+        return last_res

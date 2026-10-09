@@ -25,6 +25,8 @@ class RealOrderManager:
         # 🛡️ [로그 폭탄 방지] 종목별 마지막 로그 시간 기록부
         self.log_throttle_map = {} 
         self.apbk2623_cancel_guard = {}
+        self.selling_in_progress = set()  # [작업 I-1] 종목별 매도 진행 중 잠금 플래그
+        self.recent_order_time = {}       # [작업 I-3] 종목별 최근 발주 시간 (워치독 30초 유예용)
 
     def _log_signal_spread(self, ticker, signal_price, ask, bid, ask_vol, bid_vol):
         """
@@ -178,6 +180,7 @@ class RealOrderManager:
             output_dict = resp.get('output', {}) if isinstance(resp.get('output'), dict) else {}
             entry_guess = output_dict.get('fill_price', price)
             odno = output_dict.get('ODNO', 'Unknown')
+            filled_exch = output_dict.get('exchange') or getattr(self.kis, 'last_order_exchange', 'NASD')
 
             try:
                 portfolio.update_position({
@@ -185,6 +188,7 @@ class RealOrderManager:
                     'qty': qty,
                     'price': entry_guess,
                     'entry_price': entry_guess,
+                    'exchange': filled_exch,
                     'strategy': strat_name,
                     'strategy_name': strat_name,
                     'alpha_id': signal.get('alpha_id', ''),
@@ -203,17 +207,23 @@ class RealOrderManager:
                 env_mode = getattr(Config, 'EXECUTION_ENVIRONMENT', '')
                 mode_str = "[SHADOW]" if env_mode == 'DUAL_SHADOW' else "[REAL]"
 
-            tp_pct = getattr(Config, 'TARGET_PROFIT_PCT', 0.07)
+            is_alpha_strat = (strat_name == 'ALPHA')
+            tp_pct = getattr(Config, 'ALPHA_TP_PCT', 0.035) if is_alpha_strat else getattr(Config, 'TARGET_PROFIT_PCT', 0.07)
             target_price = round_price(entry_guess * (1.0 + tp_pct)) if entry_guess > 0 else 0.0
 
-            msg = (
-                f"🔔 [매수 체결 완료]\n"
-                f"🕹️ 모드: {mode_str}\n"
-                f"🎯 전략: {strat_name} 전략\n"
-                f"📦 종목: {ticker}\n"
-                f"🔢 수량: {qty}주 | 체결가: ${entry_guess:.4f}\n"
-                f"🎯 목표 익절가: ${target_price:.4f}"
+            from infra.utils import format_buy_fill_message
+            rem_cash = getattr(portfolio, 'balance', 0.0)
+            msg = format_buy_fill_message(
+                strategy=strat_name,
+                ticker=ticker,
+                qty=qty,
+                price=entry_guess,
+                target_price=target_price,
+                tp_pct=tp_pct,
+                cash=rem_cash,
+                is_paper=self.is_paper
             )
+            self.recent_order_time[ticker] = time.time()
             return {'status': 'success', 'msg': msg, 'qty': qty, 'avg_price': entry_guess}
         else:
             fail_msg = resp.get('msg1', '알 수 없는 오류') if resp else '응답 없음'
@@ -351,17 +361,30 @@ class RealOrderManager:
 
     def execute_sell(self, portfolio, ticker, reason, price=0):
         """
-        [핵심 수정] 스마트 매도 집행 (Cancel-Then-Sell + 2단계 동적 지정가 손절)
-        
-        우리의 3가지 문제(손절, 타임컷, 장마감)를 해결하는 곳입니다.
-        매도 주문을 내기 전에 '미체결 주문'이 있는지 확인하고, 있다면 취소합니다.
+        [핵심 수정] 스마트 매도 집행 (selling_in_progress 락 + Cancel-Then-Sell + 2단계 동적 지정가 손절)
         """
+        position = portfolio.get_position(ticker)
+        if not position:
+            return None
+
+        if ticker in self.selling_in_progress:
+            self.logger.warning(f"⚠️ [{ticker}] 이미 매도 진행 중 -> 중복 매도 방지 스킵")
+            return None
+
+        self.selling_in_progress.add(ticker)
+        try:
+            return self._execute_sell_internal(portfolio, ticker, reason, price=price)
+        finally:
+            self.selling_in_progress.discard(ticker)
+
+    def _execute_sell_internal(self, portfolio, ticker, reason, price=0):
         position = portfolio.get_position(ticker)
         if not position:
             return None
 
         qty = position['qty']
         entry_price = position.get('entry_price', price)
+        old_balance = float(portfolio.balance)
         
         # ============================================================
         # 🛡️ [Safety Protocol] 기존 주문 취소 (선주문 해결)
@@ -369,7 +392,8 @@ class RealOrderManager:
         # 익절/손절/타임컷 상관없이, 매도를 하려면 기존 주문(익절 대기 등)을 치워야 합니다.
         is_pure_paper = getattr(Config, 'IS_PURE_PAPER', self.is_paper)
         if not is_pure_paper:
-            self._clear_pending_orders(ticker)
+            is_urgent = reason in ["STOP_LOSS", "TRAILING_STOP", "FORCE_EOD_EXIT"]
+            self._clear_pending_orders(ticker, is_urgent=is_urgent)
 
         # ============================================================
         # 🔫 [Execution] 매도 주문 실행 (페이퍼 모드 분기)
@@ -390,38 +414,68 @@ class RealOrderManager:
             order_price = price
 
             # [조건별 주문 유형 설정]
+            pos_exch = position.get('exchange', 'NASD')
             if reason in ["TAKE_PROFIT", "TARGET_PROFIT_0.035"]:
                 order_type = "00"
-                self.logger.info(f"💰 [{reason}] 매도 시도: {ticker} (가격: {order_price}, 수량: {qty})")
-                resp = self.kis.send_order(
-                    ticker=ticker,
-                    side="SELL",
-                    qty=qty,
-                    price=order_price,
-                    order_type=order_type 
-                )
+                self.logger.info(f"💰 [{reason}] 매도 시도 ({pos_exch}): {ticker} (가격: {order_price}, 수량: {qty})")
+                resp = None
+                for attempt in range(1, 4):
+                    resp = self.kis.send_order(
+                        ticker=ticker,
+                        side="SELL",
+                        qty=qty,
+                        price=order_price,
+                        order_type=order_type,
+                        exchange=pos_exch
+                    )
+                    if resp and resp.get('rt_cd') == '0':
+                        break
+                    self.logger.warning(f"⚠️ [{reason}] {ticker} 매도 #{attempt} 실패 -> 재시도 (오류: {resp.get('msg1') if resp else '무응답'})")
+                    time.sleep(0.5)
             elif reason == "TRAILING_STOP":
                 order_type = "00"
                 if price > 0:
                     order_price = round_price(price * 0.99)
-                self.logger.info(f"📉 [{reason}] 매도 시도: {ticker} (가격: {order_price}, 수량: {qty})")
-                resp = self.kis.send_order(
-                    ticker=ticker,
-                    side="SELL",
-                    qty=qty,
-                    price=order_price,
-                    order_type=order_type 
-                )
+                self.logger.info(f"📉 [{reason}] 매도 시도 ({pos_exch}): {ticker} (가격: {order_price}, 수량: {qty})")
+                resp = None
+                start_t = time.time()
+                attempt = 0
+                while time.time() - start_t < 2.0:
+                    attempt += 1
+                    resp = self.kis.send_order(
+                        ticker=ticker,
+                        side="SELL",
+                        qty=qty,
+                        price=order_price,
+                        order_type=order_type,
+                        exchange=pos_exch
+                    )
+                    if resp and resp.get('rt_cd') == '0':
+                        break
+                    err_m = resp.get('msg1') if resp else '무응답'
+                    self.logger.warning(f"⚠️ [{reason}] {ticker} 트레일링 매도 #{attempt} 거부/실패 ({err_m}) -> 0.2초 후 재시도")
+                    time.sleep(0.2)
             elif reason == "FORCE_EOD_EXIT":
                 order_price = round_price(price * 0.95) if price > 0 else 0
-                self.logger.info(f"⏰ [{reason}] 장마감 긴급 매도: {ticker} (가격: {order_price}, 수량: {qty})")
-                resp = self.kis.send_order(
-                    ticker=ticker,
-                    side="SELL",
-                    qty=qty,
-                    price=order_price,
-                    order_type="00" 
-                )
+                self.logger.info(f"⏰ [{reason}] 장마감 긴급 매도 ({pos_exch}): {ticker} (가격: {order_price}, 수량: {qty})")
+                resp = None
+                start_t = time.time()
+                attempt = 0
+                while time.time() - start_t < 2.0:
+                    attempt += 1
+                    resp = self.kis.send_order(
+                        ticker=ticker,
+                        side="SELL",
+                        qty=qty,
+                        price=order_price,
+                        order_type="00",
+                        exchange=pos_exch
+                    )
+                    if resp and resp.get('rt_cd') == '0':
+                        break
+                    err_m = resp.get('msg1') if resp else '무응답'
+                    self.logger.warning(f"⚠️ [{reason}] {ticker} EOD 긴급 매도 #{attempt} 거부/실패 ({err_m}) -> 0.2초 후 재시도")
+                    time.sleep(0.2)
             else:
                 # --------------------------------------------------------
                 # 🛡️ [3단계 동적 지정가 & 최후 탈출 손절 체계 (3-Step Guaranteed Exit)]
@@ -430,8 +484,8 @@ class RealOrderManager:
                 # 3단계: 2단계 미체결 시 실시간 Bid-3% 관통 재시도(최대 3회),
                 #       3회 모두 실패 시 텔레그램 긴급 경보 발송 및 HTS 수동 청산 유도
                 # --------------------------------------------------------
-                exchange = position.get('exchange', 'NASD')
-                dyn_buffer = self._calculate_dynamic_stop_buffer(ticker, price)
+                exchange = pos_exch
+                dyn_buffer = self._calculate_dynamic_stop_buffer(ticker, price, exchange=exchange)
                 first_limit_price = round_price(price * (1.0 - dyn_buffer)) if price > 0 else 0
                 order_price = first_limit_price
                 step1_sent_time = time.time()
@@ -441,14 +495,25 @@ class RealOrderManager:
                     f"(가격: ${first_limit_price:.4f}, 동적버퍼: -{dyn_buffer*100:.2f}%, 수량: {qty})"
                 )
 
-                resp = self.kis.send_order(
-                    ticker=ticker,
-                    side="SELL",
-                    qty=qty,
-                    price=first_limit_price,
-                    order_type="00",
-                    exchange=exchange
-                )
+                # [작업 O-1] 거부/수량부족 시 0.2초 간격 재시도 (총 2초 한도)
+                resp = None
+                start_t = time.time()
+                attempt = 0
+                while time.time() - start_t < 2.0:
+                    attempt += 1
+                    resp = self.kis.send_order(
+                        ticker=ticker,
+                        side="SELL",
+                        qty=qty,
+                        price=first_limit_price,
+                        order_type="00",
+                        exchange=exchange
+                    )
+                    if resp and resp.get('rt_cd') == '0':
+                        break
+                    err_m = resp.get('msg1') if resp else '무응답'
+                    self.logger.warning(f"⚠️ [{reason}] {ticker} 1단계 손절 #{attempt} 거부/실패 ({err_m}) -> 0.2초 후 재시도")
+                    time.sleep(0.2)
 
                 step1_status = "UNKNOWN"
                 step2_triggered = False
@@ -577,6 +642,96 @@ class RealOrderManager:
                             self.logger.info(f"🎯 [{ticker}] 1단계 동적 지정가(${first_limit_price:.4f}) {step1_elapsed}초 내 정상 체결 확인!")
                     except Exception as err:
                         self.logger.error(f"⚠️ [{ticker}] 2/3단계 손절 전환 처리 중 오류: {err}")
+                else:
+                    # 1단계 발주 접수 자체가 2초 재시도 후에도 실패한 경우 -> 즉시 2단계 긴급 탈출 전환
+                    step1_status = "FAILED_SEND"
+                    step2_triggered = True
+                    self.logger.warning(
+                        f"⚠️ [{ticker}] 1단계 손절 발주 2초 재시도 최종 실패({resp.get('msg1') if resp else '무응답'}) "
+                        f"-> 2단계 긴급 탈출가(-5%)로 즉시 전환"
+                    )
+                    try:
+                        pending_list = self.kis.get_pending_orders(ticker)
+                        if pending_list:
+                            for p_order in pending_list:
+                                oid = p_order.get('odno')
+                                excd = p_order.get('ovrs_excg_cd', exchange)
+                                self.kis.cancel_order(ticker, oid, qty=0, exchange=excd)
+                            time.sleep(0.5)
+                    except Exception as e:
+                        self.logger.warning(f"⚠️ [{ticker}] 미체결 확인 중 예외: {e}")
+
+                    emergency_price = round_price(price * 0.95) if price > 0 else 0
+                    start_s2 = time.time()
+                    resp_step2 = None
+                    while time.time() - start_s2 < 2.0:
+                        resp_step2 = self.kis.send_order(
+                            ticker=ticker,
+                            side="SELL",
+                            qty=qty,
+                            price=emergency_price,
+                            order_type="00",
+                            exchange=exchange
+                        )
+                        if resp_step2 and resp_step2.get('rt_cd') == '0':
+                            break
+                        time.sleep(0.2)
+
+                    if resp_step2 and resp_step2.get('rt_cd') == '0':
+                        resp = resp_step2
+                        order_price = emergency_price
+                        self.logger.info(f"✅ [{ticker}] 2단계 긴급 매도 주문 전송 완료 (${emergency_price:.4f})")
+                        time.sleep(1.5)
+                        try:
+                            pending_step2 = self.kis.get_pending_orders(ticker)
+                            if pending_step2 and len(pending_step2) > 0:
+                                step3_entered = True
+                                for p_order in pending_step2:
+                                    oid = p_order.get('odno')
+                                    excd = p_order.get('ovrs_excg_cd', exchange)
+                                    self.kis.cancel_order(ticker, oid, qty=0, exchange=excd)
+                                time.sleep(0.5)
+
+                                for retry in range(1, 4):
+                                    step3_retries = retry
+                                    try:
+                                        ask_p, bid_p, _, _ = self.kis.get_market_spread(ticker, exchange=exchange)
+                                    except Exception:
+                                        bid_p = 0.0
+                                    deep_price = round_price(bid_p * 0.97) if bid_p > 0 else (round_price(price * 0.90) if price > 0 else 0)
+                                    resp_step3 = self.kis.send_order(
+                                        ticker=ticker, side="SELL", qty=qty, price=deep_price, order_type="00", exchange=exchange
+                                    )
+                                    if resp_step3 and resp_step3.get('rt_cd') == '0':
+                                        resp = resp_step3
+                                        order_price = deep_price
+                                        time.sleep(1.5)
+                                        pending_step3 = self.kis.get_pending_orders(ticker)
+                                        if not pending_step3 or len(pending_step3) == 0:
+                                            step3_success = True
+                                            final_status = f"STEP3_FILLED_RETRY_{retry}"
+                                            break
+                                        else:
+                                            for p_order in pending_step3:
+                                                self.kis.cancel_order(ticker, p_order.get('odno'), qty=0, exchange=p_order.get('ovrs_excg_cd', exchange))
+                                            time.sleep(0.5)
+                                    else:
+                                        time.sleep(0.5)
+                                if not step3_success:
+                                    final_status = "STEP3_ALL_FAILED"
+                                    alert_msg = (
+                                        f"🚨🚨 <b>[긴급 경보] 손절 3단계 최후 탈출 3회 연속 실패!</b>\n"
+                                        f"• 종목: <b>{ticker}</b>\n"
+                                        f"• 잔여 수량: <b>{qty}주</b>\n"
+                                        f"• 최종 시도가: <b>${order_price:.4f}</b>\n"
+                                        f"• 상태: <b>즉시 HTS 수동 청산 필요!</b>"
+                                    )
+                                    self._send_telegram_alert(alert_msg)
+                                    self.logger.critical(alert_msg)
+                            else:
+                                final_status = "STEP2_FILLED"
+                        except Exception as e2:
+                            self.logger.error(f"⚠️ [{ticker}] 2단계 미체결 확인 오류: {e2}")
 
                 # 📊 [Stop Loss Execution Logging]
                 import pytz
@@ -631,34 +786,40 @@ class RealOrderManager:
                 )
                 # 포트폴리오에서 즉시 제거 (재진입 방지 쿨다운은 main.py에서 처리)
                 portfolio.close_position(ticker)
-            
-            if self.is_paper:
-                mode_str = "[PAPER]"
-            else:
-                env_mode = getattr(Config, 'EXECUTION_ENVIRONMENT', '')
-                mode_str = "[SHADOW]" if env_mode == 'DUAL_SHADOW' else "[REAL]"
-            
-            strat_name = position.get('strategy_name', position.get('strategy', 'EMA'))
-            strat_label = f"{strat_name} 전략"
-            
-            init_seed = getattr(portfolio, 'initial_seed_today', 0.0)
-            cum_pnl = getattr(portfolio, 'daily_realized_pnl', 0.0)
-            from infra.utils import format_est_seed
-            est_seed_str = format_est_seed(init_seed, cum_pnl)
 
-            effective_cash = portfolio.get_effective_balance() if hasattr(portfolio, 'get_effective_balance') else portfolio.balance
-            order_limit = portfolio.get_max_order_amount()
-            unconfirmed_tag = " (원장 반영 대기중)" if getattr(portfolio, 'is_balance_unconfirmed', False) else ""
-
-            msg = (
-                f"🎉 [매도/청산 체결 완료]\n"
-                f"🕹️ 모드: {mode_str}\n"
-                f"🎯 전략: {strat_label}\n"
-                f"📦 종목: {ticker}\n"
-                f"💵 실현손익: ${realized_pnl:+,.2f} ({return_pct:+.2f}%)\n"
-                f"💰 매매 가능 시드: ${effective_cash:,.2f}{unconfirmed_tag} (1회 한도: ${order_limit:,.2f})\n"
-                f"📊 당일 누적 손익: ${cum_pnl:+,.2f} | 🏦 추정 총시드: {est_seed_str}\n"
-                f"📌 사유: {reason}"
+                # [작업 2] 1.5초 대기 + 최대 3회 재조회 잔고 확인
+                net_proceeds = (order_price * qty) * (1.0 - 0.001)
+                if hasattr(portfolio, 'confirm_post_sell_balance'):
+                    portfolio.confirm_post_sell_balance(old_balance=old_balance, net_proceeds=net_proceeds)
+            
+            # [작업 4-3] 표준 청산 메시지 포맷팅
+            final_fill_p = output_dict.get('fill_price') or order_price
+            is_fill_price = ('fill_price' in output_dict)
+            is_win = (realized_pnl >= 0)
+            from infra.utils import format_exit_message
+            eff_cash = portfolio.get_effective_balance() if hasattr(portfolio, 'get_effective_balance') else portfolio.balance
+            tot_eq = getattr(portfolio, 'total_equity', eff_cash)
+            acct_pnl = portfolio.get_account_pnl() if hasattr(portfolio, 'get_account_pnl') else getattr(portfolio, 'daily_realized_pnl', 0.0)
+            is_del = getattr(portfolio, 'is_delayed_settlement', False)
+            strat_label = position.get('strategy_name', position.get('strategy', 'EMA'))
+            if strat_label == 'ALPHA':
+                strat_label = 'ALPHA 전략'
+            msg = format_exit_message(
+                ticker=ticker,
+                strategy=strat_label,
+                entry_price=entry_price,
+                exit_price=final_fill_p,
+                ret_pct=return_pct,
+                pnl=realized_pnl,
+                cash=eff_cash,
+                total_equity=tot_eq,
+                daily_account_pnl=acct_pnl,
+                is_win=is_win,
+                is_fill_price=is_fill_price,
+                is_delayed=is_del,
+                qty=qty,
+                reason=reason,
+                is_paper=self.is_paper
             )
             return {
                 'status': 'success',
@@ -668,9 +829,11 @@ class RealOrderManager:
             self.logger.error(f"❌ 매도 실패 ({ticker}): {resp}")
             return None
 
-    def _clear_pending_orders(self, ticker):
+    def _clear_pending_orders(self, ticker, is_urgent=False):
         """
         [수정됨] 미체결 내역의 '거래소 코드'까지 파악하여 취소 (AMEX/NYSE 대응)
+        - is_urgent=True: 긴급 손절 모드 (최대 0.5초, 0.1초 간격 폴링 후 즉시 탈출)
+        - is_urgent=False: 일반 정정 모드 (최대 1.8초, 0.3초 간격 폴링)
         """
         try:
             guard = self.apbk2623_cancel_guard.get(ticker)
@@ -687,7 +850,7 @@ class RealOrderManager:
                             f"-> 반복 취소 재시도 생략"
                         )
                         guard['last_skip_log'] = now
-                    return
+                    return False
 
                 self.logger.info(
                     f"🔁 [{ticker}] APBK2623 취소 보호 만료 -> 미체결 취소 재확인 재개"
@@ -699,7 +862,7 @@ class RealOrderManager:
             
             if not pending_list:
                 self.apbk2623_cancel_guard.pop(ticker, None)
-                return
+                return True
 
             self.logger.info(f"🧹 [{ticker}] 미체결 {len(pending_list)}건 발견 -> 취소 시도")
 
@@ -732,8 +895,26 @@ class RealOrderManager:
                 else:
                     self.logger.error(f"   ㄴ 취소 실패 (OID: {oid}): {res}")
             
-            # 취소 반영 대기
-            time.sleep(0.5)
+            # [작업 O-1] 취소 확인 폴링: is_urgent 여부에 따라 대기 시간 차등 적용
+            all_cleared = False
+            poll_interval = 0.1 if is_urgent else 0.3
+            max_polls = 5 if is_urgent else 6  # is_urgent: 최대 0.5초 (0.1s x 5회), 일반: 최대 1.8초 (0.3s x 6회)
+
+            for poll_idx in range(max_polls):
+                time.sleep(poll_interval)
+                rem_pending = self.kis.get_pending_orders(ticker)
+                if not rem_pending or len(rem_pending) == 0:
+                    all_cleared = True
+                    self.logger.info(f"✅ [{ticker}] 미체결 주문 취소 완료 확인 (잔여 0건)")
+                    break
+
+            if not all_cleared:
+                if is_urgent:
+                    self.logger.warning(f"⚠️ [{ticker}] 긴급 손절 취소 확인 제한시간(0.5초) 도달 -> 확인 여부 무관 즉시 매도 발주")
+                else:
+                    self.logger.warning(f"⚠️ [{ticker}] 취소 요청 후 미체결 잔여 감지 또는 확인 지연")
+            return all_cleared
 
         except Exception as e:
             self.logger.error(f"⚠️ 미체결 정리 중 오류: {e}")
+            return False

@@ -1,4 +1,5 @@
 #infra/real_portfolio.py
+import time
 import logging
 from config import Config
 import datetime
@@ -35,8 +36,14 @@ class RealPortfolio:
         # [A3] 잔고 미반영 의심 감지 플래그 및 매도 추적 변수
         self.is_balance_unconfirmed = False
         self._sale_in_progress = False
+        self._sale_in_progress_time = 0.0
         self._balance_before_sale = 0.0
         self._pending_sale_proceeds = 0.0
+        
+        # [작업 1 & 2] 세션 시작 총자산, 정산 지연 여부 및 봇 관리 종목 영구 집합
+        self.session_start_equity = 0.0        # 17:00 프리마켓 첫 하트비트 시 래치된 총자산
+        self.is_delayed_settlement = False     # 3회 재조회 후에도 KIS 미반영 시 True
+        self.bot_managed_tickers = set()       # 봇이 진입한 종목 코드 집합 (수동 포지션 오분류 방지)
         
         # Positions Dictionary
         # { 'TICKER': { 'qty': 10, 'entry_price': 100, 'highest_price': 120, ... } }
@@ -82,6 +89,8 @@ class RealPortfolio:
             # TTTS3007R (주문 가능 금액) 사용 -> 미수 발생 방지
             buying_power = self.kis.get_buyable_cash()
             self.balance = float(buying_power)
+            # [작업 C] sync_with_kis에서도 예수금 갱신 즉시 pending_sale_proceeds 해제 판정
+            self._check_and_release_pending_sale()
 
             # 2. 보유 종목 API 조회
             holdings = self.kis.get_balance() # List[Dict] 반환
@@ -137,6 +146,8 @@ class RealPortfolio:
                             'entry_price': entry_price, # 👈 [핵심 추가] 실제 증권사 평단가로 덮어쓰기!
                             'entry_time': cached_entry_time # ✨ [추가] API 동기화 시 시간 정보 보존
                         })
+                        if not self.positions[ticker].get('exchange') and item.get('exchange'):
+                            self.positions[ticker]['exchange'] = item.get('exchange')
                         
                         # 고점 갱신 로직 (기존 유지)
                         if current_price > self.positions[ticker].get('highest_price', 0):
@@ -144,10 +155,12 @@ class RealPortfolio:
 
                     else:
                         # 로컬에 없던 신규 종목 (API에는 있는데 로컬엔 없는 경우)
-                        # 이 경우 정확한 매수 시점을 알 수 없으므로, '현재 시간'을 기준으로 잡거나 비워둡니다.
-                        # 여기서는 보수적으로 '현재 시간'을 넣어 타임 컷이 바로 발동되지 않게 합니다.
                         now_et = datetime.datetime.now(pytz.timezone('US/Eastern'))
+                        restored_meta = self.last_sync_removed_positions.get(ticker, {})
+                        strat_name = restored_meta.get('strategy_name', restored_meta.get('strategy', 'EMA'))
                         
+                        is_bot = (ticker in self.bot_managed_tickers) or restored_meta.get('is_bot_managed', False)
+
                         self.positions[ticker] = {
                             'ticker': ticker,
                             'qty': qty,
@@ -156,7 +169,17 @@ class RealPortfolio:
                             'eval_value': eval_amt,
                             'pnl_pct': pnl_pct,
                             'highest_price': current_price,
-                            'entry_time': now_et # ✨ [추가] 초기화
+                            'entry_time': restored_meta.get('entry_time', now_et),
+                            'strategy': strat_name,
+                            'strategy_name': strat_name,
+                            'is_bot_managed': is_bot,
+                            'is_manual': not is_bot,
+                            'alpha_id': restored_meta.get('alpha_id', ''),
+                            'target_price': restored_meta.get('target_price', 0.0),
+                            'time_cut_minutes': restored_meta.get('time_cut_minutes', 45 if strat_name == 'ALPHA' else 0),
+                            'tp_pct': restored_meta.get('tp_pct', getattr(Config, 'ALPHA_TP_PCT', 0.035) if strat_name == 'ALPHA' else getattr(Config, 'TARGET_PROFIT_PCT', 0.07)),
+                            'sl_pct': restored_meta.get('sl_pct', -0.10),
+                            'exchange': item.get('exchange') or restored_meta.get('exchange', 'NASD')
                         }
                     
                     current_stock_value += eval_amt
@@ -165,12 +188,26 @@ class RealPortfolio:
             # 로컬에는 있었는데 API 목록(api_tickers)에 없다면 -> 매도된 것임
             self.last_sync_removed_positions.clear()
             local_tickers = list(self.positions.keys())
+            now_for_grace = datetime.datetime.now(pytz.timezone('US/Eastern'))
             for ticker in local_tickers:
                 if ticker not in api_tickers:
+                    pos = self.positions[ticker]
+                    entry_t = pos.get('entry_time')
+                    # 🛡️ [매수 직후 원장 미반영 유예 가드 - 60초]
+                    if entry_t:
+                        entry_t_cmp = entry_t
+                        if hasattr(entry_t_cmp, 'tzinfo') and entry_t_cmp.tzinfo is None:
+                            entry_t_cmp = pytz.timezone('US/Eastern').localize(entry_t_cmp)
+                        elapsed_sec = (now_for_grace - entry_t_cmp).total_seconds()
+                        if 0 <= elapsed_sec < 60:
+                            self.logger.info(f"⏳ [Sync Grace] {ticker} 최근 매수({elapsed_sec:.1f}초 전) 원장 미반영 대기 중 -> 삭제 유예")
+                            continue
+
                     self.logger.info(f"🗑️ [Sync] Position Removed detected: {ticker}")
                     self.last_sync_removed_positions[ticker] = dict(self.positions[ticker])
                     del self.positions[ticker]
                     self.ban_list.add(ticker) # [Cool-down] 금일 재매수 금지 등록
+                    self.bot_managed_tickers.discard(ticker)
 
             # 4. 체결기준 총 자산 가치 업데이트 (증권사 D+2 지연 대금 이중합산 제거)
             self.total_equity = self.get_effective_balance() + current_stock_value
@@ -182,11 +219,110 @@ class RealPortfolio:
             self.logger.error(f"❌ [Sync Fail] Portfolio Sync Failed: {e}")
             # 동기화 실패 시 로컬 상태 유지 (삭제하지 않음)
 
-    def register_realized_sale(self, ticker, qty, sell_price, entry_price, reason='SELL', fee_rate=0.001):
+    def _check_and_release_pending_sale(self):
+        """매도 체결 후 잔고 반영 확인 및 해제 (sync_balance, sync_with_kis 공통, 120초 타임아웃 지원)"""
+        if not getattr(self, '_sale_in_progress', False):
+            return
+
+        now_t = time.time()
+        # 1) 120초 타임아웃 초과 시 강제 해제 (작업 C 추가조건 2)
+        elapsed_t = now_t - getattr(self, '_sale_in_progress_time', now_t)
+        if elapsed_t > 120.0:
+            self.logger.warning(
+                f"⏰ [_sale_in_progress 타임아웃 해제 ({elapsed_t:.1f}초 > 120초)] "
+                f"pending_sale_proceeds(${self._pending_sale_proceeds:,.2f}) 강제 해제"
+            )
+            self._sale_in_progress = False
+            self._pending_sale_proceeds = 0.0
+            self.is_delayed_settlement = False
+            self.is_balance_unconfirmed = False
+            return
+
+        # 2) 예수금에 매도대금이 정상 반영되었는지 확인 (직전 balance + pending의 50% 이상 증가)
+        min_expected = getattr(self, '_balance_before_sale', 0.0) + (getattr(self, '_pending_sale_proceeds', 0.0) * 0.5)
+        if self.balance >= min_expected:
+            self.logger.info(
+                f"✅ [잔고 반영 완료] balance(${self.balance:,.2f}) >= 최소기대치(${min_expected:,.2f}) "
+                f"-> pending_sale_proceeds 정상 해제"
+            )
+            self.is_balance_unconfirmed = False
+            self.is_delayed_settlement = False
+            self._sale_in_progress = False
+            self._pending_sale_proceeds = 0.0
+        else:
+            self.logger.warning(
+                f"⚠️ [잔고 미반영 대기] balance(${self.balance:,.2f}) < 최소기대치(${min_expected:,.2f})"
+            )
+            self.is_balance_unconfirmed = True
+
+    def confirm_post_sell_balance(self, old_balance: float, net_proceeds: float):
+        """
+        [작업 2] 실전 매도 후 예수금 반영 대기 및 재조회 엔진
+        - 매도 직후 1.5초 대기 후 KIS 예수금을 재조회
+        - 잔고가 늘지 않았으면 1초 간격으로 최대 3회 재조회
+        - 그래도 늘지 않았을 때만 _pending_sale_proceeds를 가산하고 is_delayed_settlement=True, "(반영 지연 가능)" 표기
+        - 잔고가 정상 증가했으면 _pending_sale_proceeds는 0 유지 및 is_delayed_settlement=False
+        """
+        if self.is_paper:
+            return
+
+        time.sleep(1.5)
+        raw_cash = self.kis.get_buyable_cash()
+        try:
+            new_cash = float(raw_cash)
+        except (TypeError, ValueError):
+            new_cash = float(old_balance)
+        min_expected = old_balance + (net_proceeds * 0.5)
+
+        increased = (new_cash >= min_expected) or (new_cash > old_balance + 1.0)
+        
+        if not increased:
+            for retry_i in range(1, 4):
+                time.sleep(1.0)
+                raw_retry = self.kis.get_buyable_cash()
+                try:
+                    new_cash = float(raw_retry)
+                except (TypeError, ValueError):
+                    new_cash = float(old_balance)
+                if (new_cash >= min_expected) or (new_cash > old_balance + 1.0):
+                    increased = True
+                    self.logger.info(f"✅ [매도 후 잔고 확인 성공] 재시도 #{retry_i} KIS 예수금 반영 확인: ${new_cash:,.2f}")
+                    break
+                else:
+                    self.logger.warning(f"⏳ [매도 후 잔고 대기] 재시도 #{retry_i}/3 KIS 예수금 미증가 (${new_cash:,.2f} <= ${old_balance:,.2f})")
+
+        self.balance = float(new_cash)
+        if increased:
+            self._pending_sale_proceeds = 0.0
+            self._sale_in_progress = False
+            self.is_delayed_settlement = False
+            self.is_balance_unconfirmed = False
+            self.logger.info(f"✅ [매도 후 예수금 즉시 반영] KIS 잔고 ${self.balance:,.2f} (old: ${old_balance:,.2f})")
+        else:
+            self._pending_sale_proceeds = float(net_proceeds)
+            self._sale_in_progress = True
+            self._sale_in_progress_time = time.time()
+            self._balance_before_sale = float(old_balance)
+            self.is_delayed_settlement = True
+            self.is_balance_unconfirmed = True
+            self.logger.warning(
+                f"⚠️ [매도 후 예수금 지연] 3회 재조회 후에도 KIS 미반영 -> pending_sale_proceeds(${net_proceeds:,.2f}) 가산 (반영 지연 가능)"
+            )
+
+        # 총자산 재계산
+        current_val = sum(
+            p['qty'] * p.get('current_price', p.get('entry_price', 0.0))
+            for p in self.positions.values()
+        )
+        pending = self._pending_sale_proceeds if self.is_delayed_settlement else 0.0
+        self.total_equity = self.balance + pending + current_val
+
+    def register_realized_sale(self, ticker, qty, sell_price, entry_price, reason='SELL', fee_rate=0.001, is_broker_execution=False):
         """
         [Trade-Date Settlement]
         매도 체결 즉시 실현손익 및 D+2 미결제 매도대금을 로컬에 반영.
         증권사 D+2 예수금 지연 입금으로 인한 자산 증발 왜곡을 100% 방어함.
+        - is_broker_execution=True (브로커 선주문 익절): 원장에 이미 반영되었으므로 pending 등록 생략
         """
         gross_proceeds = sell_price * qty
         fee = gross_proceeds * fee_rate
@@ -205,13 +341,9 @@ class RealPortfolio:
             f"🔍 [register_realized_sale DEBUG] 순매도대금: ${net_proceeds:,.2f} | 호출 직전 balance: ${self.balance:,.2f}"
         )
 
-        # [A3] 매도 후 잔고 미반영 의심 감지용 직전 잔고 및 누적 매도대금 추적
-        if not getattr(self, '_sale_in_progress', False):
-            self._balance_before_sale = self.balance
-            self._pending_sale_proceeds = net_proceeds
-            self._sale_in_progress = True
-        else:
-            self._pending_sale_proceeds += net_proceeds
+        # [작업 2] pending_sale_proceeds는 confirm_post_sell_balance에서 3회 재조회 후에도 미반영 시에만 가산
+        if is_broker_execution:
+            self.logger.info(f"ℹ️ [{ticker}] 브로커 지정가 체결 확인 -> pending_sale_proceeds 가산 생략 (이중계산 방지)")
 
         self.daily_realized_pnl += pnl
         if not self.is_paper:
@@ -235,7 +367,8 @@ class RealPortfolio:
             for t, p in self.positions.items()
             if t != ticker
         )
-        self.total_equity = self.get_effective_balance() + current_val
+        pending = self._pending_sale_proceeds if getattr(self, 'is_delayed_settlement', False) else 0.0
+        self.total_equity = float(self.balance) + pending + current_val
 
         self.logger.info(
             f"📈 [Trade Realized] {ticker} | PnL: ${pnl:+,.2f} ({ret_pct:+.2f}%) | "
@@ -247,19 +380,22 @@ class RealPortfolio:
         """[Daily Reset] 자정/세션 시작 시 당일 손익 초기화"""
         self.daily_realized_pnl = 0.0
         self.initial_seed_today = 0.0
+        self.session_start_equity = 0.0
         self.unsettled_sell_amount = 0.0
+        self.is_delayed_settlement = False
         self.is_balance_unconfirmed = False
         self._sale_in_progress = False
         self._pending_sale_proceeds = 0.0
+        self.bot_managed_tickers.clear()
         self.closed_trades_today.clear()
         self.ban_list.clear()
         self.logger.info("🔄 [RealPortfolio] 일일 실현손익 및 미결제대금 초기화 완료")
 
-    def validate_and_apply_state(self, saved_date: str, daily_pnl: float, unsettled: float, saved_seed: float = 0.0) -> bool:
+    def validate_and_apply_state(self, saved_date: str, daily_pnl: float, unsettled: float, saved_seed: float = 0.0, session_start_equity: float = 0.0, bot_managed_tickers: list = None) -> bool:
         """
         [지시 1-2 & 작업 2 안전장치] system_state.json 로드 시, 저장된 trade_date가 현재 거래일 키와 다르면
         어제 손익 및 미결제 대금을 복원하지 않고 즉시 daily_reset()을 호출합니다.
-        거래일이 일치하면 daily_pnl, unsettled, initial_seed_today를 복원합니다.
+        거래일이 일치하면 daily_pnl, unsettled, initial_seed_today, session_start_equity, bot_managed_tickers를 복원합니다.
         """
         from infra.utils import get_trade_date_key
         current_trade_date = get_trade_date_key()
@@ -274,9 +410,14 @@ class RealPortfolio:
         self.daily_realized_pnl = float(daily_pnl)
         self.unsettled_sell_amount = float(unsettled)
         self.initial_seed_today = float(saved_seed)
+        if session_start_equity and float(session_start_equity) > 0:
+            self.session_start_equity = float(session_start_equity)
+        if bot_managed_tickers:
+            self.bot_managed_tickers.update(bot_managed_tickers)
         self.logger.info(
             f"🔄 [당일 상태 복원] 거래일: {saved_date} | 손익: ${self.daily_realized_pnl:+,.2f} | "
-            f"미결제: ${self.unsettled_sell_amount:,.2f} | 시작시드: ${self.initial_seed_today:,.2f}"
+            f"미결제: ${self.unsettled_sell_amount:,.2f} | 시작시드: ${self.initial_seed_today:,.2f} | "
+            f"세션시작총자산: ${self.session_start_equity:,.2f} | 봇관리종목: {list(self.bot_managed_tickers)}"
         )
         return True
 
@@ -365,8 +506,35 @@ class RealPortfolio:
             
         return recovered_count
 
-    def has_open_slot(self):
-        """빈 슬롯 확인 (Double Engine)"""
+    def has_open_slot(self, strategy=None):
+        """
+        [공유자본풀 슬롯 및 단일 슬롯 가드]
+        - Alpha: 단일 슬롯. 이미 Alpha 보유 중이거나 EMA가 2슬롯 사용 중이면 진입 불가.
+        - EMA: 슬롯 0.5. Alpha 보유 중(가용자본 0)이거나 EMA가 2슬롯 사용 중이면 진입 불가.
+        - strategy 미지정: Alpha 보유 중이면 진입 불가, 아니면 전체 슬롯 개수 확인.
+        """
+        has_alpha = any(
+            p.get('strategy') == 'ALPHA' or p.get('strategy_name') == 'ALPHA'
+            for p in self.positions.values()
+        )
+        ema_count = sum(
+            1 for p in self.positions.values()
+            if p.get('strategy') != 'ALPHA' and p.get('strategy_name') != 'ALPHA'
+        )
+
+        if strategy == 'ALPHA':
+            if has_alpha:
+                return False
+            return ema_count < self.MAX_SLOTS
+
+        if strategy == 'EMA':
+            if has_alpha:
+                return False
+            return ema_count < self.MAX_SLOTS
+
+        # strategy 미지정 (하위 호환)
+        if has_alpha:
+            return False
         return len(self.positions) < self.MAX_SLOTS
 
     def is_holding(self, ticker):
@@ -395,13 +563,15 @@ class RealPortfolio:
         else:
             self.logger.info(f"📕 [Local Close] Position already absent: {ticker}")
 
+        self.bot_managed_tickers.discard(ticker)
         self.ban_list.add(ticker)
 
         current_val = sum(
             p['qty'] * p.get('current_price', p.get('entry_price', 0.0))
             for p in self.positions.values()
         )
-        self.total_equity = self.get_effective_balance() + current_val
+        pending = self._pending_sale_proceeds if getattr(self, 'is_delayed_settlement', False) else 0.0
+        self.total_equity = float(self.balance) + pending + current_val
 
         return removed
 
@@ -411,16 +581,21 @@ class RealPortfolio:
         목표: 전체 자산의 50% 베팅 (EMA) 또는 잔여 가용자본 스윕 (Alpha, 최대 100%)
         수정: 시장가 주문(+5% 할증)을 고려하여 현금 버퍼를 2% -> 10%로 확대
         """
-        # 1. 현재 슬롯 확인 (이미 꽉 찼으면 0 반환)
-        if len(self.positions) >= self.MAX_SLOTS:
+        # 1. 현재 슬롯 확인 (공유자본풀 및 Alpha 단일 슬롯 가드)
+        if not self.has_open_slot(strategy=strategy):
             return 0.0
+
+        ema_count = sum(
+            1 for p in self.positions.values()
+            if p.get('strategy') != 'ALPHA' and p.get('strategy_name') != 'ALPHA'
+        )
 
         # 2. 목표 금액 계산
         if capital_frac is not None:
             target_amount = self.total_equity * float(capital_frac)
         elif strategy == 'ALPHA':
-            rem_slots = max(0, self.MAX_SLOTS - len(self.positions))
-            slot_ratio = 1.0 if len(self.positions) == 0 else (rem_slots / self.MAX_SLOTS)
+            # Alpha 단일 슬롯: 남은 가용 자본 비율 (EMA 0개면 1.0, EMA 1개면 0.5)
+            slot_ratio = max(0.0, 1.0 - (ema_count * 0.5))
             target_amount = self.total_equity * slot_ratio
         else:
             target_amount = self.total_equity / self.MAX_SLOTS
@@ -430,10 +605,8 @@ class RealPortfolio:
         capped_target = min(target_amount, cap) if (cap is not None and cap > 0) else target_amount
 
         # 4. [안전 장치] 주문 가능 현금의 90% (수수료 + 시장가 할증 5% 커버)
-        # 매도 직후 증권사 API 일시 지연 시 체결기준 유효 가용 현금(get_effective_balance) 사용
-        available_cash = self.get_effective_balance()
-        if available_cash < 20 and getattr(self, 'unsettled_sell_amount', 0.0) > 0:
-            available_cash = max(available_cash, self.unsettled_sell_amount * 0.95)
+        # [작업 2-2] 주문 한도 계산에는 pending을 더하지 않은 순수 KIS 예수금만 사용
+        available_cash = float(self.balance)
         safe_cash = available_cash * 0.90 
         
         # 5. 최종 주문 금액 (둘 중 작은 값)
@@ -480,13 +653,23 @@ class RealPortfolio:
         if capital_frac is not None:
             uncapped_target = self.total_equity * float(capital_frac)
         elif strategy == 'ALPHA':
-            rem_slots = max(0, self.MAX_SLOTS - len(self.positions))
-            slot_ratio = 1.0 if len(self.positions) == 0 else (rem_slots / self.MAX_SLOTS)
+            has_alpha = any(
+                p.get('strategy') == 'ALPHA' or p.get('strategy_name') == 'ALPHA'
+                for p in self.positions.values()
+            )
+            ema_count = sum(
+                1 for p in self.positions.values()
+                if p.get('strategy') != 'ALPHA' and p.get('strategy_name') != 'ALPHA'
+            )
+            if has_alpha or ema_count >= self.MAX_SLOTS:
+                return 0
+            slot_ratio = max(0.0, 1.0 - (ema_count * 0.5))
             uncapped_target = self.total_equity * slot_ratio
         else:
             uncapped_target = self.total_equity / max(1, self.MAX_SLOTS)
 
-        safe_cash = self.get_effective_balance() * 0.90
+        # [작업 2-2] 주문 수량 계산에는 pending을 더하지 않은 순수 KIS 예수금만 사용
+        safe_cash = float(self.balance) * 0.90
         uncapped_order_amt = min(uncapped_target, safe_cash)
         uncapped_qty = int(uncapped_order_amt / price) if uncapped_order_amt >= 20 else 0
 
@@ -547,6 +730,7 @@ class RealPortfolio:
         if fill['type'] == 'BUY':
             cost = qty * price
             self.balance -= cost
+            self.bot_managed_tickers.add(ticker)
             
             # 🕒 [Time Cut] 현재 미국 시간 기록
             now_et = datetime.datetime.now(pytz.timezone('US/Eastern'))
@@ -569,10 +753,13 @@ class RealPortfolio:
                 'entry_time': now_et,        # 진입 시간 기록
                 'strategy': strat_name,      # 전략 식별 키 ('EMA' vs 'ALPHA')
                 'strategy_name': strat_name,  # 전략 식별 메타데이터 태깅
+                'is_bot_managed': True,
+                'is_manual': False,
                 'alpha_id': fill.get('alpha_id', ''),
                 'time_cut_minutes': fill.get('time_cut_minutes', fill.get('max_hold_min', getattr(Config, 'ALPHA_TIME_CUT_MINUTES', 45) if strat_name == 'ALPHA' else 0)),
                 'tp_pct': fill.get('tp_pct', getattr(Config, 'ALPHA_TP_PCT', 0.035) if strat_name == 'ALPHA' else getattr(Config, 'TARGET_PROFIT_PCT', 0.07)),
-                'sl_pct': fill.get('sl_pct', getattr(Config, 'ALPHA_SL_PCT', -0.10) if strat_name == 'ALPHA' else -0.10)
+                'sl_pct': fill.get('sl_pct', getattr(Config, 'ALPHA_SL_PCT', -0.10) if strat_name == 'ALPHA' else -0.10),
+                'exchange': fill.get('exchange', 'NASD')
             }
             
             self.logger.info(f"✅ [Local Update] BUY {ticker} ({qty}주 @ ${price}) [{strat_name}] | Balance: ${self.balance:.2f}")
@@ -581,6 +768,7 @@ class RealPortfolio:
             # [수정 3] 수수료(0.2% 가정)를 뗀 금액만 예수금에 반영하여 '자금 부족' 방지
             revenue = (qty * price) * 0.998 
             self.balance += revenue
+            self.bot_managed_tickers.discard(ticker)
             
             if ticker in self.positions:
                 del self.positions[ticker]
@@ -590,7 +778,8 @@ class RealPortfolio:
                 
                 # [필수] 주문 직후 총 자산(Equity) 재계산
                 current_val = sum(p['qty'] * p['current_price'] for p in self.positions.values())
-                self.total_equity = self.balance + current_val
+                pending = self._pending_sale_proceeds if getattr(self, 'is_delayed_settlement', False) else 0.0
+                self.total_equity = self.balance + pending + current_val
 
     def update_highest_price(self, ticker, current_price):
         """
@@ -606,20 +795,25 @@ class RealPortfolio:
     
     def get_effective_balance(self) -> float:
         """
-        [체결기준 유효 가용 현금 (Trade-Date Settled Buying Power)]
-        - 실전 모드(REAL)에서 매도 체결 직후 증권사(KIS) 원장에 매도 대금이 
-          아직 입금 반영되지 않은 경우(_sale_in_progress=True),
-          체결 완료된 순매도대금(_pending_sale_proceeds)을 합산하여 정확한 가용 현금을 반환합니다.
-        - 증권사 원장에 정상 반영되어 _sale_in_progress가 해제되면 self.balance를 반환합니다.
-        - 가상/페이퍼 모드(PAPER)에서는 self.balance를 그대로 반환합니다.
+        [가용 현금 반환]
+        - 3회 재조회 후에도 KIS 원장 미반영(is_delayed_settlement=True)된 경우에만 pending_sale_proceeds 가산
+        - 평상시 및 브로커 익절 시에는 순수 KIS balance 반환
         """
         if self.is_paper:
             return float(self.balance)
             
-        if getattr(self, '_sale_in_progress', False) and getattr(self, '_pending_sale_proceeds', 0.0) > 0:
+        if getattr(self, 'is_delayed_settlement', False) and getattr(self, '_pending_sale_proceeds', 0.0) > 0:
             return float(self.balance + self._pending_sale_proceeds)
             
         return float(self.balance)
+
+    def get_account_pnl(self) -> float:
+        """
+        [작업 2-4] 계좌 기준 당일 손익 (현재 총자산 - 세션 시작 총자산)
+        """
+        if getattr(self, 'session_start_equity', 0.0) > 0:
+            return float(self.total_equity - self.session_start_equity)
+        return 0.0
 
     def _maybe_latch_initial_seed(self):
         """
@@ -663,19 +857,8 @@ class RealPortfolio:
                 self._maybe_latch_initial_seed()
                 self.logger.info(f"💰 [Sync] 잔고 갱신 완료: ${old_balance:.2f} -> ${self.balance:.2f}")
 
-            # [A3] 매도 체결 후 잔고 미반영 의심 경고 감지
-            if getattr(self, '_sale_in_progress', False):
-                min_expected = self._balance_before_sale + (self._pending_sale_proceeds * 0.5)
-                if self.balance < min_expected:
-                    self.logger.warning(
-                        f"⚠️ [잔고 미반영 의심] sync_balance 결과(${self.balance:,.2f}) < "
-                        f"직전 balance(${self._balance_before_sale:,.2f}) + 순매도대금(${self._pending_sale_proceeds:,.2f}) × 0.5 (${min_expected:,.2f})"
-                    )
-                    self.is_balance_unconfirmed = True
-                else:
-                    self.is_balance_unconfirmed = False
-                    self._sale_in_progress = False
-                    self._pending_sale_proceeds = 0.0
+            # [A3 / 작업 C] 매도 체결 후 잔고 미반영 의심 감지 및 120초 타임아웃 해제
+            self._check_and_release_pending_sale()
 
             # 체결기준 총자산 최신화
             current_stock_val = sum(
