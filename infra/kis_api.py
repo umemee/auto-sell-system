@@ -494,29 +494,89 @@ class KisApi:
                 "ORD_DVSN": ord_dvsn 
             }
             
-            self.logger.info(
-                f"📤 [KIS 주문 요청 전송] TR={tr_id} | 거래소={try_exch} | 종목={symbol} | "
-                f"구분={side} | 수량={qty}주 | 가격=${final_price} | dvsn={ord_dvsn} | Body={body}"
-            )
+            # 최초 1회 + 재시도 최대 2회 = 총 최대 3회 시도
+            max_attempts = 3
+            attempt = 0
             
-            try:
-                res = requests.post(f"{self.base_url}{path}", headers=self.headers, json=body, timeout=10)
-                data = res.json()
+            while attempt < max_attempts:
+                attempt += 1
+                self.logger.info(
+                    f"📤 [KIS 주문 요청 전송] TR={tr_id} | 거래소={try_exch} | 종목={symbol} | "
+                    f"구분={side} | 수량={qty}주 | 가격=${final_price} | dvsn={ord_dvsn} | Body={body}"
+                )
                 
-                if data.get('rt_cd') == '0':
-                    odno = data['output'].get('ODNO')
-                    self.last_order_exchange = try_exch
-                    self.logger.info(f"✅ [KIS 주문 성공] ({try_exch}) [{side}] {symbol} {qty}주 #{odno} | 원응답: {data}")
-                    return odno
-                else:
-                    msg = data.get('msg1')
-                    code = data.get('msg_cd')
-                    self.logger.warning(f"⚠️ [KIS 주문 거부] ({try_exch}): {msg} (Code: {code}) | 원응답: {data} -> 다음 거래소 후보 시도")
+                try:
+                    res = requests.post(f"{self.base_url}{path}", headers=self.headers, json=body, timeout=10)
+                    data = res.json()
+                    
+                    if data.get('rt_cd') == '0':
+                        output_data = data.get('output', {}) if isinstance(data.get('output'), dict) else {}
+                        odno = output_data.get('ODNO')
+                        if odno:
+                            self.last_order_exchange = try_exch
+                            self.last_error_msg = ""
+                            self.logger.info(f"✅ [KIS 주문 성공] ({try_exch}) [{side}] {symbol} {qty}주 #{odno} | 원응답: {data}")
+                            return odno
+                        else:
+                            self.logger.warning(f"⚠️ [KIS 주문 응답 비정상] ({try_exch}): rt_cd는 0이나 ODNO 누락 | 원응답: {data}")
+                            last_error_msg = "주문 성공 응답이나 ODNO 누락"
+                            return None
+                    
+                    msg = data.get('msg1', '')
+                    code = data.get('msg_cd', '')
                     last_error_msg = f"{msg} ({code})"
                     
-            except Exception as e: 
-                self.logger.error(f"❌ [KIS 주문 통신 에러] ({try_exch}): {e}")
-                last_error_msg = str(e)
+                    # 🚨 [안전 가드 1] EGW00201(초당 거래건수 초과): 동일 거래소에서만 점진적 재시도
+                    if code == 'EGW00201':
+                        if attempt < max_attempts:
+                            wait_sec = 0.5 if attempt == 1 else 1.0
+                            self.logger.warning(
+                                f"⏳ [초당 거래건수 초과] ({try_exch}): {wait_sec}초 대기 후 동일 거래소 재시도 ({attempt}/{max_attempts-1})..."
+                            )
+                            time.sleep(wait_sec)
+                            self._update_headers(tr_id)
+                            continue
+                        else:
+                            self.logger.error(
+                                f"❌ [초당 거래건수 초과 소진] ({try_exch}): 총 {max_attempts}회 시도 실패 -> 주문 중단 (타 거래소 전이 금지)"
+                            )
+                            self.last_error_msg = last_error_msg
+                            return None
+                    
+                    # 🚨 [안전 가드 2] 종목 부재 에러(APBK0656, APBN0746)일 때만 거래소 후보 순회 허용
+                    if code in ['APBK0656', 'APBN0746']:
+                        self.logger.warning(
+                            f"⚠️ [KIS 주문 거부 - 종목 부재] ({try_exch}): {msg} (Code: {code}) | 원응답: {data} -> 다음 거래소 후보 시도"
+                        )
+                        break
+                    
+                    # 🚨 [안전 가드 3] 그 외 비즈니스 거부(예수금 부족, 호가 이탈 등): 타 거래소 시도 무의미 -> 즉시 종료
+                    self.logger.warning(
+                        f"⚠️ [KIS 주문 거부] ({try_exch}): {msg} (Code: {code}) | 원응답: {data} -> 즉시 종료"
+                    )
+                    self.last_error_msg = last_error_msg
+                    return None
+                    
+                except requests.exceptions.Timeout as te:
+                    self.logger.error(
+                        f"🚨 [KIS 주문 타임아웃] ({try_exch}): 증권사 응답 지연으로 접수 여부 불확실. 중복 주문 방지를 위해 즉시 전송 중단. HTS/원장 상태 확인 필요: {te}"
+                    )
+                    self.last_error_msg = f"주문 타임아웃 (접수 여부 불확실, HTS/원장 확인 필요): {te}"
+                    return None
+                    
+                except requests.exceptions.ConnectionError as ce:
+                    self.logger.error(
+                        f"🚨 [KIS 주문 연결 실패] ({try_exch}): 네트워크 연결 에러. 중복 주문 방지를 위해 타 거래소 전이 중단. HTS/원장 상태 확인 필요: {ce}"
+                    )
+                    self.last_error_msg = f"주문 연결 실패 (접수 여부 불확실): {ce}"
+                    return None
+                    
+                except Exception as e:
+                    self.logger.error(
+                        f"🚨 [KIS 주문 통신 예외] ({try_exch}): {e}. 중복 주문 방지를 위해 타 거래소 전이 중단. HTS/원장 상태 확인 필요."
+                    )
+                    self.last_error_msg = f"주문 통신 에러: {e}"
+                    return None
             
             time.sleep(0.2)
 
