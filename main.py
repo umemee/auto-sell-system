@@ -505,15 +505,17 @@ def main():
                 result = candle_exporter.export_zip_and_send(export_date)
                 manifest_rows = result.get("manifest_rows", [])
                 saved_count = sum(1 for row in manifest_rows if row.get("status") == "saved")
+                portfolio.last_exported_candle_count = saved_count
                 zip_path = result.get("zip_path", "")
                 telegram_sent = result.get("telegram_sent", False)
 
                 if zip_path:
                     delivery = "Telegram sent" if telegram_sent else "Local only"
                     logger.info(f"📦 [Live Export] {reason} | files={saved_count} | zip={zip_path} | {delivery}")
-                    bot.send_message(
-                        f"📦 [Live Candle Export]\nReason: {reason}\nFiles: {saved_count}\nZip: {zip_path}\nDelivery: {delivery}"
-                    )
+                    if reason != "eod":
+                        bot.send_message(
+                            f"📦 [Live Candle Export]\nReason: {reason}\nFiles: {saved_count}\nZip: {zip_path}\nDelivery: {delivery}"
+                        )
                 return result
             except Exception as export_error:
                 logger.error(f"❌ [Live Export] {reason} failed: {export_error}")
@@ -701,16 +703,13 @@ def main():
                                     watchdog_backoff_until[w_sym] = now_ts + backoff_sec
                                     watchdog_fail_counts[w_sym] = 0
                                     bot.send_message(
-                                        f"🚨 [익절 워치독 경보] {w_sym} 연속 재발주 5회 실패!\n"
-                                        f"• 백오프 가동: {backoff_sec // 60}분간 재발주 중단\n"
-                                        f"• 사유: {err_m}"
+                                        f"🚨 [긴급/워치독] {w_sym} 익절 재발주 5회 최종 실패 - 수동 개입 필요\n"
+                                        f"• 사유: {err_m}\n"
+                                        f"• 조치: {backoff_sec // 60}분간 재발주 중단 (백오프 가동)"
                                     )
                                     logger.error(f"🚨 [익절 워치독] {w_sym} 연속 5회 재발주 실패 -> 백오프 {backoff_sec}초 설정")
                                 else:
-                                    last_alert_t = watchdog_alert_throttle.get(w_sym, 0)
-                                    if now_ts - last_alert_t >= 300: # 5분 스로틀링
-                                        watchdog_alert_throttle[w_sym] = now_ts
-                                        bot.send_message(f"🚨 [익절 워치독 경보] {w_sym} 익절 선주문 누락 감지 및 재발주 실패({fail_cnt}/5)! 수동 확인 필요: {err_m}")
+                                    logger.warning(f"⚠️ [익절 워치독] {w_sym} 익절 선주문 누락 감지 및 재발주 실패({fail_cnt}/5): {err_m}")
                         else:
                             # 2) [작업 G-1] 미체결 주문이 이미 존재하지만 실제 평단가 목표가와 오차가 있는 경우 정정
                             w_pendings = [p for p in pending_sells if p.get('symbol') == w_sym]
@@ -749,11 +748,13 @@ def main():
                                                     watchdog_backoff_until[w_sym] = now_ts + backoff_sec
                                                     watchdog_fail_counts[w_sym] = 0
                                                     bot.send_message(
-                                                        f"🚨 [익절 워치독 경보] {w_sym} 정정 재발주 연속 5회 실패!\n"
-                                                        f"• 백오프 가동: {backoff_sec // 60}분간 재발주 중단\n"
-                                                        f"• 사유: {err_m}"
+                                                        f"🚨 [긴급/워치독] {w_sym} 익절 재발주 5회 최종 실패 - 수동 개입 필요\n"
+                                                        f"• 사유: {err_m}\n"
+                                                        f"• 조치: {backoff_sec // 60}분간 재발주 중단 (백오프 가동)"
                                                     )
                                                     logger.error(f"🚨 [익절 워치독] {w_sym} 정정 재발주 5회 실패 -> 백오프 {backoff_sec}초")
+                                                else:
+                                                    logger.warning(f"⚠️ [익절 워치독] {w_sym} 정정 재발주 실패({fail_cnt}/5): {err_m}")
                                                 break
                 except Exception as wd_err:
                     logger.error(f"⚠️ [익절 워치독] 감시 중 예외 발생: {wd_err}")
@@ -848,7 +849,10 @@ def main():
                     closed_list = getattr(portfolio, 'closed_trades_today', [])
                     w_cnt = sum(1 for t in closed_list if t.get('pnl', 0) > 0)
                     l_cnt = sum(1 for t in closed_list if t.get('pnl', 0) <= 0)
-                    acct_pnl = portfolio.get_account_pnl()
+                    acct_pnl = getattr(portfolio, 'session_realized_pnl', getattr(portfolio, 'daily_realized_pnl', 0.0))
+                    start_eq = getattr(portfolio, 'session_start_equity', 0.0)
+                    sess_ret_pct = ((portfolio.total_equity - start_eq) / start_eq * 100.0) if start_eq > 0 else 0.0
+                    file_cnt = getattr(portfolio, 'last_exported_candle_count', len(active_candidates))
                     eod_msg = format_eod_summary_message(
                         kst_time_str=cur_k_str,
                         total_equity=portfolio.total_equity,
@@ -857,10 +861,14 @@ def main():
                         daily_account_pnl=acct_pnl,
                         trade_count=len(closed_list),
                         win_count=w_cnt,
-                        loss_count=l_cnt
+                        loss_count=l_cnt,
+                        date_str=current_date_str,
+                        session_return_pct=sess_ret_pct,
+                        closed_trades=closed_list,
+                        file_count=file_cnt
                     )
                     bot.send_message(eod_msg)
-                    logger.info(f"🌙 [EOD Summary Sent] {eod_msg}")
+                    logger.info(f"🌙 [EOD Summary Sent]\n{eod_msg}")
                     portfolio.eod_summary_sent_date = current_date_str
                     save_state(portfolio.ban_list, active_candidates, risk_filter.loss_blacklist, portfolio=portfolio)
             
@@ -1066,167 +1074,150 @@ def main():
                 is_alpha_sig = (sig.get('strategy') == 'ALPHA' or sig.get('strategy_name') == 'ALPHA')
                 alpha_mode = getattr(Config, 'ALPHA_TRADING_MODE', 'PAPER').upper()
 
-                if is_alpha_sig and alpha_mode == 'PAPER':
-                    time_cut = sig.get('time_cut_minutes', sig.get('max_hold_min', getattr(Config, 'ALPHA_TIME_CUT_MINUTES', 45)))
-                    alpha_lbl = sig.get('alpha_id', 'ALPHA')
-                    logger.info(
-                        f"🧪 [ALPHA PAPER] 알파 진입 신호 포착 (ALPHA_TRADING_MODE=PAPER, 실주문 미전송): "
-                        f"{sym} ({alpha_lbl}) @ ${entry_price:.4f}"
-                    )
-                    bot.send_message(
-                        f"🧪 [ALPHA 진입 신호 - PAPER 모드]\n"
-                        f"📦 종목: {sym}\n"
-                        f"🎯 세부전략: {alpha_lbl}\n"
-                        f"💵 진입가: ${entry_price:.4f}\n"
-                        f"⏱️ 타임컷: {time_cut}분\n"
-                        f"ℹ️ 안내: ALPHA_TRADING_MODE=PAPER 설정에 따라 실주문을 전송하지 않고 가상 기록합니다."
-                    )
-                    candle_cache.pop(sym, None)
+                if not portfolio.has_open_slot(strategy=sig_strat):
+                    logger.warning(f"🛑 [Slot Guard] {sym} ({sig_strat}) 가용 슬롯 부족 -> 진입 차단")
                     return False
 
-                if portfolio.has_open_slot(strategy=sig_strat):
-                    res = order_manager.execute_buy(portfolio, sig)
-                    if res:
-                        if res.get('msg'):
-                            bot.send_message(res['msg'])
-                        if res['status'] == 'success':
-                            candle_cache.pop(sym, None)
-                            save_state(portfolio.ban_list, active_candidates, risk_filter.loss_blacklist, portfolio=portfolio)
-                            time.sleep(1.5)
-                            portfolio.sync_with_kis()
+                res = order_manager.execute_buy(portfolio, sig)
+                if res:
+                    if res.get('msg'):
+                        bot.send_message(res['msg'])
+                    if res['status'] == 'success':
+                        candle_cache.pop(sym, None)
+                        save_state(portfolio.ban_list, active_candidates, risk_filter.loss_blacklist, portfolio=portfolio)
+                        time.sleep(1.5)
+                        portfolio.sync_with_kis()
 
-                            try:
-                                actual_pos = portfolio.get_position(sym)
-                                if actual_pos and actual_pos.get('entry_price', 0) > 0:
-                                    buy_p = actual_pos['entry_price']
+                        try:
+                            actual_pos = portfolio.get_position(sym)
+                            if actual_pos and actual_pos.get('entry_price', 0) > 0:
+                                buy_p = actual_pos['entry_price']
+                            else:
+                                buy_p = res.get('avg_price', sig['price'])
+
+                            if buy_p > 0:
+                                qty = res.get('qty', 0)
+                                is_pure_paper = getattr(Config, 'IS_PURE_PAPER', is_paper_mode)
+                                if not is_alpha_sig:
+                                    # EMA: +7% 지정가 사전 주문 전송
+                                    tp_pct = getattr(Config, 'TARGET_PROFIT_PCT', 0.07)
+                                    tgt_p = round_price(buy_p * (1.0 + tp_pct))
+                                    if sym in portfolio.positions:
+                                        portfolio.positions[sym]['target_price'] = tgt_p
+                                        if 'strategy_name' not in portfolio.positions[sym]:
+                                            portfolio.positions[sym]['strategy_name'] = sig.get('strategy_name', 'EMA')
+                                    if qty > 0:
+                                        if is_pure_paper:
+                                            logger.info(f"🔒 [PAPER Pre-Order] [EMA] {sym} 가상 익절 목표가(${tgt_p}) 감시 등록 완료 (평단가: ${buy_p:.3f})")
+                                        else:
+                                            assert not is_pure_paper, "CRITICAL GUARD: Pure paper mode must NEVER call send_order"
+                                            pos_exch = portfolio.positions.get(sym, {}).get('exchange') or getattr(kis, 'last_order_exchange', 'NASD')
+                                            logger.info(f"⚡ [REAL Pre-Order] [EMA] {sym} 실제 평단가(${buy_p:.3f}) 기반 익절 주문 전송 ({pos_exch}): ${tgt_p:.2f}")
+                                            order_sent = False
+                                            last_err = ""
+                                            for attempt in range(1, 4):
+                                                sell_res = kis.send_order(sym, "SELL", qty, tgt_p, "00", exchange=pos_exch)
+                                                if sell_res and sell_res.get('rt_cd') == '0':
+                                                    time.sleep(1.0)
+                                                    try:
+                                                        pending_sells = kis.get_pending_orders(sym, side="SELL")
+                                                        odno = sell_res.get('output', {}).get('ODNO')
+                                                        is_confirmed = any(p.get('odno') == odno or p.get('symbol') == sym for p in pending_sells)
+                                                    except Exception as chk_e:
+                                                        logger.warning(f"⚠️ [EMA Pre-Order] {sym} 미체결 검증 중 오류: {chk_e}")
+                                                        is_confirmed = True
+                                                    
+                                                    if not is_confirmed:
+                                                        time.sleep(1.0)
+                                                        try:
+                                                            pending_sells = kis.get_pending_orders(sym, side="SELL")
+                                                            is_confirmed = any(p.get('symbol') == sym for p in pending_sells)
+                                                        except Exception:
+                                                            is_confirmed = True
+
+                                                    if is_confirmed:
+                                                        order_sent = True
+                                                        logger.info(f"🔒 [EMA Pre-Order] {sym} 익절 주문 정상 접수 확인 (${tgt_p:.2f})")
+                                                        break
+                                                    else:
+                                                        last_err = "주문 접수 응답 성공했으나 미체결 목록 미확인 (누락 의심)"
+                                                        logger.warning(f"⚠️ [EMA Pre-Order] {sym} 시도 #{attempt}: {last_err}")
+                                                        time.sleep(0.5)
+                                                else:
+                                                    last_err = sell_res.get('msg1', '알 수 없는 오류') if sell_res else '무응답'
+                                                    logger.warning(f"⚠️ [EMA Pre-Order] {sym} 익절 주문 시도 #{attempt} 실패: {last_err}")
+                                                    time.sleep(0.5)
+                                            if not order_sent:
+                                                logger.error(f"❌ [EMA Pre-Order] {sym} 익절 주문 최종 실패: {last_err}")
+                                                bot.send_message(format_pre_order_ack_message(sym, target_price=tgt_p, is_success=False, err_msg="HTS에서 확인 필요"))
                                 else:
-                                    buy_p = res.get('avg_price', sig['price'])
+                                    # ALPHA: +3.5% 지정가 사전 주문 전송 및 동적 타임컷 등록
+                                    alpha_tp = getattr(Config, 'ALPHA_TP_PCT', 0.035)
+                                    tgt_p = round_price(buy_p * (1.0 + alpha_tp))
+                                    time_cut = sig.get('time_cut_minutes', sig.get('max_hold_min', getattr(Config, 'ALPHA_TIME_CUT_MINUTES', 45)))
+                                    alpha_lbl = sig.get('alpha_id', 'ALPHA')
+                                    if sym in portfolio.positions:
+                                        portfolio.positions[sym]['target_price'] = tgt_p
+                                        portfolio.positions[sym]['strategy'] = 'ALPHA'
+                                        portfolio.positions[sym]['strategy_name'] = 'ALPHA'
+                                        portfolio.positions[sym]['alpha_id'] = alpha_lbl
+                                        portfolio.positions[sym]['entry_time'] = now
+                                        portfolio.positions[sym]['time_cut_minutes'] = time_cut
+                                        portfolio.positions[sym]['tp_pct'] = alpha_tp
+                                        portfolio.positions[sym]['sl_pct'] = getattr(Config, 'ALPHA_SL_PCT', -0.10)
+                                    if qty > 0:
+                                        if is_pure_paper or (is_alpha_sig and alpha_mode == 'PAPER'):
+                                            logger.info(f"🔒 [PAPER Pre-Order] [ALPHA] {sym} 가상 익절 목표가(${tgt_p:.4f}) 감시 등록 완료 (평단가: ${buy_p:.3f}, 타임컷: {time_cut}분)")
+                                        else:
+                                            assert not is_pure_paper, "CRITICAL GUARD: Pure paper mode must NEVER call send_order"
+                                            pos_exch = portfolio.positions.get(sym, {}).get('exchange') or getattr(kis, 'last_order_exchange', 'NASD')
+                                            logger.info(f"⚡ [REAL Pre-Order] [ALPHA] {sym} 실제 평단가(${buy_p:.3f}) 기반 익절 주문 전송 ({pos_exch}): ${tgt_p:.2f} (사전 예약)")
+                                            order_sent = False
+                                            last_err = ""
+                                            for attempt in range(1, 4):
+                                                sell_res = kis.send_order(sym, "SELL", qty, tgt_p, "00", exchange=pos_exch)
+                                                if sell_res and sell_res.get('rt_cd') == '0':
+                                                    time.sleep(1.0)
+                                                    try:
+                                                        pending_sells = kis.get_pending_orders(sym, side="SELL")
+                                                        odno = sell_res.get('output', {}).get('ODNO')
+                                                        is_confirmed = any(p.get('odno') == odno or p.get('symbol') == sym for p in pending_sells)
+                                                    except Exception as chk_e:
+                                                        logger.warning(f"⚠️ [ALPHA Pre-Order] {sym} 미체결 검증 중 오류: {chk_e}")
+                                                        is_confirmed = True
 
-                                if buy_p > 0:
-                                    qty = res.get('qty', 0)
-                                    is_pure_paper = getattr(Config, 'IS_PURE_PAPER', is_paper_mode)
-                                    if not is_alpha_sig:
-                                        # EMA: +7% 지정가 사전 주문 전송
-                                        tp_pct = getattr(Config, 'TARGET_PROFIT_PCT', 0.07)
-                                        tgt_p = round_price(buy_p * (1.0 + tp_pct))
-                                        if sym in portfolio.positions:
-                                            portfolio.positions[sym]['target_price'] = tgt_p
-                                            if 'strategy_name' not in portfolio.positions[sym]:
-                                                portfolio.positions[sym]['strategy_name'] = sig.get('strategy_name', 'EMA')
-                                        if qty > 0:
-                                            if is_pure_paper:
-                                                logger.info(f"🔒 [PAPER Pre-Order] [EMA] {sym} 가상 익절 목표가(${tgt_p}) 감시 등록 완료 (평단가: ${buy_p:.3f})")
-                                                bot.send_message(f"🔒 [가상 익절 잠금/PAPER] [EMA] {sym} 익절 감시 등록 (평단가: ${buy_p:.3f} -> 목표가: ${tgt_p:.2f})")
-                                            else:
-                                                assert not is_pure_paper, "CRITICAL GUARD: Pure paper mode must NEVER call send_order"
-                                                pos_exch = portfolio.positions.get(sym, {}).get('exchange') or getattr(kis, 'last_order_exchange', 'NASD')
-                                                logger.info(f"⚡ [REAL Pre-Order] [EMA] {sym} 실제 평단가(${buy_p:.3f}) 기반 익절 주문 전송 ({pos_exch}): ${tgt_p:.2f}")
-                                                order_sent = False
-                                                last_err = ""
-                                                for attempt in range(1, 4):
-                                                    sell_res = kis.send_order(sym, "SELL", qty, tgt_p, "00", exchange=pos_exch)
-                                                    if sell_res and sell_res.get('rt_cd') == '0':
+                                                    if not is_confirmed:
                                                         time.sleep(1.0)
                                                         try:
                                                             pending_sells = kis.get_pending_orders(sym, side="SELL")
-                                                            odno = sell_res.get('output', {}).get('ODNO')
-                                                            is_confirmed = any(p.get('odno') == odno or p.get('symbol') == sym for p in pending_sells)
-                                                        except Exception as chk_e:
-                                                            logger.warning(f"⚠️ [EMA Pre-Order] {sym} 미체결 검증 중 오류: {chk_e}")
-                                                            is_confirmed = True
-                                                        
-                                                        if not is_confirmed:
-                                                            time.sleep(1.0)
-                                                            try:
-                                                                pending_sells = kis.get_pending_orders(sym, side="SELL")
-                                                                is_confirmed = any(p.get('symbol') == sym for p in pending_sells)
-                                                            except Exception:
-                                                                is_confirmed = True
-
-                                                        if is_confirmed:
-                                                            order_sent = True
-                                                            bot.send_message(format_pre_order_ack_message(sym, target_price=tgt_p, is_success=True))
-                                                            break
-                                                        else:
-                                                            last_err = "주문 접수 응답 성공했으나 미체결 목록 미확인 (누락 의심)"
-                                                            logger.warning(f"⚠️ [EMA Pre-Order] {sym} 시도 #{attempt}: {last_err}")
-                                                            time.sleep(0.5)
-                                                    else:
-                                                        last_err = sell_res.get('msg1', '알 수 없는 오류') if sell_res else '무응답'
-                                                        logger.warning(f"⚠️ [EMA Pre-Order] {sym} 익절 주문 시도 #{attempt} 실패: {last_err}")
-                                                        time.sleep(0.5)
-                                                if not order_sent:
-                                                    logger.error(f"❌ [EMA Pre-Order] {sym} 익절 주문 최종 실패: {last_err}")
-                                                    bot.send_message(format_pre_order_ack_message(sym, target_price=tgt_p, is_success=False, err_msg="HTS에서 확인 필요"))
-                                    else:
-                                        # ALPHA: +3.5% 지정가 사전 주문 전송 및 동적 타임컷 등록
-                                        alpha_tp = getattr(Config, 'ALPHA_TP_PCT', 0.035)
-                                        tgt_p = round_price(buy_p * (1.0 + alpha_tp))
-                                        time_cut = sig.get('time_cut_minutes', sig.get('max_hold_min', getattr(Config, 'ALPHA_TIME_CUT_MINUTES', 45)))
-                                        alpha_lbl = sig.get('alpha_id', 'ALPHA')
-                                        if sym in portfolio.positions:
-                                            portfolio.positions[sym]['target_price'] = tgt_p
-                                            portfolio.positions[sym]['strategy'] = 'ALPHA'
-                                            portfolio.positions[sym]['strategy_name'] = 'ALPHA'
-                                            portfolio.positions[sym]['alpha_id'] = alpha_lbl
-                                            portfolio.positions[sym]['entry_time'] = now
-                                            portfolio.positions[sym]['time_cut_minutes'] = time_cut
-                                            portfolio.positions[sym]['tp_pct'] = alpha_tp
-                                            portfolio.positions[sym]['sl_pct'] = getattr(Config, 'ALPHA_SL_PCT', -0.10)
-                                        if qty > 0:
-                                            if is_pure_paper:
-                                                logger.info(f"🔒 [PAPER Pre-Order] [ALPHA] {sym} 가상 익절 목표가(${tgt_p:.4f}) 감시 등록 완료 (평단가: ${buy_p:.3f}, 타임컷: {time_cut}분)")
-                                                bot.send_message(f"🔒 [가상 익절 잠금/PAPER] [{alpha_lbl}] {sym} 익절 감시 등록 (평단가: ${buy_p:.3f} -> 목표가: ${tgt_p:.2f} [+3.5%] | 타임컷: {time_cut}분)")
-                                            else:
-                                                assert not is_pure_paper, "CRITICAL GUARD: Pure paper mode must NEVER call send_order"
-                                                pos_exch = portfolio.positions.get(sym, {}).get('exchange') or getattr(kis, 'last_order_exchange', 'NASD')
-                                                logger.info(f"⚡ [REAL Pre-Order] [ALPHA] {sym} 실제 평단가(${buy_p:.3f}) 기반 익절 주문 전송 ({pos_exch}): ${tgt_p:.2f} (사전 예약)")
-                                                order_sent = False
-                                                last_err = ""
-                                                for attempt in range(1, 4):
-                                                    sell_res = kis.send_order(sym, "SELL", qty, tgt_p, "00", exchange=pos_exch)
-                                                    if sell_res and sell_res.get('rt_cd') == '0':
-                                                        time.sleep(1.0)
-                                                        try:
-                                                            pending_sells = kis.get_pending_orders(sym, side="SELL")
-                                                            odno = sell_res.get('output', {}).get('ODNO')
-                                                            is_confirmed = any(p.get('odno') == odno or p.get('symbol') == sym for p in pending_sells)
-                                                        except Exception as chk_e:
-                                                            logger.warning(f"⚠️ [ALPHA Pre-Order] {sym} 미체결 검증 중 오류: {chk_e}")
+                                                            is_confirmed = any(p.get('symbol') == sym for p in pending_sells)
+                                                        except Exception:
                                                             is_confirmed = True
 
-                                                        if not is_confirmed:
-                                                            time.sleep(1.0)
-                                                            try:
-                                                                pending_sells = kis.get_pending_orders(sym, side="SELL")
-                                                                is_confirmed = any(p.get('symbol') == sym for p in pending_sells)
-                                                            except Exception:
-                                                                is_confirmed = True
-
-                                                        if is_confirmed:
-                                                            order_sent = True
-                                                            bot.send_message(format_pre_order_ack_message(sym, target_price=tgt_p, is_success=True))
-                                                            break
-                                                        else:
-                                                            last_err = "주문 접수 응답 성공했으나 미체결 목록 미확인 (누락 의심)"
-                                                            logger.warning(f"⚠️ [ALPHA Pre-Order] {sym} 시도 #{attempt}: {last_err}")
-                                                            time.sleep(0.5)
+                                                    if is_confirmed:
+                                                        order_sent = True
+                                                        logger.info(f"🔒 [ALPHA Pre-Order] {sym} 익절 주문 정상 접수 확인 (${tgt_p:.2f})")
+                                                        break
                                                     else:
-                                                        last_err = sell_res.get('msg1', '알 수 없는 오류') if sell_res else '무응답'
-                                                        logger.warning(f"⚠️ [ALPHA Pre-Order] {sym} 익절 주문 시도 #{attempt} 실패: {last_err}")
+                                                        last_err = "주문 접수 응답 성공했으나 미체결 목록 미확인 (누락 의심)"
+                                                        logger.warning(f"⚠️ [ALPHA Pre-Order] {sym} 시도 #{attempt}: {last_err}")
                                                         time.sleep(0.5)
-                                                if not order_sent:
-                                                    logger.error(f"❌ [ALPHA Pre-Order] {sym} 익절 주문 최종 실패: {last_err}")
-                                                    bot.send_message(format_pre_order_ack_message(sym, target_price=tgt_p, is_success=False, err_msg="HTS에서 확인 필요"))
-                            except Exception as pe_err:
-                                logger.error(f"❌ 익절 사전 주문 처리 중 에러: {pe_err}")
-                            return True
-                        else:
-                            logger.warning(f"🚌 [실패] {sym} 매수 실패. 금일 제외.")
-                            portfolio.ban_list.add(sym)
-                            candle_cache.pop(sym, None)
-                            save_state(portfolio.ban_list, active_candidates, risk_filter.loss_blacklist, portfolio=portfolio)
-                            return False
+                                                else:
+                                                    last_err = sell_res.get('msg1', '알 수 없는 오류') if sell_res else '무응답'
+                                                    logger.warning(f"⚠️ [ALPHA Pre-Order] {sym} 익절 주문 시도 #{attempt} 실패: {last_err}")
+                                                    time.sleep(0.5)
+                                            if not order_sent:
+                                                logger.error(f"❌ [ALPHA Pre-Order] {sym} 익절 주문 최종 실패: {last_err}")
+                                                bot.send_message(format_pre_order_ack_message(sym, target_price=tgt_p, is_success=False, err_msg="HTS에서 확인 필요"))
+                        except Exception as pe_err:
+                            logger.error(f"❌ 익절 사전 주문 처리 중 에러: {pe_err}")
+                        return True
+                    else:
+                        logger.warning(f"🚌 [실패] {sym} 매수 실패. 금일 제외.")
+                        portfolio.ban_list.add(sym)
+                        candle_cache.pop(sym, None)
+                        save_state(portfolio.ban_list, active_candidates, risk_filter.loss_blacklist, portfolio=portfolio)
+                        return False
                 return False
 
             # ---------------------------------------------------------
