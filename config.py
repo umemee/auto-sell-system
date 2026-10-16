@@ -145,6 +145,13 @@ class Config(metaclass=ConfigMeta):
     ALPHA_TIME_CUT_MINUTES = int(os.getenv("ALPHA_TIME_CUT_MINUTES", 45))  # 타임컷 45분
     ENABLE_ALPHA02 = os.getenv("ENABLE_ALPHA02", "False").lower() in ("true", "1", "yes")  # [작업 N] Alpha 02 실전 비활성화 (기본 False)
 
+    # 🛡️ [2026-10-16 감사 반영] Alpha 전략 4대 핵심 진입 필터 (Top 3 Surge, 4일 웜업 EMA50 지지/기울기, $1~$5 가격대)
+    STRICT_EXTENDED_ALPHA_FILTER = os.getenv("STRICT_EXTENDED_ALPHA_FILTER", "True").lower() in ("true", "1", "yes")
+    ALPHA_SURGE_RANK_MAX = int(os.getenv("ALPHA_SURGE_RANK_MAX", 3))         # 당일 5분 급등 랭킹 Top 3
+    ALPHA_SURGE_MIN_VOL_5M = float(os.getenv("ALPHA_SURGE_MIN_VOL_5M", 50000.0)) # 5분 누적 거래량 최소 5만 주
+    ALPHA_MIN_PRICE = float(os.getenv("ALPHA_MIN_PRICE", 1.00))              # $1.00 이상
+    ALPHA_MAX_PRICE = float(os.getenv("ALPHA_MAX_PRICE", 5.00))              # $5.00 이하
+
     # ==========================================
     # 🏦 [계좌 및 인증]
     # ==========================================

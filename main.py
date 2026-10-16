@@ -357,6 +357,8 @@ def main():
                 from infra.virtual_combined_engine import VirtualCombinedEngine
                 v_seed = getattr(Config, 'VIRTUAL_INITIAL_BALANCE', 2000.0)
                 virtual_combined_engine = VirtualCombinedEngine(kis_api=kis, initial_capital=v_seed)
+                if alpha_strategy:
+                    virtual_combined_engine.strategy_alpha = alpha_strategy
                 logger.info(f"🧪 [VirtualTrack] 결합 전략 가상 페이퍼 엔진 탑재 완료 (EMA + Alpha + CapitalManager, Seed: ${v_seed:,.0f})")
             except Exception as e:
                 logger.error(f"⚠️ [VirtualTrack Init Error] 가상 엔진 초기화 실패: {e}") 
@@ -1305,6 +1307,8 @@ def main():
             # 3단계: [Alpha 스윕 패스] 잔여 슬롯/가용 자본에 대해 전략2(Alpha) 신호 평가 (EMA 미점유 잔여자본 스윕)
             # ---------------------------------------------------------
             if is_alpha_active and alpha_strategy and portfolio.has_open_slot(strategy='ALPHA'):
+                if hasattr(alpha_strategy, 'update_surge_ranks'):
+                    alpha_strategy.update_surge_ranks(target_dfs)
                 for sym, (df, selected_exchange) in list(target_dfs.items()):
                     if not portfolio.has_open_slot(strategy='ALPHA'):
                         break
