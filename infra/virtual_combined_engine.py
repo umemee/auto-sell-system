@@ -59,13 +59,65 @@ class AlphaLiveAdapter:
         
         self.or10_cache = {}  # {ticker: {'or_high': float, 'or_low': float, 'range_pct': float, 'date': str}}
         self.triggered_today = set()
+        self.current_top3_tickers = set()
+        self._surge_ranks_updated = False
 
     def daily_reset(self):
         self.or10_cache.clear()
         self.triggered_today.clear()
+        self.current_top3_tickers.clear()
+        self._surge_ranks_updated = False
 
-    def check_entry(self, ticker: str, df: pd.DataFrame, now_time: datetime.datetime) -> Optional[Dict[str, Any]]:
-        """실시간 1분봉 데이터(df)로부터 Alpha01 및 Alpha02 진입 타점을 확인"""
+    def update_surge_ranks(self, target_dfs: Dict[str, Any]):
+        """
+        [필터 1] 실시간 당일 상승률 Top 3 대장주 맵 갱신 (08_customizable_backtest.py 및 main.py 동기화)
+        - 대상: 5분 누적 거래량 >= 50,000주 (ALPHA_SURGE_MIN_VOL_5M)
+        - 기준: 당일 시초가 대비 5분 누적 상승률 양수(cum_ret > 0) 상위 3위 이내
+        """
+        records = []
+        min_vol_5m = getattr(Config, 'ALPHA_SURGE_MIN_VOL_5M', 50000.0)
+        for sym, item in target_dfs.items():
+            df = item[0] if isinstance(item, tuple) else item
+            if df is None or df.empty or len(df) < 5:
+                continue
+            try:
+                # 당일 첫 봉의 시가(open) 기준 계산
+                today_date = str(df.iloc[-1]['date']) if 'date' in df.columns else None
+                today_df = df[df['date'] == today_date] if today_date else df
+                if today_df.empty:
+                    today_df = df
+                open_p = float(today_df.iloc[0]['open'])
+                if open_p <= 0:
+                    continue
+                last_bar = df.iloc[-1]
+                curr_c = float(last_bar['close'])
+                cum_ret = (curr_c - open_p) / open_p * 100.0
+                vol_5m = float(df['volume'].iloc[-5:].sum()) if 'volume' in df.columns else float(min_vol_5m)
+                if vol_5m >= min_vol_5m and cum_ret > 0:
+                    records.append({'ticker': sym, 'cum_ret': cum_ret})
+            except Exception:
+                continue
+
+        self._surge_ranks_updated = True
+        if not records:
+            self.current_top3_tickers = set()
+            return
+
+        df_rec = pd.DataFrame(records)
+        df_rec['rank'] = df_rec['cum_ret'].rank(ascending=False, method='first')
+        max_rank = getattr(Config, 'ALPHA_SURGE_RANK_MAX', 3)
+        top_df = df_rec[df_rec['rank'] <= max_rank]
+        self.current_top3_tickers = set(top_df['ticker'].tolist())
+
+    def check_entry(self, ticker: str, df: pd.DataFrame, now_time: datetime.datetime, is_surge_top3: Optional[bool] = None) -> Optional[Dict[str, Any]]:
+        """
+        실시간 1분봉 데이터(df)로부터 Alpha01 및 Alpha02 진입 타점을 확인.
+        [2026-10-16 감사 반영] 4대 핵심 필터 엄격 적용:
+        1. Top 3 Surge Rank (is_surge_top3 or ticker in current_top3_tickers)
+        2. EMA 50 양(+)기울기 (ema_50_slope > 0)
+        3. EMA 50 지지 터치 및 양봉 마감 (low <= ema_50 <= high and close > open)
+        4. 가격대 엄격 캡핑 ($1.00 <= price <= $5.00)
+        """
         if df is None or df.empty or len(df) < 5:
             return None
 
@@ -90,9 +142,31 @@ class AlphaLiveAdapter:
         curr_bar = df.iloc[-1]
         curr_price = float(curr_bar['close'])
 
-        # 유니버스 가격대 검사 ($1.00 ~ $5.00)
-        if not (self.universe_min_price <= curr_price <= self.universe_max_price):
+        # [필터 4] 유니버스 가격대 검사 ($1.00 ~ $5.00)
+        min_p = getattr(Config, 'ALPHA_MIN_PRICE', self.universe_min_price)
+        max_p = getattr(Config, 'ALPHA_MAX_PRICE', self.universe_max_price)
+        if not (min_p <= curr_price <= max_p):
             return None
+
+        # [필터 1] 실시간 당일 상승률 Top 3 대장주 필터 검증
+        strict_alpha = getattr(Config, 'STRICT_EXTENDED_ALPHA_FILTER', True)
+        if strict_alpha:
+            if is_surge_top3 is not None:
+                if not is_surge_top3:
+                    return None
+            elif getattr(self, '_surge_ranks_updated', False):
+                if ticker not in getattr(self, 'current_top3_tickers', set()):
+                    return None
+
+        # [필터 2 & 3 보조 계산] EMA 50 및 5봉 기울기 계산
+        ema_50_val = None
+        ema_50_slope = None
+        if strict_alpha:
+            if 'close' in df.columns and len(df) >= 20:
+                ema_50_series = df['close'].astype(float).ewm(span=50, adjust=False).mean()
+                ema_50_val = float(ema_50_series.iloc[-1])
+                if len(ema_50_series) >= 6:
+                    ema_50_slope = float(ema_50_series.iloc[-1] - ema_50_series.iloc[-6])
 
         key_today = f"{d_str}_{ticker}"
 
@@ -115,12 +189,14 @@ class AlphaLiveAdapter:
                     or_l = float(or_bars['low'].min())
                     if or_l > 0:
                         rng_pct = ((or_h - or_l) / or_l) * 100.0
-                        self.or10_cache[ticker] = {
-                            'or_high': or_h,
-                            'or_low': or_l,
-                            'range_pct': rng_pct,
-                            'date': d_str
-                        }
+                        # [필터 4 정합성] OR-10 고가도 $1~$5 범위 내에 위치해야 함
+                        if not strict_alpha or (min_p <= or_h <= max_p):
+                            self.or10_cache[ticker] = {
+                                'or_high': or_h,
+                                'or_low': or_l,
+                                'range_pct': rng_pct,
+                                'date': d_str
+                            }
 
             or_info = self.or10_cache.get(ticker)
             if or_info and or_info.get('date') == d_str:
@@ -141,9 +217,21 @@ class AlphaLiveAdapter:
                         }
 
         # -----------------------------------------------------------------
-        # 2. Alpha 01 검사 (Time x Path Regime)
+        # 2. Alpha 01 검사 (Time x Path Regime + EMA 50 지지/기울기)
         # -----------------------------------------------------------------
         if key_today not in self.triggered_today:
+            # [필터 2 & 3] EMA 50 양(+)기울기 및 지지 터치 & 양봉 마감 필수 검증
+            if strict_alpha:
+                if ema_50_val is None or ema_50_slope is None or ema_50_slope <= 0:
+                    return None
+                bar_low = float(curr_bar['low'])
+                bar_high = float(curr_bar['high'])
+                bar_open = float(curr_bar['open'])
+                bar_close = float(curr_bar['close'])
+                # 지지 터치 (low <= ema_50 <= high) 및 양봉 마감 (close > open)
+                if not (bar_low <= ema_50_val <= bar_high and bar_close > bar_open):
+                    return None
+
             b5_df = df.iloc[-5:].copy().reset_index(drop=True)
             if len(b5_df) >= 5:
                 bar_rets, bar_u_wicks = [], []
