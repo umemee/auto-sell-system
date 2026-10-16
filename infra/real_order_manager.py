@@ -155,7 +155,8 @@ class RealOrderManager:
         # 4. 주문 전송 (페이퍼 모드 분기 및 원천 차단 가드)
         # ============================================================
         is_pure_paper = getattr(Config, 'IS_PURE_PAPER', self.is_paper)
-        if is_pure_paper:
+        is_alpha_paper = (strat_name == 'ALPHA' and getattr(Config, 'ALPHA_TRADING_MODE', 'LIVE').upper() == 'PAPER')
+        if is_pure_paper or is_alpha_paper:
             resp = self.virtual_engine.execute_paper_buy(
                 ticker=ticker,
                 qty=qty,
@@ -221,7 +222,7 @@ class RealOrderManager:
                 target_price=target_price,
                 tp_pct=tp_pct,
                 cash=rem_cash,
-                is_paper=self.is_paper
+                is_paper=(self.is_paper or is_alpha_paper)
             )
             self.recent_order_time[ticker] = time.time()
             return {'status': 'success', 'msg': msg, 'qty': qty, 'avg_price': entry_guess}
@@ -389,16 +390,17 @@ class RealOrderManager:
         # ============================================================
         # 🛡️ [Safety Protocol] 기존 주문 취소 (선주문 해결)
         # ============================================================
-        # 익절/손절/타임컷 상관없이, 매도를 하려면 기존 주문(익절 대기 등)을 치워야 합니다.
+        strat_name = position.get('strategy_name', position.get('strategy', 'EMA'))
         is_pure_paper = getattr(Config, 'IS_PURE_PAPER', self.is_paper)
-        if not is_pure_paper:
+        is_alpha_paper = (strat_name == 'ALPHA' and getattr(Config, 'ALPHA_TRADING_MODE', 'LIVE').upper() == 'PAPER')
+        if not (is_pure_paper or is_alpha_paper):
             is_urgent = reason in ["STOP_LOSS", "TRAILING_STOP", "FORCE_EOD_EXIT"]
             self._clear_pending_orders(ticker, is_urgent=is_urgent)
 
         # ============================================================
         # 🔫 [Execution] 매도 주문 실행 (페이퍼 모드 분기)
         # ============================================================
-        if is_pure_paper:
+        if is_pure_paper or is_alpha_paper:
             resp = self.virtual_engine.execute_paper_sell(
                 ticker=ticker,
                 qty=qty,
@@ -759,7 +761,7 @@ class RealOrderManager:
             realized_pnl = output_dict.get('realized_pnl', (order_price - entry_price) * qty)
             return_pct = output_dict.get('return_pct', ((order_price - entry_price) / entry_price * 100.0 if entry_price > 0 else 0.0))
             
-            if self.is_paper:
+            if self.is_paper or is_alpha_paper:
                 # 🛡️ 페이퍼 모드: 손익 누적 및 매도 대금 가상 잔고에 반영
                 portfolio.register_realized_sale(
                     ticker=ticker,
@@ -799,7 +801,7 @@ class RealOrderManager:
             from infra.utils import format_exit_message
             eff_cash = portfolio.get_effective_balance() if hasattr(portfolio, 'get_effective_balance') else portfolio.balance
             tot_eq = getattr(portfolio, 'total_equity', eff_cash)
-            acct_pnl = portfolio.get_account_pnl() if hasattr(portfolio, 'get_account_pnl') else getattr(portfolio, 'daily_realized_pnl', 0.0)
+            acct_pnl = getattr(portfolio, 'session_realized_pnl', getattr(portfolio, 'daily_realized_pnl', 0.0))
             is_del = getattr(portfolio, 'is_delayed_settlement', False)
             strat_label = position.get('strategy_name', position.get('strategy', 'EMA'))
             if strat_label == 'ALPHA':
@@ -819,7 +821,7 @@ class RealOrderManager:
                 is_delayed=is_del,
                 qty=qty,
                 reason=reason,
-                is_paper=self.is_paper
+                is_paper=(self.is_paper or is_alpha_paper)
             )
             return {
                 'status': 'success',

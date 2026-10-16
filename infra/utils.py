@@ -183,24 +183,31 @@ def format_buy_fill_message(
     **kwargs
 ) -> str:
     """
-    [매수 체결 메시지 포맷팅]
-    🟢 매수 체결 | AIXI (EMA)
-    673주 × $2.10 = $1,413.30
-    목표 $2.25 (+7.1%)
+    [매수 체결 메시지 포맷팅 - 2026-10 개편]
+    🟢 [매수] {ticker} ({strategy})
+    • 체결: {shares:,}주 × ${price:.2f} (${total_amt:,.2f})
+    • 목표: ${target_price:.2f} (+{target_pct:.1f}%) | 익절 주문 등록 완료
+    • 잔여 현금: ${cash:,.2f}
     """
-    total_cost = qty * price
+    total_amt = qty * price
+    tgt_p = target_price or kwargs.get('target', 0.0) or 0.0
+    if tp_pct is not None:
+        target_pct = (tp_pct * 100.0) if abs(tp_pct) < 1.0 else tp_pct
+    elif tgt_p > 0 and price > 0:
+        target_pct = ((tgt_p - price) / price) * 100.0
+    else:
+        target_pct = 0.0
+
+    rem_cash = cash if cash is not None else kwargs.get('rem_cash', 0.0)
+    strat_clean = str(strategy).strip()
     paper_tag = " [PAPER]" if is_paper else ""
+
     lines = [
-        f"🟢 매수 체결 | {ticker} ({strategy}){paper_tag}",
-        f"{qty}주 × ${price:.2f} = ${total_cost:,.2f}"
+        f"🟢 [매수] {ticker} ({strat_clean}){paper_tag}",
+        f"• 체결: {qty:,}주 × ${price:.2f} (${total_amt:,.2f})",
+        f"• 목표: ${tgt_p:.2f} (+{target_pct:.1f}%) | 익절 주문 등록 완료",
+        f"• 잔여 현금: ${rem_cash:,.2f}"
     ]
-    tgt_p = target_price or kwargs.get('target', None)
-    if tgt_p is not None and tgt_p > 0:
-        if tp_pct is not None:
-            pct_val = (tp_pct * 100.0) if abs(tp_pct) < 1.0 else tp_pct
-            lines.append(f"목표 ${tgt_p:.2f} (+{pct_val:.1f}%)")
-        else:
-            lines.append(f"목표 ${tgt_p:.2f}")
     return "\n".join(lines)
 
 def format_pre_order_ack_message(
@@ -241,34 +248,48 @@ def format_exit_message(
     **kwargs
 ) -> str:
     """
-    [청산 메시지 포맷팅 (익절 🟢 / 손절 🔴)]
-    🟢 익절 체결 | AIXI (EMA)
-    $2.10 → $2.25 (+7.14%) · 손익 +$99.44
-    현금 $1,655.00 · 총자산 $2,929.48
-    오늘 +$99.44 (계좌 기준)
+    [청산 메시지 포맷팅 - 2026-10 개편]
+    💰 [익절] {ticker} ({reason_kr})
+    • 가격: ${buy_price:.2f} ➔ ${sell_price:.2f} ({return_pct:+.2f}%)
+    • 실현 손익: {trade_pnl:+.2f}
+    • 계좌: 총자산 ${total_assets:,.2f} (오늘 누적 {daily_pnl:+.2f})
     """
     exit_p = exit_price if exit_price > 0 else kwargs.get('price', 0.0)
-    reason_val = reason or kwargs.get('reason', '')
-    is_paper_mode = is_paper or kwargs.get('is_paper', False)
-    paper_tag = " [PAPER]" if is_paper_mode else ""
-    icon_type = "익절" if is_win else "손절"
-    emoji = "🟢" if is_win else "🔴"
-    pnl_sign = f"+${abs(pnl):,.2f}" if is_win else f"-${abs(pnl):,.2f}"
-    basis_tag = "" if is_fill_price else " (주문가 기준)"
-    delayed_tag = " (반영 지연 가능)" if is_delayed else ""
-    
-    strat_clean = str(strategy).strip()
-    reason_extra = ""
-    if reason_val and reason_val not in ["TAKE_PROFIT", "STOP_LOSS"]:
-        reason_extra = f" · {reason_val}"
-    
-    line1 = f"{emoji} {icon_type} 체결 | {ticker} ({strat_clean}){paper_tag}{reason_extra}"
-    line2 = f"${entry_price:.2f} → ${exit_p:.2f} ({ret_pct:+.2f}%) · 손익 {pnl_sign}{basis_tag}"
-    line3 = f"현금 ${cash:,.2f}{delayed_tag} · 총자산 ${total_equity:,.2f}"
-    acct_pnl_sign = f"+${daily_account_pnl:,.2f}" if daily_account_pnl >= 0 else f"-${abs(daily_account_pnl):,.2f}"
-    line4 = f"오늘 {acct_pnl_sign} (계좌 기준)"
-    
-    return f"{line1}\n{line2}\n{line3}\n{line4}"
+    raw_reason = str(reason or kwargs.get('reason', '')).strip()
+
+    # 사유 매핑: TARGET_PROFIT_* / TAKE_PROFIT -> 목표가 달성, EMA -> EMA 트레일링, STOP_LOSS -> 손절
+    if "TARGET_PROFIT" in raw_reason or "TAKE_PROFIT" in raw_reason:
+        reason_kr = "목표가 달성"
+    elif raw_reason == "EMA" or "TRAILING" in raw_reason:
+        reason_kr = "EMA 트레일링"
+    elif "STOP_LOSS" in raw_reason:
+        reason_kr = "손절"
+    elif "TIME_CUT" in raw_reason:
+        reason_kr = "타임컷"
+    elif "FORCE_EOD" in raw_reason or "EOD_FORCE" in raw_reason:
+        reason_kr = "장마감 청산"
+    elif raw_reason:
+        reason_kr = raw_reason
+    else:
+        reason_kr = "목표가 달성" if is_win else "손절"
+
+    header_icon = "💰 [익절]" if is_win else "📉 [손절]"
+    paper_tag = " [PAPER]" if is_paper else ""
+
+    trade_pnl_str = f"+${abs(pnl):,.2f}" if pnl >= 0 else f"-${abs(pnl):,.2f}"
+    try:
+        daily_pnl_val = float(daily_account_pnl if daily_account_pnl is not None else kwargs.get('daily_pnl', 0.0))
+    except (TypeError, ValueError):
+        daily_pnl_val = 0.0
+    daily_pnl_str = f"+${abs(daily_pnl_val):,.2f}" if daily_pnl_val >= 0 else f"-${abs(daily_pnl_val):,.2f}"
+
+    lines = [
+        f"{header_icon} {ticker} ({reason_kr}){paper_tag}",
+        f"• 가격: ${entry_price:.2f} ➔ ${exit_p:.2f} ({ret_pct:+.2f}%)",
+        f"• 실현 손익: {trade_pnl_str}",
+        f"• 계좌: 총자산 ${total_equity:,.2f} (오늘 누적 {daily_pnl_str})"
+    ]
+    return "\n".join(lines)
 
 def format_heartbeat_message(
     kst_time_str: str,
@@ -285,32 +306,41 @@ def format_heartbeat_message(
     **kwargs
 ) -> str:
     """
-    [하트비트 메시지 포맷팅]
-    💓 21:00 KST · Alpha 개시
-    현금 $2,830.04 · 총자산 $2,830.04 · 보유 없음
-    오늘 $0.00
-    감시 6: AIXI IPW DKI …
-    차단: Ban 0개 | 손절차단 0개
+    [하트비트 메시지 간소화 - 2026-10 개편]
+    💓 [{time_kst} KST] {strategy_name} 전략 상태
+    • 총자산: ${total_assets:,.2f} (오늘 실현 {daily_pnl:+.2f})
+    • 감시 종목({watch_count}개): {ticker_list_preview}
+    • 필터 차단: Ban {ban_count}개 | 손절차단 {sl_ban_count}개
     """
-    delayed_tag = " (반영 지연 가능)" if is_delayed else ""
-    holdings_str = f"보유 {len(holdings_list)}개 ({', '.join(holdings_list)})" if holdings_list else "보유 없음"
-    
     watch_cnt = len(watchlist)
     watch_display = " ".join(watchlist[:8]) if watchlist else "없음"
     if watch_cnt > 8:
-        watch_display += f" …"
-    
+        watch_display += " …"
+
+    raw_reason = str(trigger_reason).strip()
+    if "Alpha" in raw_reason:
+        strat_name = "Alpha"
+    elif "EMA" in raw_reason:
+        strat_name = "EMA"
+    elif "프리마켓" in raw_reason:
+        strat_name = "프리마켓"
+    elif "정기" in raw_reason or "생존" in raw_reason:
+        strat_name = "정기 생존"
+    else:
+        strat_name = raw_reason.replace("전략 상태", "").replace("전략", "").strip() or "전략"
+
+    try:
+        daily_pnl_val = float(daily_account_pnl if daily_account_pnl is not None else 0.0)
+    except (TypeError, ValueError):
+        daily_pnl_val = 0.0
+    daily_pnl_str = f"+${abs(daily_pnl_val):,.2f}" if daily_pnl_val >= 0 else f"-${abs(daily_pnl_val):,.2f}"
+
     lines = [
-        f"💓 {kst_time_str} KST · {trigger_reason}",
-        f"현금 ${cash:,.2f}{delayed_tag} · 총자산 ${total_equity:,.2f} · {holdings_str}"
+        f"💓 [{kst_time_str} KST] {strat_name} 전략 상태",
+        f"• 총자산: ${total_equity:,.2f} (오늘 실현 {daily_pnl_str})",
+        f"• 감시 종목({watch_cnt}개): {watch_display}",
+        f"• 필터 차단: Ban {ban_count}개 | 손절차단 {loss_count}개"
     ]
-    if not is_premarket_startup:
-        hb_pnl_str = f"+${daily_account_pnl:,.2f}" if daily_account_pnl > 0 else (f"-${abs(daily_account_pnl):,.2f}" if daily_account_pnl < 0 else "$0.00")
-        lines.append(f"오늘 {hb_pnl_str}")
-    lines.append(f"감시 {watch_cnt}: {watch_display}")
-    if not is_premarket_startup:
-        lines.append(f"차단: Ban {ban_count}개 | 손절차단 {loss_count}개")
-        
     return "\n".join(lines)
 
 def format_eod_summary_message(
@@ -323,37 +353,76 @@ def format_eod_summary_message(
     win_count: int = 0,
     loss_count: int = 0,
     et_time: datetime.datetime = None,
+    date_str: str = None,
+    session_return_pct: float = 0.0,
+    closed_trades: list = None,
+    file_count: int = 0,
     **kwargs
 ) -> str:
     """
-    [장 마감 요약 메시지 포맷팅 (15:55 ET -> 서머타임 04:55 KST / 표준시 05:55 KST)]
-    🌙 장 마감 요약 (04:55 KST)
-    최종 총자산 $2,929.48 (현금 $2,929.48 · 보유 0)
-    오늘 +$99.44 (계좌 기준) · 거래 2건 (익절 2, 손절 0)
-    🚨 미청산 종목: AIXI 673주 — HTS에서 확인 필요 (잔여 있을 시)
+    [장 마감 요약 메시지 포맷팅 - 2026-10 개편]
+    🌙 장 마감 리포트 ({date_str})
+    ━━━━━━━━━━━━━━━━━━━━
+    • 최종 총자산: ${final_assets:,.2f} (세션 변동: {session_return_pct:+.2f}%)
+    • 당일 실현손익: {daily_pnl:+.2f}
+    • 거래 전적: {trade_count}건 ({win_count}승 {loss_count}패 / 승률 {win_rate:.0f}%)
+
+    [종목별 실현손익]
+    {ticker_summary_lines}
+    ━━━━━━━━━━━━━━━━━━━━
+    📦 캔들 데이터 백업 완료 ({file_count}개 파일)
     """
-    if holdings_dict is None:
-        holdings_dict = {}
-        
-    if not kst_time_str:
+    win_rate = (win_count / trade_count * 100.0) if trade_count > 0 else 0.0
+    try:
+        daily_pnl_val = float(daily_account_pnl if daily_account_pnl is not None else kwargs.get('daily_pnl', 0.0))
+    except (TypeError, ValueError):
+        daily_pnl_val = 0.0
+    daily_pnl_str = f"+${abs(daily_pnl_val):,.2f}" if daily_pnl_val >= 0 else f"-${abs(daily_pnl_val):,.2f}"
+
+    # 종목별 실현손익 합산
+    ticker_map = {}
+    trades_list = closed_trades if closed_trades is not None else kwargs.get('closed_trades_today', [])
+    if trades_list:
+        for t in trades_list:
+            sym = t.get('ticker', 'UNKNOWN')
+            p = t.get('pnl', 0.0)
+            r = t.get('return_pct', 0.0)
+            if sym not in ticker_map:
+                ticker_map[sym] = {'pnl': 0.0, 'rets': []}
+            ticker_map[sym]['pnl'] += p
+            ticker_map[sym]['rets'].append(r)
+
+    if ticker_map:
+        summary_lines = []
+        for sym, d in ticker_map.items():
+            sym_pnl = d['pnl']
+            sym_pnl_str = f"+${abs(sym_pnl):,.2f}" if sym_pnl >= 0 else f"-${abs(sym_pnl):,.2f}"
+            avg_ret = sum(d['rets']) / len(d['rets']) if d['rets'] else 0.0
+            summary_lines.append(f"• {sym}: {sym_pnl_str} ({avg_ret:+.2f}%)")
+        ticker_summary_lines = "\n".join(summary_lines)
+    else:
+        ticker_summary_lines = "• 매매 내역 없음"
+
+    d_str = date_str or kwargs.get('current_date_str', '')
+    if not d_str:
         kst_tz = pytz.timezone('Asia/Seoul')
         if et_time is not None:
             if et_time.tzinfo is None:
                 et_time = pytz.timezone('US/Eastern').localize(et_time)
-            kst_time_str = et_time.astimezone(kst_tz).strftime("%H:%M")
+            d_str = et_time.astimezone(kst_tz).strftime("%Y-%m-%d")
         else:
-            kst_time_str = datetime.datetime.now(kst_tz).strftime("%H:%M")
+            d_str = datetime.datetime.now(kst_tz).strftime("%Y-%m-%d")
 
-    pos_cnt = len(holdings_dict)
-    eod_pnl_sign = f"+${daily_account_pnl:,.2f}" if daily_account_pnl >= 0 else f"-${abs(daily_account_pnl):,.2f}"
     msg = (
-        f"🌙 장 마감 요약 ({kst_time_str} KST)\n"
-        f"최종 총자산 ${total_equity:,.2f} (현금 ${cash:,.2f} · 보유 {pos_cnt})\n"
-        f"오늘 {eod_pnl_sign} (계좌 기준) · 거래 {trade_count}건 (익절 {win_count}, 손절 {loss_count})"
+        f"🌙 장 마감 리포트 ({d_str})\n"
+        f"━━━━━━━━━━━━━━━━━━━━\n"
+        f"• 최종 총자산: ${total_equity:,.2f} (세션 변동: {session_return_pct:+.2f}%)\n"
+        f"• 당일 실현손익: {daily_pnl_str}\n"
+        f"• 거래 전적: {trade_count}건 ({win_count}승 {loss_count}패 / 승률 {win_rate:.0f}%)\n\n"
+        f"[종목별 실현손익]\n"
+        f"{ticker_summary_lines}\n"
+        f"━━━━━━━━━━━━━━━━━━━━\n"
+        f"📦 캔들 데이터 백업 완료 ({file_count}개 파일)"
     )
-    if pos_cnt > 0:
-        rem_list = [f"{sym} {data.get('qty', 0)}주" for sym, data in holdings_dict.items()]
-        rem_str = ", ".join(rem_list)
-        msg += f"\n🚨 미청산 종목: {rem_str} — HTS에서 확인 필요"
     return msg
 

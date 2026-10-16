@@ -807,13 +807,21 @@ class RealPortfolio:
             
         return float(self.balance)
 
+    @property
+    def session_realized_pnl(self) -> float:
+        """[2026-10 개편] 세션(당일) 누적 실현손익"""
+        return float(self.daily_realized_pnl)
+
+    @session_realized_pnl.setter
+    def session_realized_pnl(self, val: float):
+        self.daily_realized_pnl = float(val)
+
     def get_account_pnl(self) -> float:
         """
-        [작업 2-4] 계좌 기준 당일 손익 (현재 총자산 - 세션 시작 총자산)
+        [2026-10 개편] 봇 내부 자체 집계 기반 당일 실현손익 반환
+        - 증권사 API 지연 의존 제거 및 봇 자체 계산 누적 실현손익 반환
         """
-        if getattr(self, 'session_start_equity', 0.0) > 0:
-            return float(self.total_equity - self.session_start_equity)
-        return 0.0
+        return float(self.daily_realized_pnl)
 
     def _maybe_latch_initial_seed(self):
         """
