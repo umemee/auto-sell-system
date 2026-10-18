@@ -173,7 +173,7 @@ class AlphaLiveAdapter:
         # -----------------------------------------------------------------
         # 1. Alpha 02 검사 (OR-10 압축 후 상방 돌파) [작업 N: ENABLE_ALPHA02 플래그 제어]
         # -----------------------------------------------------------------
-        if getattr(Config, 'ENABLE_ALPHA02', False) and key_today not in self.triggered_today:
+        if getattr(Config, 'ENABLE_ALPHA02', True) and key_today not in self.triggered_today:
             # 08:30 ~ 08:40 사이 캔들로 OR-10 계산
             or_cache = self.or10_cache.get(ticker)
             if or_cache is None or or_cache.get('date') != d_str:
