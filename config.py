@@ -143,7 +143,7 @@ class Config(metaclass=ConfigMeta):
     ALPHA_TP_PCT = float(os.getenv("ALPHA_TP_PCT", 0.035))                 # 익절 +3.5%
     ALPHA_SL_PCT = float(os.getenv("ALPHA_SL_PCT", -0.10))                 # 손절 -10.0%
     ALPHA_TIME_CUT_MINUTES = int(os.getenv("ALPHA_TIME_CUT_MINUTES", 45))  # 타임컷 45분
-    ENABLE_ALPHA02 = os.getenv("ENABLE_ALPHA02", "False").lower() in ("true", "1", "yes")  # [작업 N] Alpha 02 실전 비활성화 (기본 False)
+    ENABLE_ALPHA02 = os.getenv("ENABLE_ALPHA02", "True").lower() in ("true", "1", "yes")  # [2026-10-17 활성화] Alpha 02 실전 활성화 (기본 True)
 
     # 🛡️ [2026-10-16 감사 반영] Alpha 전략 4대 핵심 진입 필터 (Top 3 Surge, 4일 웜업 EMA50 지지/기울기, $1~$5 가격대)
     STRICT_EXTENDED_ALPHA_FILTER = os.getenv("STRICT_EXTENDED_ALPHA_FILTER", "True").lower() in ("true", "1", "yes")
