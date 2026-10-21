@@ -81,7 +81,7 @@ class TradeRiskFilter:
             )
 
     def is_order_blocked(
-        self, ticker: str, price: float, current_time_et: Optional[datetime.datetime] = None
+        self, ticker: str, price: float, current_time_et: Optional[datetime.datetime] = None, strategy: str = "EMA"
     ) -> Tuple[bool, Optional[str]]:
         if not self.enabled:
             return False, None
@@ -109,7 +109,8 @@ class TradeRiskFilter:
             reasons.append(f"PRICE_BAND (${self.price_band_min:.2f}-${self.price_band_max:.2f}, current: ${price:.2f})")
 
         # 3. 과거 손절 종목 재진입 필터
-        if self.block_loss_tickers and (ticker in self.loss_blacklist):
+        strat_upper = (strategy or "EMA").upper()
+        if self.block_loss_tickers and strat_upper != "ALPHA" and (ticker in self.loss_blacklist):
             reasons.append("PREVIOUS_LOSS_TICKER")
 
         if reasons:
