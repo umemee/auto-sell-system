@@ -251,7 +251,7 @@ def send_heartbeat_report(bot, portfolio, risk_filter, active_candidates, tz_kst
 
         watching_list = list(active_candidates)
         banned_list = list(portfolio.ban_list) if not is_premarket_1700 else []
-        loss_list = list(risk_filter.loss_blacklist) if not is_premarket_1700 else []
+        loss_list = list(risk_filter.loss_blacklist)
 
         account_pnl = portfolio.get_account_pnl() if hasattr(portfolio, 'get_account_pnl') and not is_premarket_1700 else 0.0
         is_delayed = getattr(portfolio, 'is_delayed_settlement', False)
@@ -810,6 +810,7 @@ def main():
                     portfolio.session_start_equity = portfolio.total_equity
                     logger.info(f"🌱 [Premarket Latch] 세션 시작 총자산 래치 고정: ${portfolio.session_start_equity:,.2f}")
                 send_heartbeat_report(bot, portfolio, risk_filter, active_candidates, tz_kst, tz_et, trigger_reason="17:00 프리마켓 개시", is_premarket_1700=True)
+                last_heartbeat_time = time.time()
                 save_state(portfolio.ban_list, active_candidates, risk_filter.loss_blacklist, portfolio=portfolio)
 
             # ---------------------------------------------------------
@@ -1067,7 +1068,7 @@ def main():
                 sig['ticker'] = sym
 
                 is_blocked, block_reason = risk_filter.is_order_blocked(
-                    ticker=sym, price=entry_price, current_time_et=now
+                    ticker=sym, price=entry_price, current_time_et=now, strategy=sig_strat
                 )
                 if is_blocked:
                     logger.warning(f"🛑 [Risk Filter Blocked] {sym}: {block_reason}")
