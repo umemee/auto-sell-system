@@ -121,18 +121,21 @@ class RealOrderManager:
         # ============================================================
         # 🛡️ [Anti-FOMO Buffer] 시그널 가격 대비 허용 버퍼(+0.5% ~ +1.0%) 초과 추격 매수 원천 차단
         # ============================================================
-        buy_slippage_buffer = float(getattr(Config, 'BUY_SLIPPAGE_BUFFER', 0.005))
+        buy_slippage_buffer = float(getattr(Config, 'BUY_SLIPPAGE_BUFFER', 0.010))
         if price > 0:
-            max_allowed_buy_price = price * (1.0 + buy_slippage_buffer)
+            tick_size = 0.01 if price >= 1.0 else 0.0001
+            max_allowed_buy_price = max(price * (1.0 + buy_slippage_buffer), price + tick_size)
             if ask <= 0:
-                self.logger.warning(f"🚫 [Anti-FOMO Reject] {ticker} 유효 매수 호가 부재 (Ask: {ask}) -> 매수 차단")
+                self.logger.warning(f"🚫 [Anti-FOMO Reject] {ticker} 유효 매수 호가 부재 (Ask: {ask}) -> 매수 차단 및 당일 영구 제외")
+                portfolio.ban_list.add(ticker)
                 return None
 
             if ask > max_allowed_buy_price:
                 self.logger.warning(
                     f"🚫 [Anti-FOMO Reject] {ticker} 매수 호가 과열 이탈 "
-                    f"(Ask ${ask:.4f} > 허용상한 ${max_allowed_buy_price:.4f}, +{buy_slippage_buffer*100:.1f}% 초과) -> 매수 차단"
+                    f"(Ask ${ask:.4f} > 허용상한 ${max_allowed_buy_price:.4f}, 버퍼 +{buy_slippage_buffer*100:.1f}%, 틱 ${tick_size:.4f}) -> 매수 차단 및 당일 영구 제외"
                 )
+                portfolio.ban_list.add(ticker)
                 return None
 
         # ============================================================
