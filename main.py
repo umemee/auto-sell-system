@@ -1054,13 +1054,19 @@ def main():
                         logger.warning(f"⚠️ [Spread Guard] {sym}: 스프레드 과다 ({spread:.2f}% > 3.0%) 로 매수 보류")
                         return False
 
-                    buy_buffer = float(getattr(Config, 'BUY_SLIPPAGE_BUFFER', 0.005))
-                    max_allowed_price = sig_price * (1.0 + buy_buffer)
+                    buy_buffer = float(getattr(Config, 'BUY_SLIPPAGE_BUFFER', 0.010))
+                    tick_size = 0.01 if sig_price >= 1.0 else 0.0001
+                    max_allowed_price = max(sig_price * (1.0 + buy_buffer), sig_price + tick_size)
                     if ask > max_allowed_price:
                         logger.warning(
                             f"⚠️ [Pre-Order Price Guard] {sym}: "
-                            f"Ask ${ask:.4f} > 허용상한 ${max_allowed_price:.4f} (시그널 ${sig_price:.4f} +{buy_buffer*100:.1f}%) -> 매수 차단"
+                            f"Ask ${ask:.4f} > 허용상한 ${max_allowed_price:.4f} (시그널 ${sig_price:.4f}, 버퍼 +{buy_buffer*100:.1f}%, 틱 ${tick_size:.4f}) -> 매수 차단 및 당일 영구 제외"
                         )
+                        portfolio.ban_list.add(sym)
+                        if sym in active_candidates:
+                            del active_candidates[sym]
+                        candle_cache.pop(sym, None)
+                        save_state(portfolio.ban_list, active_candidates, risk_filter.loss_blacklist, portfolio=portfolio)
                         return False
 
                 entry_price = ask if ask > 0 else sig_price
@@ -1218,6 +1224,8 @@ def main():
                     else:
                         logger.warning(f"🚌 [실패] {sym} 매수 실패. 금일 제외.")
                         portfolio.ban_list.add(sym)
+                        if sym in active_candidates:
+                            del active_candidates[sym]
                         candle_cache.pop(sym, None)
                         save_state(portfolio.ban_list, active_candidates, risk_filter.loss_blacklist, portfolio=portfolio)
                         return False

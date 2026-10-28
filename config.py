@@ -117,7 +117,7 @@ class Config(metaclass=ConfigMeta):
     PAUSE_END_HOUR = 9          # 일시정지 종료 시간 (ET 09:00 = KST 22:00 이전까지 차단 -> 09시부터 진입 재개)
 
     UPPER_BUFFER = 0.015       # 🛡️ [Anti-FOMO] 매수 상한 버퍼 1.5% (백테스트 1 + 0.015 동기화)
-    BUY_SLIPPAGE_BUFFER = 0.005 # 매수 슬리피지 버퍼 0.5%
+    BUY_SLIPPAGE_BUFFER = 0.010 # 매수 슬리피지 버퍼 1.0% (백테스트 및 실전 골든스팟 동기화)
     ACTIVATION_THRESHOLD = 0.40 
     MAX_DAILY_CHANGE = 5.0     
     
