@@ -765,9 +765,10 @@ def main():
             # 🕒 [Time Sync] 캔들 완성형 (매 분 02초~04초 진입 - 증권사 1분봉 집계 완료 대기)
             # =========================================================
             current_kst = datetime.datetime.now(pytz.timezone('Asia/Seoul'))
-            if not (current_kst.hour >= 17 or current_kst.hour < 5):
+            # 🛡️ [서머타임 영구 대응] 미국 동부시간(now) 기준: 프리마켓 04:00 ET ~ 정규장 마감 16:00 ET 외 시간 대기
+            if not (4 <= now.hour < 16):
                 if not was_sleeping:
-                    logger.warning(f"💤 [AWS 정시 대기] 현재 한국 시간 {current_kst.strftime('%H:%M')}. 17시 정각까지 대기 루프 가동.")
+                    logger.warning(f"💤 [AWS 정시 대기] 현재 미국 시간 {now.strftime('%H:%M')} (장외 시간 / KST {current_kst.strftime('%H:%M')}). 04시(프리마켓)까지 대기 루프 가동.")
                     was_sleeping = True
                 time.sleep(10)
                 continue
@@ -802,14 +803,15 @@ def main():
                 continue
             
             if was_sleeping:
-                bot.send_message("🌅 [프리마켓 데이터 수집 개시] KR 17:00 / NY 04:00 (전략 대기 중)")
-                logger.info("🌅 [Premarket Data Collection Started] KR 17:00 / NY 04:00 (Waiting for Strategy Entry)")
+                cur_k_pre = now.astimezone(tz_kst).strftime('%H:%M')
+                bot.send_message(f"🌅 [프리마켓 데이터 수집 개시] KR {cur_k_pre} / NY {now.strftime('%H:%M')} (전략 대기 중)")
+                logger.info(f"🌅 [Premarket Data Collection Started] KR {cur_k_pre} / NY {now.strftime('%H:%M')} (Waiting for Strategy Entry)")
                 was_sleeping = False
                 portfolio.sync_with_kis()
                 if getattr(portfolio, 'session_start_equity', 0.0) == 0.0:
                     portfolio.session_start_equity = portfolio.total_equity
                     logger.info(f"🌱 [Premarket Latch] 세션 시작 총자산 래치 고정: ${portfolio.session_start_equity:,.2f}")
-                send_heartbeat_report(bot, portfolio, risk_filter, active_candidates, tz_kst, tz_et, trigger_reason="17:00 프리마켓 개시", is_premarket_1700=True)
+                send_heartbeat_report(bot, portfolio, risk_filter, active_candidates, tz_kst, tz_et, trigger_reason="프리마켓 개시", is_premarket_1700=True)
                 last_heartbeat_time = time.time()
                 save_state(portfolio.ban_list, active_candidates, risk_filter.loss_blacklist, portfolio=portfolio)
 
