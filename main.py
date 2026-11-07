@@ -613,8 +613,8 @@ def main():
                             if result:
                                 bot.send_message(result['msg'])
             
-                                # 🛑 손절 발생 즉시 3중 필터 블랙리스트에 추가 (손절일 경우만)
-                                if trade_pnl < 0:
+                                # 🛑 손절 발생 즉시 3중 필터 블랙리스트에 추가 (백테스트 패리티: EMA 전략 손절일 경우만 영구 블랙리스트 등록)
+                                if trade_pnl < 0 and not is_alpha_pos:
                                     risk_filter.register_trade_result(ticker, trade_pnl, reason=reason)
                                 
                                 if ticker in active_candidates:
@@ -666,15 +666,21 @@ def main():
 
                         # [작업 Q-4] 발주 직전 브로커 잔고 수량과 로컬 수량 불일치 대조
                         actual_broker_qty = None
+                        broker_holdings = None
                         try:
                             broker_holdings = kis.get_balance()
-                            if broker_holdings:
+                            if isinstance(broker_holdings, list):
+                                actual_broker_qty = 0
                                 for b_item in broker_holdings:
                                     if b_item.get('symbol') == w_sym:
                                         actual_broker_qty = int(float(b_item.get('qty', 0)))
                                         break
                         except Exception as b_err:
                             logger.warning(f"⚠️ [익절 워치독] {w_sym} 브로커 잔고 수량 확인 중 오류: {b_err}")
+
+                        if actual_broker_qty is not None and actual_broker_qty <= 0:
+                            logger.info(f"✅ [익절 워치독] {w_sym} 브로커 잔고 0주(선주문 기체결) 확인 -> 워치독 재발주 스킵")
+                            continue
 
                         if actual_broker_qty is not None and actual_broker_qty > 0 and actual_broker_qty != w_qty:
                             logger.warning(
@@ -911,6 +917,10 @@ def main():
                 active_candidates.clear()
                 candle_cache.clear()
                 candle_exporter.reset_session()
+                if hasattr(listener, 'notified_stocks'):
+                    listener.notified_stocks.clear()
+                if hasattr(listener, 'detected_candidate_meta'):
+                    listener.detected_candidate_meta.clear()
                 alpha_entry_heartbeat_sent = False  # 👈 익일 Alpha 매매 개시 하트비트 플래그 리셋
                 ema_entry_heartbeat_sent = False    # 👈 익일 EMA 매매 개시 하트비트 플래그 리셋
                 save_state(portfolio.ban_list, active_candidates, risk_filter.loss_blacklist, portfolio=portfolio)
@@ -1148,6 +1158,7 @@ def main():
 
                                                     if is_confirmed:
                                                         order_sent = True
+                                                        order_manager.recent_order_time[sym] = time.time()
                                                         logger.info(f"🔒 [EMA Pre-Order] {sym} 익절 주문 정상 접수 확인 (${tgt_p:.2f})")
                                                         break
                                                     else:
@@ -1207,6 +1218,7 @@ def main():
 
                                                     if is_confirmed:
                                                         order_sent = True
+                                                        order_manager.recent_order_time[sym] = time.time()
                                                         logger.info(f"🔒 [ALPHA Pre-Order] {sym} 익절 주문 정상 접수 확인 (${tgt_p:.2f})")
                                                         break
                                                     else:
@@ -1319,7 +1331,7 @@ def main():
             # ---------------------------------------------------------
             if is_alpha_active and alpha_strategy and portfolio.has_open_slot(strategy='ALPHA'):
                 if hasattr(alpha_strategy, 'update_surge_ranks'):
-                    alpha_strategy.update_surge_ranks(target_dfs)
+                    alpha_strategy.update_surge_ranks(target_dfs, now_time=now)
                 for sym, (df, selected_exchange) in list(target_dfs.items()):
                     if not portfolio.has_open_slot(strategy='ALPHA'):
                         break
@@ -1342,6 +1354,8 @@ def main():
             # 4단계: [Virtual Combined Engine 훅] 가상 페이퍼 엔진 캔들 전달
             # ---------------------------------------------------------
             if virtual_combined_engine:
+                if hasattr(virtual_combined_engine, 'strategy_alpha') and hasattr(virtual_combined_engine.strategy_alpha, 'update_surge_ranks'):
+                    virtual_combined_engine.strategy_alpha.update_surge_ranks(target_dfs, now_time=now)
                 for sym, (df, _) in target_dfs.items():
                     try:
                         virtual_combined_engine.on_candle(sym, df, now_time=now)
