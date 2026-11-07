@@ -3,7 +3,7 @@ import logging
 import os
 import datetime
 from pathlib import Path
-from infra.utils import get_logger
+from infra.utils import get_logger, get_trade_date_key
 from config import Config
 
 class MarketListener:
@@ -42,8 +42,9 @@ class MarketListener:
         if ban_list is None: ban_list = set()
         if active_candidates is None: active_candidates = set()
 
-        # ✅ [NEW] 날짜가 바뀌면 알림 메모리 초기화
-        today_str = datetime.datetime.now().strftime('%Y-%m-%d')
+        # ✅ [2026-11-07 수정] 한국 자정(00:00 KST)이 아닌 미국 거래일(get_trade_date_key) 기준으로 알림 메모리 초기화
+        # (새벽 00~05시 KST 전일 정규장 포착 종목이 당일 18시 KST 프리마켓에서 다시 포착될 때 '🚨 [급등 포착]' 로그가 누락되는 버그 수정)
+        today_str = get_trade_date_key()
         if self.last_scan_date != today_str:
             self.notified_stocks.clear()
             self.detected_candidate_meta.clear()
