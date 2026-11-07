@@ -396,9 +396,40 @@ class RealOrderManager:
         strat_name = position.get('strategy_name', position.get('strategy', 'EMA'))
         is_pure_paper = getattr(Config, 'IS_PURE_PAPER', self.is_paper)
         is_alpha_paper = (strat_name == 'ALPHA' and getattr(Config, 'ALPHA_TRADING_MODE', 'LIVE').upper() == 'PAPER')
+        is_tp_reason = reason in ["TAKE_PROFIT", "TARGET_PROFIT_0.035"]
+
         if not (is_pure_paper or is_alpha_paper):
-            is_urgent = reason in ["STOP_LOSS", "TRAILING_STOP", "FORCE_EOD_EXIT"]
-            self._clear_pending_orders(ticker, is_urgent=is_urgent)
+            if is_tp_reason:
+                # 🛡️ [2026-11-07 DKI 버그 수정] 브로커에 이미 정상 접수된 익절 선주문($2.42)이 존재할 때는
+                # 소프트웨어 익절이 기존 선주문을 취소하고 고점($2.50) 지정가로 재발주하지 않도록 보호
+                now_ts = time.time()
+                if now_ts - self.recent_order_time.get(ticker, 0.0) < 15.0:
+                    self.logger.info(f"🔒 [{reason}] {ticker} 최근 익절 선주문 발주 유예 구간(15s) -> 취소/재발주 스킵 (선주문 체결 대기)")
+                    return None
+                try:
+                    pending_tp = self.kis.get_pending_orders(ticker, side="SELL")
+                    if isinstance(pending_tp, list) and len(pending_tp) > 0:
+                        self.logger.info(f"🔒 [{reason}] {ticker} 브로커 익절 선주문 활성 상태({len(pending_tp)}건) -> 취소/재발주 스킵 (거래소 체결 대기)")
+                        return None
+                except Exception as p_err:
+                    self.logger.warning(f"⚠️ [{reason}] {ticker} 미체결 선주문 확인 중 예외: {p_err}")
+
+                try:
+                    broker_holdings = self.kis.get_balance()
+                    if isinstance(broker_holdings, list):
+                        held_qty = 0
+                        for b_item in broker_holdings:
+                            if isinstance(b_item, dict) and b_item.get('symbol') == ticker:
+                                held_qty = int(float(b_item.get('qty', 0)))
+                                break
+                        if held_qty <= 0:
+                            self.logger.info(f"✅ [{reason}] {ticker} 브로커 선주문 기체결 확인(잔고 0주) -> sync_with_kis 처리 위임")
+                            return None
+                except Exception as b_err:
+                    self.logger.warning(f"⚠️ [{reason}] {ticker} 브로커 잔고 확인 중 예외: {b_err}")
+            else:
+                is_urgent = reason in ["STOP_LOSS", "STOP_LOSS_0.10", "TRAILING_STOP", "FORCE_EOD_EXIT"]
+                self._clear_pending_orders(ticker, is_urgent=is_urgent)
 
         # ============================================================
         # 🔫 [Execution] 매도 주문 실행 (페이퍼 모드 분기)
@@ -420,8 +451,12 @@ class RealOrderManager:
 
             # [조건별 주문 유형 설정]
             pos_exch = position.get('exchange', 'NASD')
-            if reason in ["TAKE_PROFIT", "TARGET_PROFIT_0.035"]:
+            if is_tp_reason:
                 order_type = "00"
+                # 스파이크 고점(예: $2.50) 추격 미체결 방지를 위해 포지션 목표가(예: $2.42) 우선 적용
+                tgt_p = float(position.get('target_price') or 0.0)
+                if tgt_p > 0:
+                    order_price = tgt_p
                 self.logger.info(f"💰 [{reason}] 매도 시도 ({pos_exch}): {ticker} (가격: {order_price}, 수량: {qty})")
                 resp = None
                 for attempt in range(1, 4):
@@ -434,9 +469,26 @@ class RealOrderManager:
                         exchange=pos_exch
                     )
                     if resp and resp.get('rt_cd') == '0':
+                        self.recent_order_time[ticker] = time.time()
                         break
                     self.logger.warning(f"⚠️ [{reason}] {ticker} 매도 #{attempt} 실패 -> 재시도 (오류: {resp.get('msg1') if resp else '무응답'})")
                     time.sleep(0.5)
+
+                # 🛡️ [미체결 포지션 조기 삭제 방지] 지정가 접수 후 아직 미체결 상태라면 포지션을 지우지 않고 유지
+                if resp and resp.get('rt_cd') == '0':
+                    output_chk = resp.get('output', {}) if isinstance(resp.get('output'), dict) else {}
+                    if 'fill_price' not in output_chk:
+                        time.sleep(1.5)
+                        try:
+                            still_pending = self.kis.get_pending_orders(ticker, side="SELL")
+                            if isinstance(still_pending, list) and len(still_pending) > 0:
+                                self.logger.info(
+                                    f"🔒 [{reason}] {ticker} 지정가(${order_price:.4f}) 접수 완료 및 미체결 대기 확인 "
+                                    f"-> 체결 전 포지션 삭제/수동오인 방지 (선주문 유지)"
+                                )
+                                return None
+                        except Exception as sp_err:
+                            self.logger.warning(f"⚠️ [{reason}] {ticker} 체결 확인 중 예외: {sp_err}")
             elif reason == "TRAILING_STOP":
                 order_type = "00"
                 if price > 0:

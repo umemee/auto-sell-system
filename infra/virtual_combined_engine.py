@@ -61,38 +61,97 @@ class AlphaLiveAdapter:
         self.triggered_today = set()
         self.current_top3_tickers = set()
         self._surge_ranks_updated = False
+        self.last_evaluated_bar = {}  # {ticker: "YYYY-MM-DD_HHMM"} 완성봉 중복 평가 방지
 
     def daily_reset(self):
         self.or10_cache.clear()
         self.triggered_today.clear()
         self.current_top3_tickers.clear()
         self._surge_ranks_updated = False
+        self.last_evaluated_bar.clear()
 
-    def update_surge_ranks(self, target_dfs: Dict[str, Any]):
+    @staticmethod
+    def _parse_bar_hm(val) -> int:
+        s = str(val).replace(':', '').strip()
+        if not s:
+            return -1
+        try:
+            if len(s) <= 4:
+                return int(s)
+            return int(s[:4]) if len(s) >= 6 else int(s[:-2])
+        except Exception:
+            return -1
+
+    def _get_completed_df(self, df: pd.DataFrame, now_et: Optional[datetime.datetime] = None) -> pd.DataFrame:
+        """
+        [Look-ahead Bias 원천 차단 & 백테스트 1:1 동기화]
+        실전 루프(:02~:05초)에서 KIS API가 반환하는 마지막 행(현재 분의 2~4초짜리 미완성 캔들)을 격리하고,
+        완성된 1분봉(t < now_hm)만 추출하여 반환합니다.
+        """
+        if df is None or df.empty:
+            return pd.DataFrame()
+        out = df.copy()
+        if 'time' in out.columns:
+            out['_hm'] = out['time'].apply(self._parse_bar_hm)
+        elif isinstance(out.index, pd.DatetimeIndex):
+            out['_hm'] = out.index.hour * 100 + out.index.minute
+        else:
+            out['_hm'] = -1
+
+        if 'date' in out.columns:
+            out['_date_num'] = out['date'].astype(str).str.replace('-', '').str.strip()
+        elif isinstance(out.index, pd.DatetimeIndex):
+            out['_date_num'] = out.index.strftime('%Y%m%d')
+        else:
+            out['_date_num'] = now_et.strftime('%Y%m%d') if now_et is not None else ''
+
+        if now_et is not None and (out['_hm'] >= 0).any():
+            today_num = now_et.strftime('%Y%m%d')
+            now_hm = now_et.hour * 100 + now_et.minute
+            # 당일 현재 진행 중인 미완성 분봉(_hm >= now_hm) 제거
+            mask_unfinished = (out['_date_num'] == today_num) & (out['_hm'] >= now_hm)
+            if mask_unfinished.any() and (~mask_unfinished).any():
+                out = out[~mask_unfinished].reset_index(drop=True)
+        return out
+
+    def update_surge_ranks(self, target_dfs: Dict[str, Any], now_time: Optional[datetime.datetime] = None):
         """
         [필터 1] 실시간 당일 상승률 Top 3 대장주 맵 갱신 (08_customizable_backtest.py 및 main.py 동기화)
-        - 대상: 5분 누적 거래량 >= 50,000주 (ALPHA_SURGE_MIN_VOL_5M)
-        - 기준: 당일 시초가 대비 5분 누적 상승률 양수(cum_ret > 0) 상위 3위 이내
+        - 대상: 직전 5개 완성 분봉 누적 거래량 >= 50,000주 (ALPHA_SURGE_MIN_VOL_5M)
+        - 기준: 당일 시초가 대비 완성 분봉 누적 상승률 양수(cum_ret > 0) 상위 3위 이내
         """
+        now_et = None
+        if now_time is not None:
+            if hasattr(now_time, 'tzinfo') and now_time.tzinfo is not None:
+                now_et = now_time.astimezone(pytz.timezone('US/Eastern'))
+            else:
+                now_et = pytz.timezone('US/Eastern').localize(now_time)
+
         records = []
         min_vol_5m = getattr(Config, 'ALPHA_SURGE_MIN_VOL_5M', 50000.0)
         for sym, item in target_dfs.items():
-            df = item[0] if isinstance(item, tuple) else item
-            if df is None or df.empty or len(df) < 5:
+            raw_df = item[0] if isinstance(item, tuple) else item
+            if raw_df is None or raw_df.empty or len(raw_df) < 5:
                 continue
             try:
-                # 당일 첫 봉의 시가(open) 기준 계산
-                today_date = str(df.iloc[-1]['date']) if 'date' in df.columns else None
-                today_df = df[df['date'] == today_date] if today_date else df
-                if today_df.empty:
-                    today_df = df
+                df = self._get_completed_df(raw_df, now_et)
+                if df.empty or len(df) < 5:
+                    continue
+                today_date = str(df.iloc[-1]['_date_num']) if '_date_num' in df.columns else None
+                today_df = df[df['_date_num'] == today_date] if today_date else df
+                if '_hm' in today_df.columns and (today_df['_hm'] >= 0).any():
+                    today_session = today_df[(today_df['_hm'] >= 400) & (today_df['_hm'] <= 1559)]
+                    if not today_session.empty:
+                        today_df = today_session
+                if len(today_df) < 5:
+                    continue
                 open_p = float(today_df.iloc[0]['open'])
                 if open_p <= 0:
                     continue
-                last_bar = df.iloc[-1]
+                last_bar = today_df.iloc[-1]
                 curr_c = float(last_bar['close'])
                 cum_ret = (curr_c - open_p) / open_p * 100.0
-                vol_5m = float(df['volume'].iloc[-5:].sum()) if 'volume' in df.columns else float(min_vol_5m)
+                vol_5m = float(today_df['volume'].astype(float).iloc[-5:].sum()) if 'volume' in today_df.columns else float(min_vol_5m)
                 if vol_5m >= min_vol_5m and cum_ret > 0:
                     records.append({'ticker': sym, 'cum_ret': cum_ret})
             except Exception:
@@ -111,11 +170,11 @@ class AlphaLiveAdapter:
 
     def check_entry(self, ticker: str, df: pd.DataFrame, now_time: datetime.datetime, is_surge_top3: Optional[bool] = None) -> Optional[Dict[str, Any]]:
         """
-        실시간 1분봉 데이터(df)로부터 Alpha01 및 Alpha02 진입 타점을 확인.
-        [2026-10-16 감사 반영] 4대 핵심 필터 엄격 적용:
+        완성된 직전 1분봉 데이터로부터 Alpha01 및 Alpha02 진입 타점을 확인 (백테스트 extract_alpha_candidates_for_day 1:1 동기화).
+        [2026-10-16 감사 및 2026-11-07 완성봉 패리티 반영] 4대 핵심 필터 + 스파이크 가드 엄격 적용:
         1. Top 3 Surge Rank (is_surge_top3 or ticker in current_top3_tickers)
         2. EMA 50 양(+)기울기 (ema_50_slope > 0)
-        3. EMA 50 지지 터치 및 양봉 마감 (low <= ema_50 <= high and close > open)
+        3. 직전 완성봉 EMA 50 지지 터치 및 양봉 마감 (low <= ema_50 <= high and close > open)
         4. 가격대 엄격 캡핑 ($1.00 <= price <= $5.00)
         """
         if df is None or df.empty or len(df) < 5:
@@ -129,18 +188,45 @@ class AlphaLiveAdapter:
 
         t_str = now_et.strftime("%H:%M:%S")
         d_str = now_et.strftime("%Y-%m-%d")
+        today_num = now_et.strftime("%Y%m%d")
 
         # 전략별 진입 허용 시작 시간 (ET 기준) 검사 (기본 08시 = KST 21:00)
         alpha_start_hour = getattr(Config, 'ALPHA_ENTRY_START_HOUR_ET', 8)
         if now_et.hour < alpha_start_hour:
             return None
 
-        # 거래 윈도우 검사 (08:30:00 ~ 09:20:00)
-        if not (self.trading_window_start <= t_str < self.trading_window_end):
+        # 거래 윈도우 검사 (08:30:00 ~ 09:20:59 - 09:19 완성봉을 09:20:02에 평가 가능하도록 허용)
+        if not (self.trading_window_start <= t_str < "09:21:00"):
             return None
 
-        curr_bar = df.iloc[-1]
+        # 미완성 현재 분봉(df.iloc[-1] @ :02s) 제거 후 직전 완성봉 추출
+        df_eval = self._get_completed_df(df, now_et)
+        if df_eval.empty or len(df_eval) < 5:
+            return None
+
+        curr_bar = df_eval.iloc[-1]
         curr_price = float(curr_bar['close'])
+        t_bar = int(curr_bar['_hm']) if '_hm' in curr_bar and int(curr_bar['_hm']) >= 0 else int(now_et.strftime("%H%M"))
+
+        # 당일 08:30 이후 완성봉이 존재하는 실전/리플레이 데이터의 경우:
+        # 백테스트(extract_alpha_candidates_for_day)와 동일하게 직전 1분 완성봉(prev_hm)만 1회 평가하며 830 <= t_bar < 920 강제
+        has_today_session_bars = ('_date_num' in df_eval.columns and '_hm' in df_eval.columns and
+                                  ((df_eval['_date_num'] == today_num) & (df_eval['_hm'] >= 830)).any())
+        if has_today_session_bars or now_et.second > 0:
+            prev_dt = now_et - datetime.timedelta(minutes=1)
+            prev_hm = prev_dt.hour * 100 + prev_dt.minute
+            if not (830 <= t_bar < 920):
+                return None
+            # 직전 분에 막 완성된 캔들만 평가 (과거 거래정지/공백 구간의 낡은 봉 재평가 방지)
+            if has_today_session_bars and now_et.second > 0 and t_bar != prev_hm:
+                return None
+            # [실전 리스크 1] ET 09:15 ~ 09:30 진입 금지 (백테스트 main.py:383 패리티)
+            if getattr(Config, 'USE_RISK_FILTER', True) and (915 <= t_bar <= 930):
+                return None
+            bar_eval_key = f"{d_str}_{t_bar}"
+            if self.last_evaluated_bar.get(ticker) == bar_eval_key:
+                return None
+            self.last_evaluated_bar[ticker] = bar_eval_key
 
         # [필터 4] 유니버스 가격대 검사 ($1.00 ~ $5.00)
         min_p = getattr(Config, 'ALPHA_MIN_PRICE', self.universe_min_price)
@@ -158,12 +244,12 @@ class AlphaLiveAdapter:
                 if ticker not in getattr(self, 'current_top3_tickers', set()):
                     return None
 
-        # [필터 2 & 3 보조 계산] EMA 50 및 5봉 기울기 계산
+        # [필터 2 & 3 보조 계산] 완성봉 시계열(df_eval) 기준 EMA 50 및 5봉 기울기 계산
         ema_50_val = None
         ema_50_slope = None
         if strict_alpha:
-            if 'close' in df.columns and len(df) >= 20:
-                ema_50_series = df['close'].astype(float).ewm(span=50, adjust=False).mean()
+            if 'close' in df_eval.columns and len(df_eval) >= 20:
+                ema_50_series = df_eval['close'].astype(float).ewm(span=50, adjust=False).mean()
                 ema_50_val = float(ema_50_series.iloc[-1])
                 if len(ema_50_series) >= 6:
                     ema_50_slope = float(ema_50_series.iloc[-1] - ema_50_series.iloc[-6])
@@ -171,16 +257,16 @@ class AlphaLiveAdapter:
         key_today = f"{d_str}_{ticker}"
 
         # -----------------------------------------------------------------
-        # 1. Alpha 02 검사 (OR-10 압축 후 상방 돌파) [작업 N: ENABLE_ALPHA02 플래그 제어]
+        # 1. Alpha 02 검사 (OR-10 압축 후 상방 돌파) [백테스트 main.py:387~421 패리티]
         # -----------------------------------------------------------------
         if getattr(Config, 'ENABLE_ALPHA02', True) and key_today not in self.triggered_today:
-            # 08:30 ~ 08:40 사이 캔들로 OR-10 계산
             or_cache = self.or10_cache.get(ticker)
-            if or_cache is None or or_cache.get('date') != d_str:
-                # df에서 당일 08:30 ~ 08:39 구간 캔들 필터링
-                if 'time' in df.columns:
-                    time_col = df['time'].astype(str).str.replace(':', '').str.zfill(6)
-                    or_bars = df[(time_col >= '083000') & (time_col < '084000')]
+            if (or_cache is None or or_cache.get('date') != d_str) and t_bar >= 840:
+                if '_hm' in df_eval.columns and '_date_num' in df_eval.columns:
+                    or_bars = df_eval[(df_eval['_date_num'] == today_num) & (df_eval['_hm'] >= 830) & (df_eval['_hm'] < 840)]
+                elif 'time' in df_eval.columns:
+                    time_col = df_eval['time'].astype(str).str.replace(':', '').str.zfill(6)
+                    or_bars = df_eval[(time_col >= '083000') & (time_col < '084000')]
                 else:
                     or_bars = pd.DataFrame()
 
@@ -189,7 +275,6 @@ class AlphaLiveAdapter:
                     or_l = float(or_bars['low'].min())
                     if or_l > 0:
                         rng_pct = ((or_h - or_l) / or_l) * 100.0
-                        # [필터 4 정합성] OR-10 고가도 $1~$5 범위 내에 위치해야 함
                         if not strict_alpha or (min_p <= or_h <= max_p):
                             self.or10_cache[ticker] = {
                                 'or_high': or_h,
@@ -200,8 +285,9 @@ class AlphaLiveAdapter:
 
             or_info = self.or10_cache.get(ticker)
             if or_info and or_info.get('date') == d_str:
-                if or_info['range_pct'] < self.a02_max_range_pct and t_str >= "08:40:00":
-                    if curr_price > or_info['or_high']:
+                buy_buf = float(getattr(Config, 'BUY_SLIPPAGE_BUFFER', 0.005))
+                if or_info['range_pct'] < self.a02_max_range_pct and (840 <= t_bar < 900):
+                    if or_info['or_high'] < curr_price <= or_info['or_high'] * (1.0 + buy_buf):
                         self.triggered_today.add(key_today)
                         return {
                             'type': 'BUY',
@@ -217,9 +303,18 @@ class AlphaLiveAdapter:
                         }
 
         # -----------------------------------------------------------------
-        # 2. Alpha 01 검사 (Time x Path Regime + EMA 50 지지/기울기)
+        # 2. Alpha 01 검사 (Time x Path Regime + EMA 50 지지/기울기) [백테스트 main.py:424~488 패리티]
         # -----------------------------------------------------------------
         if key_today not in self.triggered_today:
+            # 당일 08:30~09:19 완성봉 시퀀스 추출 (백테스트 bars 리스트와 100% 동일)
+            if has_today_session_bars:
+                session_bars_df = df_eval[(df_eval['_date_num'] == today_num) & (df_eval['_hm'] >= 830) & (df_eval['_hm'] < 920)]
+            else:
+                session_bars_df = df_eval
+
+            if len(session_bars_df) < 5:
+                return None
+
             # [필터 2 & 3] EMA 50 양(+)기울기 및 지지 터치 & 양봉 마감 필수 검증
             if strict_alpha:
                 if ema_50_val is None or ema_50_slope is None or ema_50_slope <= 0:
@@ -232,12 +327,13 @@ class AlphaLiveAdapter:
                 if not (bar_low <= ema_50_val <= bar_high and bar_close > bar_open):
                     return None
 
-            b5_df = df.iloc[-5:].copy().reset_index(drop=True)
+            b5_df = session_bars_df.iloc[-5:].copy().reset_index(drop=True)
             if len(b5_df) >= 5:
                 bar_rets, bar_u_wicks = [], []
                 for i in range(5):
-                    prev_c = b5_df.iloc[i - 1]['close'] if i > 0 else (df.iloc[-6]['close'] if len(df) >= 6 else b5_df.iloc[i]['open'])
-                    ret_val = ((b5_df.iloc[i]['close'] - prev_c) / prev_c) * 100.0 if prev_c > 0 else 0.0
+                    # 백테스트(main.py:440) 동일: i == 0일 때 b5[0]['open'] 기준
+                    prev_c = float(b5_df.iloc[i - 1]['close']) if i > 0 else float(b5_df.iloc[0]['open'])
+                    ret_val = ((float(b5_df.iloc[i]['close']) - prev_c) / prev_c) * 100.0 if prev_c > 0 else 0.0
                     bar_rets.append(ret_val)
 
                     o_val = float(b5_df.iloc[i]['open'])
@@ -246,10 +342,11 @@ class AlphaLiveAdapter:
                     u_wick = h_val - max(o_val, c_val)
                     bar_u_wicks.append((u_wick / o_val * 100.0) if o_val > 0 else 0.0)
 
-                c_start = float(df.iloc[-6]['close'] if len(df) >= 6 else b5_df.iloc[0]['open'])
+                # 백테스트(main.py:445) 동일: c_start = float(b5[0]['open'])
+                c_start = float(b5_df.iloc[0]['open'])
                 cum_ret = ((curr_price - c_start) / c_start) * 100.0 if c_start > 0 else 0.0
                 h5 = float(b5_df['high'].max())
-                low_idx = int(b5_df['low'].idxmin())
+                low_idx = int(b5_df['low'].astype(float).idxmin())
                 sum_u = sum(bar_u_wicks)
 
                 is_cont = bar_rets[2] > 0 and bar_rets[3] > 0 and bar_rets[4] > 0
@@ -265,12 +362,31 @@ class AlphaLiveAdapter:
                     p_type = "D"
 
                 is_valid = False
-                if t_str < self.a01_cutoff_time and p_type in self.a01_early_paths:
-                    is_valid = True
-                elif t_str >= self.a01_cutoff_time and p_type in self.a01_late_paths:
-                    is_valid = True
+                if has_today_session_bars:
+                    if t_bar < 845 and p_type in self.a01_early_paths:
+                        is_valid = True
+                    elif t_bar >= 845 and p_type in self.a01_late_paths:
+                        is_valid = True
+                else:
+                    if t_str < self.a01_cutoff_time and p_type in self.a01_early_paths:
+                        is_valid = True
+                    elif t_str >= self.a01_cutoff_time and p_type in self.a01_late_paths:
+                        is_valid = True
 
                 if is_valid:
+                    # [백테스트 main.py:466~471 스파이크 가드 100% 동기화]
+                    # 시그널 완성봉 내 과열 스파이크(진폭 > 3.5% 또는 윗꼬리 > 1.0%) 발생 시 진입 차단 및 당일 재진입 제외
+                    op_val = float(curr_bar['open'])
+                    hi_val = float(curr_bar['high'])
+                    lo_val = float(curr_bar['low'])
+                    if has_today_session_bars and op_val > 0 and ((hi_val - curr_price) / op_val > 0.010 or (hi_val - lo_val) / op_val > 0.035):
+                        self.triggered_today.add(key_today)
+                        self.logger.info(
+                            f"🚫 [Alpha 01 Spike Guard] {ticker} ({t_bar}) 캔들 과열 스파이크 감지 "
+                            f"(윗꼬리={(hi_val - curr_price)/op_val*100:.2f}%, 진폭={(hi_val - lo_val)/op_val*100:.2f}%) -> 진입 차단 및 당일 제외"
+                        )
+                        return None
+
                     self.triggered_today.add(key_today)
                     return {
                         'type': 'BUY',
