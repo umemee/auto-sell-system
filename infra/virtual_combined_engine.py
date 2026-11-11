@@ -299,6 +299,7 @@ class AlphaLiveAdapter:
                             'tp_pct': self.tp_pct,
                             'sl_pct': self.sl_pct,
                             'max_hold_min': 35,
+                            'bar_hm': t_bar,
                             'time': now_et
                         }
 
@@ -398,6 +399,7 @@ class AlphaLiveAdapter:
                         'tp_pct': self.tp_pct,
                         'sl_pct': self.sl_pct,
                         'max_hold_min': 45,
+                        'bar_hm': t_bar,
                         'time': now_et
                     }
 
@@ -698,6 +700,11 @@ class VirtualCombinedEngine:
             available = self.capital_manager.get_available_capital()
 
             if strat == 'EMA':
+                if getattr(Config, 'USE_RISK_FILTER', True):
+                    min_band = float(getattr(Config, 'RISK_PRICE_BAND_MIN', 5.0))
+                    max_band = float(getattr(Config, 'RISK_PRICE_BAND_MAX', 10.0))
+                    if min_band <= p_entry < max_band:
+                        continue
                 # 전략1: 슬롯 0.5 고정 요구 (가용자본 >= 0.5)
                 if available < 0.5 - self.capital_manager.epsilon:
                     self._log_skipped_signal(

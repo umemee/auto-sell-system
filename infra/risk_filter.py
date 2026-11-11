@@ -81,7 +81,8 @@ class TradeRiskFilter:
             )
 
     def is_order_blocked(
-        self, ticker: str, price: float, current_time_et: Optional[datetime.datetime] = None, strategy: str = "EMA"
+        self, ticker: str, price: float, current_time_et: Optional[datetime.datetime] = None,
+        strategy: str = "EMA", signal_bar_hm: Optional[int] = None
     ) -> Tuple[bool, Optional[str]]:
         if not self.enabled:
             return False, None
@@ -94,12 +95,21 @@ class TradeRiskFilter:
             current_time_et = tz_et.localize(current_time_et)
 
         reasons = []
+        strat_upper = (strategy or "EMA").upper()
 
-        # 1. 시간대 필터 (ET 09:15 ~ 09:30 / KST 22:15 ~ 22:30)
+        # 1. 시간대 필터 (ET 09:15 ~ 09:30 / KST 22:15~22:30 또는 표준시 23:15~23:30)
+        # [2026-11-11 Case 2 동기화] Alpha 전략의 09:14 완성봉 신호가 마감 직후(09:15:00~09:15:29 ET) 주문될 때는 예외 허용
+        # (EMA 전략 전체 및 Alpha 09:16 이후 진입은 여전히 엄격 차단)
         start_h, start_m = map(int, self.block_start_et.split(':'))
         end_h, end_m = map(int, self.block_end_et.split(':'))
         cur_min = current_time_et.hour * 60 + current_time_et.minute
-        if (start_h * 60 + start_m) <= cur_min <= (end_h * 60 + end_m):
+        is_alpha_914_exception = (
+            strat_upper == "ALPHA"
+            and signal_bar_hm == 914
+            and cur_min == (start_h * 60 + start_m)
+            and current_time_et.second < 30
+        )
+        if (start_h * 60 + start_m) <= cur_min <= (end_h * 60 + end_m) and not is_alpha_914_exception:
             tz_kst = pytz.timezone('Asia/Seoul')
             cur_kst = current_time_et.astimezone(tz_kst)
             reasons.append(f"TIME_WINDOW (ET {self.block_start_et}~{self.block_end_et} / KST {cur_kst.strftime('%H:%M')})")
@@ -109,7 +119,6 @@ class TradeRiskFilter:
             reasons.append(f"PRICE_BAND (${self.price_band_min:.2f}-${self.price_band_max:.2f}, current: ${price:.2f})")
 
         # 3. 과거 손절 종목 재진입 필터
-        strat_upper = (strategy or "EMA").upper()
         if self.block_loss_tickers and strat_upper != "ALPHA" and (ticker in self.loss_blacklist):
             reasons.append("PREVIOUS_LOSS_TICKER")
 
