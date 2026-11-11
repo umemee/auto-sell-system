@@ -233,7 +233,14 @@ class EmaStrategy:
         if hour >= self.entry_end_hour:
             self._log_rejection(ticker, f"진입 마감 시간 초과 ({hour}시 >= {self.entry_end_hour}시)", df.iloc[-1]['close'])
             return None
-            
+
+        # [백테스트 ema_strategy.py:465 패리티] ET 09:15 ~ 09:30 금칙 시간대 선제 차단 (금칙 구간 내 DROP/호가밴 오작동 방지)
+        if getattr(Config, 'USE_RISK_FILTER', True):
+            tot_min_et = hour * 60 + minute
+            if 555 <= tot_min_et <= 570:
+                self._log_rejection(ticker, f"금칙 시간대 대기 (ET 09:15~09:30, 현재 {hour}:{minute:02d})", df.iloc[-1]['close'])
+                return None
+
         if 9 == hour and 30 <= minute <= 34:
             self._log_rejection(ticker, "장 초반 대기 (Market Open Wait)", df.iloc[-1]['close'])
             return None
@@ -281,65 +288,23 @@ class EmaStrategy:
         prev_ema = df['ema'].iloc[-2]
         
         # =========================================================
-        # 🛑 [수정] 조기 DROP 버그 제거: 
-        # 모멘텀(recent_peak >= EMA * 1.03)이 발생하지 않은 종목은 DROP 대상이 아니므로,
-        # 모멘텀 체크(Step 4.7) 이전의 조기 영구 밴(Step 4.0)을 제거함.
-        # 올바른 DROP 판정은 모멘텀 확인 후 Step 5.1에서만 수행됨.
+        # 🛑 [Step 4.6] Activation(38% 보정) & 과열(500%) & DROP/진입 판정
+        # (백테스트 ema_strategy.py와 100% 동일한 순서로 정렬: Activation -> Peak -> DROP -> Dip/Bounce/AntiChasing -> Peak-DD -> F1 -> UpperWick)
         # =========================================================
-
-        # =========================================================
-        # 🛡️ [Step 4.1] Upper Wick Filter (직전 완성봉 윗꼬리 검사)
-        # =========================================================
-        if self.upper_wick_filter_enabled:
-            upper_wick_pct = self.calculate_upper_wick_pct(
-                prev_open, prev_high, prev_low, prev_close
-            )
-            
-            if upper_wick_pct >= self.upper_wick_filter_threshold_pct:
-                candle_time = df.index[-2]
-                self._write_upper_wick_skip_log(
-                    decision_time=current_time,
-                    ticker=ticker,
-                    candle_time=candle_time,
-                    candle_open=prev_open,
-                    candle_high=prev_high,
-                    candle_low=prev_low,
-                    candle_close=prev_close,
-                    upper_wick_pct=upper_wick_pct,
-                    threshold_pct=self.upper_wick_filter_threshold_pct,
-                    action="SKIP",
-                    reason="SKIP_UPPER_WICK_FILTER"
-                )
-                self._log_rejection(ticker, f"🚫 [UPPER_WICK] 윗꼬리 과다 차단 ({upper_wick_pct:.2f}% >= {self.upper_wick_filter_threshold_pct:.2f}%)", current_price)
-                return None
-        
-        # =========================================================
-        # 🛑 [Step 4.5] 추격 매수 방지 (Anti-Chasing Logic: Open > EMA + 3.0% - 백테스트 100% 동기화)
-        # =========================================================
-        current_open = df['open'].iloc[-1]
-        open_upper_threshold = prev_ema * 1.03  # +3.0% 상한선 (백테스트 check_deterministic_entry Step 4 동기화)
-
-        if current_open > open_upper_threshold:
-            self._log_rejection(
-                ticker, 
-                f"🚀 [Anti-Chasing] 이평선 괴리 과다 (Open ${current_open:.4f} > EMA+3.0% ${open_upper_threshold:.4f})", 
-                current_price
-            )
-            return None
-
-        # =========================================================
-        # 🔥 [Step 4.6] Activation & Peak-DD & 과열 종목 방지
-        # =========================================================
+        max_price_so_far = 0.0
         try:
             today_date = df.index[-1].normalize()
             past_data = df[df.index < today_date]
-            
+
             if not past_data.empty:
-                regular_session_past = past_data.between_time('04:00', '15:59')
+                # [ema_strategy.py:877-890 동기화] 다중 과거일 혼입 방지를 위해 직전 거래일(last_trade_date)로 먼저 한정
+                last_trade_date = past_data.index[-1].date()
+                last_day_data = past_data[past_data.index.date == last_trade_date]
+                regular_session_past = last_day_data.between_time('04:00', '15:59')
                 if not regular_session_past.empty:
                     ref_price = regular_session_past.iloc[-1]['close']
                 else:
-                    ref_price = past_data.iloc[-1]['close']
+                    ref_price = last_day_data.iloc[-1]['close']
             else:
                 today_candles = df[df.index >= today_date]
                 ref_price = today_candles.iloc[0]['close'] if not today_candles.empty else 0
@@ -347,35 +312,24 @@ class EmaStrategy:
             if ref_price > 0:
                 today_candles = df[df.index >= today_date]
                 today_so_far = today_candles[today_candles.index < df.index[-1]]
-                
+
                 if not today_so_far.empty:
                     max_price_so_far = today_so_far['close'].max()
                 else:
                     max_price_so_far = ref_price
 
                 max_change_ratio = (max_price_so_far - ref_price) / ref_price
-                
-                # 🛡️ 1. [Activation] 40% 이상 상승 이력 없으면 진입 금지
-                if max_change_ratio < self.activation_threshold:
+
+                # 🛡️ 1. [Activation] 백테스트 ema_strategy.py:659 동일 (실시간 틱 vs 분봉 종가 2% 오차 보정 -> 38%)
+                eff_activation = max(0.0, self.activation_threshold - 0.02)
+                if max_change_ratio < eff_activation:
                     self._log_rejection(
                         ticker,
-                        f"🛡️ [ACTIVATION] 상승 이력 부족 ({max_change_ratio*100:.1f}% < {self.activation_threshold*100:.0f}%)",
+                        f"🛡️ [ACTIVATION] 상승 이력 부족 ({max_change_ratio*100:.1f}% < {eff_activation*100:.0f}%)",
                         current_price
                     )
                     return None
 
-                # 🛡️ 1.1 [B4 Peak Drawdown] 당일 고점 대비 최소 10% 이상 정상 눌림목 확인
-                if self.enable_min_peak_drawdown_filter and max_price_so_far > 0:
-                    entry_price_for_filter = df['open'].iloc[-1]
-                    peak_dd_pct = (max_price_so_far - entry_price_for_filter) / max_price_so_far * 100.0
-                    if peak_dd_pct < self.min_peak_drawdown_pct:
-                        self._log_rejection(
-                            ticker,
-                            f"🚫 [PEAK-DD] 고점 눌림 부족 ({peak_dd_pct:.1f}% < {self.min_peak_drawdown_pct:.1f}%)",
-                            current_price
-                        )
-                        return None
-                
                 # 🛡️ 2. [Global Safety] 당일 과열 폭등 (500% 이상 시 영구 밴 등록)
                 if max_change_ratio >= self.max_daily_change:
                     self.banned_tickers.add(ticker)
@@ -398,7 +352,7 @@ class EmaStrategy:
             if recent_peak < prev_ema * 1.03:
                 self._log_rejection(ticker, f"모멘텀 부족 (최고점 {recent_peak:.4f} < EMA 3% {prev_ema*1.03:.4f})", current_price)
                 return None
-            
+
         # =========================================================
         # 5. 지지선 및 눌림목 조건 검사 (백테스트 ema_strategy.py 100% Parity)
         # =========================================================
@@ -407,9 +361,7 @@ class EmaStrategy:
         drop_cutoff = lower_bound * (1.0 - self.drop_slack)
 
         # 🛑 [Step 5.1] 지지선 하방 이탈 및 추세 붕괴(DROP) 확정 시 영구 밴 등록
-        # 대전제 준수: 모멘텀(Step 4.7 recent_peak >= EMA * 1.03)을 이미 통과한 상태에서만 
-        # 지지선(DropCutoff) 이탈 시 DROP 영구 밴 등록이 성립함 (백테스트 check_deterministic_entry Step 2 동기화)
-        # F1 Crash(-4%) 등 일시 스킵 필터보다 앞서 판정하여 붕괴 종목의 DROP 밴 누락을 원천 차단
+        # (PEAK-DD, Anti-Chasing, UPPER_WICK, F1 Crash 보다 앞서 판정하여 DROP 누락 방지)
         if prev_low < drop_cutoff or prev_close < drop_cutoff:
             self.banned_tickers.add(ticker)
             self._log_rejection(ticker, f"지지선 이탈 (Low {prev_low:.4f} < Bound {lower_bound:.4f})", current_price)
@@ -417,8 +369,41 @@ class EmaStrategy:
             self.logger.warning(f"🚫 [DROP-PERMANENT] {ticker} 지지선 붕괴(Low {prev_low:.4f} < Cutoff {drop_cutoff:.4f})로 당일 진입 영구 차단")
             return {'type': 'DROP', 'reason': 'Trend Broken'}
 
+        # 🛑 [Step 5.2] 눌림목 범위 벗어남 (Low > UpperBound)
+        if not (lower_bound <= prev_low <= upper_bound):
+            self._log_rejection(ticker, f"눌림목 범위 벗어남 (Low {prev_low:.4f} > Upper {upper_bound:.4f})", current_price)
+            return None
+
+        # 🛑 [Step 5.3] 지지선 위 종가 마감 실패 (Close <= EMA)
+        if prev_close <= prev_ema:
+            self._log_rejection(ticker, f"지지선 위 종가 마감 실패 (Close {prev_close:.4f} <= EMA {prev_ema:.4f})", current_price)
+            return None
+
+        # 🛑 [Step 5.4] 추격 매수 방지 (Anti-Chasing Logic: Open > EMA + 3.0% - 백테스트 Step 4 동기화)
+        current_open = df['open'].iloc[-1]
+        open_upper_threshold = prev_ema * 1.03
+        if current_open > open_upper_threshold:
+            self._log_rejection(
+                ticker,
+                f"🚀 [Anti-Chasing] 이평선 괴리 과다 (Open ${current_open:.4f} > EMA+3.0% ${open_upper_threshold:.4f})",
+                current_price
+            )
+            return None
+
+        # 🛡️ [Step 5.5] [B4 Peak Drawdown] 당일 고점 대비 최소 10% 이상 정상 눌림목 확인
+        if self.enable_min_peak_drawdown_filter and max_price_so_far > 0:
+            entry_price_for_filter = df['open'].iloc[-1]
+            peak_dd_pct = (max_price_so_far - entry_price_for_filter) / max_price_so_far * 100.0
+            if peak_dd_pct < self.min_peak_drawdown_pct:
+                self._log_rejection(
+                    ticker,
+                    f"🚫 [PEAK-DD] 고점 눌림 부족 ({peak_dd_pct:.1f}% < {self.min_peak_drawdown_pct:.1f}%)",
+                    current_price
+                )
+                return None
+
         # =========================================================
-        # 🛡️ [Step 5.2] F1 Crash Filter (5분 급락 방어: -4.0% 이하 차단)
+        # 🛡️ [Step 5.6] F1 Crash Filter (5분 급락 방어: -4.0% 이하 차단)
         # =========================================================
         if self.chg_5m_crash_filter_enabled:
             if len(df) >= 6:
@@ -433,15 +418,31 @@ class EmaStrategy:
                         )
                         return None
 
-        # 🛑 [Step 5.3] 눌림목 범위 벗어남 (Low > UpperBound)
-        if not (lower_bound <= prev_low <= upper_bound):
-            self._log_rejection(ticker, f"눌림목 범위 벗어남 (Low {prev_low:.4f} > Upper {upper_bound:.4f})", current_price)
-            return None
+        # =========================================================
+        # 🛡️ [Step 5.7] Upper Wick Filter (직전 완성봉 윗꼬리 검사)
+        # =========================================================
+        if self.upper_wick_filter_enabled:
+            upper_wick_pct = self.calculate_upper_wick_pct(
+                prev_open, prev_high, prev_low, prev_close
+            )
 
-        # 🛑 [Step 5.4] 지지선 위 종가 마감 실패 (Close <= EMA)
-        if prev_close <= prev_ema:
-            self._log_rejection(ticker, f"지지선 위 종가 마감 실패 (Close {prev_close:.4f} <= EMA {prev_ema:.4f})", current_price)
-            return None
+            if upper_wick_pct >= self.upper_wick_filter_threshold_pct:
+                candle_time = df.index[-2]
+                self._write_upper_wick_skip_log(
+                    decision_time=current_time,
+                    ticker=ticker,
+                    candle_time=candle_time,
+                    candle_open=prev_open,
+                    candle_high=prev_high,
+                    candle_low=prev_low,
+                    candle_close=prev_close,
+                    upper_wick_pct=upper_wick_pct,
+                    threshold_pct=self.upper_wick_filter_threshold_pct,
+                    action="SKIP",
+                    reason="SKIP_UPPER_WICK_FILTER"
+                )
+                self._log_rejection(ticker, f"🚫 [UPPER_WICK] 윗꼬리 과다 차단 ({upper_wick_pct:.2f}% >= {self.upper_wick_filter_threshold_pct:.2f}%)", current_price)
+                return None
 
         # ⚡ [BUY SIGNAL] 모든 조건 만족 시 매수 신호 생성
         self.logger.info(f"⚡ [BUY SIGNAL] {ticker} 조건 만족! (Data: {data_count} bars, EMA: ${prev_ema:.4f}, Price: ${df.iloc[-1]['open']:.4f})")

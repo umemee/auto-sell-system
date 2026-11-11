@@ -1049,6 +1049,19 @@ def main():
 
             def _execute_buy_flow(sym, sig, sel_exch):
                 sig_strat = sig.get('strategy_name', sig.get('strategy', 'EMA'))
+                sig_price = float(sig['price'])
+                sig_bar_hm = sig.get('bar_hm')
+
+                # 🛡️ [2026-11-11 리스크 필터 선행 검사] 금칙 시간대(09:15~09:30)/손절블랙리스트/주가대 해당 시
+                # Pre-Order Price Guard 나 Missed Bus 로 종목이 당일 영구 밴(ban_list)에 오르는 오작동 방지
+                is_blocked, block_reason = risk_filter.is_order_blocked(
+                    ticker=sym, price=sig_price, current_time_et=now,
+                    strategy=sig_strat, signal_bar_hm=sig_bar_hm
+                )
+                if is_blocked:
+                    logger.warning(f"🛑 [Risk Filter Blocked] {sym}: {block_reason}")
+                    return False
+
                 if not portfolio.has_open_slot(strategy=sig_strat):
                     logger.warning(f"🚌 [Missed Bus] {sym} ({sig_strat}) 진입 신호 왔으나 자리 없음 -> 영구 제외")
                     portfolio.ban_list.add(sym)      
@@ -1058,7 +1071,6 @@ def main():
                     save_state(portfolio.ban_list, active_candidates, risk_filter.loss_blacklist, portfolio=portfolio)
                     return False
                 
-                sig_price = float(sig['price'])
                 ask, bid, ask_vol, bid_vol = kis.get_market_spread(sym, exchange=sel_exch or "NAS")
                 if ask > 0 and bid > 0:
                     spread = (ask - bid) / ask * 100.0
@@ -1085,12 +1097,15 @@ def main():
                 sig['price'] = entry_price
                 sig['ticker'] = sym
 
-                is_blocked, block_reason = risk_filter.is_order_blocked(
-                    ticker=sym, price=entry_price, current_time_et=now, strategy=sig_strat
-                )
-                if is_blocked:
-                    logger.warning(f"🛑 [Risk Filter Blocked] {sym}: {block_reason}")
-                    return False
+                # 호가 조회 후 진입가가 주가대 필터($5~$10) 경계를 넘었을 수 있으므로 최종 재검사
+                if entry_price != sig_price:
+                    is_blocked2, block_reason2 = risk_filter.is_order_blocked(
+                        ticker=sym, price=entry_price, current_time_et=now,
+                        strategy=sig_strat, signal_bar_hm=sig_bar_hm
+                    )
+                    if is_blocked2:
+                        logger.warning(f"🛑 [Risk Filter Blocked] {sym}: {block_reason2}")
+                        return False
 
                 is_alpha_sig = (sig.get('strategy') == 'ALPHA' or sig.get('strategy_name') == 'ALPHA')
                 alpha_mode = getattr(Config, 'ALPHA_TRADING_MODE', 'PAPER').upper()
