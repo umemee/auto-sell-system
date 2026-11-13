@@ -122,11 +122,11 @@ class EmaStrategy:
             self.logger.error(f"⚠️ [UpperWick] CSV 로깅 실패 ({ticker}): {e}")
 
     def _log_rejection(self, ticker, reason, current_price):
-        """1분에 한 번만 거부 사유를 로그에 기록 (중복 방지)"""
+        """거부 사유 디버그 로깅 (1분 루프 지터 :05s->:02s 57초 간격 누락 방지를 위해 45초 쿨다운 적용)"""
         now = datetime.datetime.now()
         last_logged = self.log_throttle_map.get(ticker)
         
-        if last_logged is None or (now - last_logged).total_seconds() >= 60:
+        if last_logged is None or (now - last_logged).total_seconds() >= 45:
             self.debug_logger.debug(f"📉 [REJECT] {ticker} | Price: ${current_price:.4f} | Reason: {reason}")
             self.log_throttle_map[ticker] = now
         
@@ -286,6 +286,16 @@ class EmaStrategy:
         prev_low = df['low'].iloc[-2]
         prev_close = df['close'].iloc[-2]
         prev_ema = df['ema'].iloc[-2]
+
+        # 🛡️ [Logic 1] 최근 5개 완성봉 중 -15% 이상 단일 1분봉 급락 존재 시 진입 보류 (ema_strategy.py:631-637 패리티)
+        recent_5_bars = df.iloc[-6:-1]
+        if not recent_5_bars.empty:
+            valid_5 = recent_5_bars[recent_5_bars['open'] > 0]
+            if not valid_5.empty:
+                bar_changes = (valid_5['close'] - valid_5['open']) / valid_5['open']
+                if (bar_changes <= -0.15).any():
+                    self._log_rejection(ticker, "🛡️ [CRASH-15%] 최근 5분봉 내 단일 봉 -15% 이상 급락 이력", current_price)
+                    return None
         
         # =========================================================
         # 🛑 [Step 4.6] Activation(38% 보정) & 과열(500%) & DROP/진입 판정
@@ -344,9 +354,9 @@ class EmaStrategy:
             self.logger.error(f"⚠️ [Check Entry] 과열/눌림목 체크 중 오류: {e}")
 
         # =========================================================
-        # 🔥 [Step 4.7] 최근 10봉 내 3% 급등(모멘텀) 이력 확인
+        # 🔥 [Step 4.7] 최근 10봉(직전 11개 완성봉 포함: prev_idx-10 ~ prev_idx) 내 3% 급등(모멘텀) 이력 확인
         # =========================================================
-        recent_highs = df['high'].iloc[-11:-1]
+        recent_highs = df['high'].iloc[-12:-1]
         if not recent_highs.empty:
             recent_peak = recent_highs.max()
             if recent_peak < prev_ema * 1.03:
@@ -404,17 +414,19 @@ class EmaStrategy:
 
         # =========================================================
         # 🛡️ [Step 5.6] F1 Crash Filter (5분 급락 방어: -4.0% 이하 차단)
+        # (백테스트 ema_strategy.py:761과 동일하게 미완성 실시간가가 아닌 현재 봉 시가 df['open'].iloc[-1] 기준)
         # =========================================================
         if self.chg_5m_crash_filter_enabled:
             if len(df) >= 6:
                 price_5m_ago = df['close'].iloc[-6]
+                f1_ref_price = current_open if current_open > 0 else current_price
                 if price_5m_ago > 0:
-                    chg_5m = (current_price - price_5m_ago) / price_5m_ago
+                    chg_5m = (f1_ref_price - price_5m_ago) / price_5m_ago
                     if chg_5m <= self.chg_5m_crash_threshold:
                         self._log_rejection(
                             ticker,
                             f"🚫 [F1-CRASH] 5분 급락 차단 (chg_5m={chg_5m*100:.2f}% <= {self.chg_5m_crash_threshold*100:.1f}%)",
-                            current_price
+                            f1_ref_price
                         )
                         return None
 

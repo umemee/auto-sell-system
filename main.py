@@ -783,7 +783,8 @@ def main():
                 time.sleep(0.3)
                 continue
 
-            if now.second > 5:
+            # [2026-11-13] 1초 매도감시/네트워크 지터로 :06s 도달 시 해당 1분봉 전체가 누락되지 않도록 허용창(:02~:10s) 확보
+            if now.second > 10:
                 time.sleep(0.5)
                 continue
             
@@ -1326,6 +1327,10 @@ def main():
                             sig = strategy.check_entry(sym, df, now_time=datetime.datetime.now(pytz.timezone('America/New_York')))
 
                         if sig and isinstance(sig, dict) and sig.get('type') == 'WAIT_NEW_BAR':
+                            strategy.debug_logger.debug(
+                                f"⏳ [WAIT_NEW_BAR-SKIP] {sym} 새 1분봉 미도착으로 분 스킵 "
+                                f"(expected={sig.get('expected')}, latest={sig.get('latest')})"
+                            )
                             continue
 
                         if sig and sig.get('type') == 'BUY':
